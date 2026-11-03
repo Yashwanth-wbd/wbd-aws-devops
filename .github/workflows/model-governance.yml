@@ -1,0 +1,163 @@
+# Model governance: a retrained model reaches the "production" alias only after it passes the
+# thresholds in data/model-thresholds.yaml AND a WBD approver approves it.
+#
+#   schedule (hourly) / dispatch evaluate -> evaluate every new "candidate" version (eval service principal)
+#                                            pass -> tagged passed, a promote run is started per model
+#                                            fail -> tagged failed, candidate alias removed, warning; never promoted
+#   dispatch promote  -> job waits in environment <env>-model-promotion (WBD approver) -> alias "production" moves
+#   dispatch rollback -> same approval -> "production" goes back to the previous version
+#
+# Auth: Databricks workload identity federation with GitHub OIDC - no Databricks secrets in GitHub.
+# Repository variables (per env, upper case): DATABRICKS_HOST_<ENV>, DATABRICKS_EVAL_CLIENT_ID_<ENV>,
+# DATABRICKS_PROMOTE_CLIENT_ID_<ENV>, MODEL_CATALOG_<ENV>. Envs without DATABRICKS_HOST_<ENV> are skipped.
+name: model-governance
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+      action:
+        type: choice
+        options: [evaluate, promote, rollback]
+        default: evaluate
+      business_unit:
+        description: "Business unit (evaluate: or all)"
+        default: all
+        required: true
+      version:
+        description: "Model version (promote: required; rollback: optional, default previous_production_version)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environments: ${{ steps.t.outputs.environments }}
+    steps:
+      - id: t
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ inputs.action }}
+          IN_ENV: ${{ inputs.environment }}
+          HOSTS: ${{ toJSON(vars) }}
+        run: |
+          if [ "$EVENT" = schedule ]; then wanted='["dev","staging","prod"]'
+          elif [ "$ACTION" = evaluate ]; then wanted="[\"$IN_ENV\"]"
+          else wanted='[]'; fi
+          envs=$(jq -c --argjson w "$wanted" '. as $v | [$w[] | select(($v["DATABRICKS_HOST_" + ascii_upcase] // "") != "")]' <<< "$HOSTS")
+          echo "environments=$envs" | tee -a "$GITHUB_OUTPUT"
+
+  evaluate:
+    needs: targets
+    if: needs.targets.outputs.environments != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(needs.targets.outputs.environments) }}
+    env:
+      ENVIRONMENT: ${{ matrix.environment }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars[format('DATABRICKS_HOST_{0}', matrix.environment)] }}
+      DATABRICKS_CLIENT_ID: ${{ vars[format('DATABRICKS_EVAL_CLIENT_ID_{0}', matrix.environment)] }}
+      CATALOG: ${{ vars[format('MODEL_CATALOG_{0}', matrix.environment)] }}
+      BUSINESS_UNIT: ${{ inputs.business_unit || 'all' }}
+      VERSION: ${{ inputs.action == 'evaluate' && inputs.version || '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet -r scripts/requirements-model-governance.txt
+
+      - name: Evaluate candidates
+        id: eval
+        run: |
+          args=(--environment "$ENVIRONMENT" --catalog "$CATALOG" --business-unit "$BUSINESS_UNIT" --report model-evaluation.json
+                --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          [ -n "$VERSION" ] && args+=(--version "$VERSION")
+          python scripts/model_governance.py evaluate "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-evaluation-${{ matrix.environment }}-${{ github.run_id }}
+          path: model-evaluation.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Request promotion of passed models (each waits for the WBD approver)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PASSED: ${{ steps.eval.outputs.passed }}
+        run: |
+          jq -c '.[]' <<< "${PASSED:-[]}" | while read -r item; do
+            bu=$(jq -r .business_unit <<< "$item"); v=$(jq -r .version <<< "$item")
+            gh workflow run model-governance.yml --ref "$GITHUB_REF_NAME" -f environment="$ENVIRONMENT" \
+              -f action=promote -f business_unit="$bu" -f version="$v"
+            echo "promotion requested: $bu v$v -> approve in Actions (environment $ENVIRONMENT-model-promotion)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+  promote:
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'evaluate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}-model-promotion
+    # Per version, so a second pending approval for another version is never cancelled.
+    concurrency:
+      group: model-promotion-${{ inputs.environment }}-${{ inputs.business_unit }}-${{ inputs.action }}-${{ inputs.version || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      ACTION: ${{ inputs.action }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars[format('DATABRICKS_HOST_{0}', inputs.environment)] }}
+      DATABRICKS_CLIENT_ID: ${{ vars[format('DATABRICKS_PROMOTE_CLIENT_ID_{0}', inputs.environment)] }}
+      CATALOG: ${{ vars[format('MODEL_CATALOG_{0}', inputs.environment)] }}
+      BUSINESS_UNIT: ${{ inputs.business_unit }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check inputs
+        run: |
+          [ -n "$DATABRICKS_HOST" ] || { echo "::error::repository variable DATABRICKS_HOST_${ENVIRONMENT^^} is not set"; exit 1; }
+          [ "$BUSINESS_UNIT" != all ] || { echo "::error::$ACTION needs one business_unit"; exit 1; }
+          [ "$ACTION" != promote ] || [ -n "$VERSION" ] || { echo "::error::promote needs a version"; exit 1; }
+
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet -r scripts/requirements-model-governance.txt
+
+      - name: Move the production alias
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$ACTION" = promote ]; then
+            approvers=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+              --jq '[.[] | select(.state == "approved") | .user.login] | join(",")' 2>/dev/null || echo "")
+            python scripts/model_governance.py promote --environment "$ENVIRONMENT" --catalog "$CATALOG" \
+              --business-unit "$BUSINESS_UNIT" --version "$VERSION" --run-url "$run_url" --approved-by "${approvers:-unknown}"
+          else
+            args=(--environment "$ENVIRONMENT" --catalog "$CATALOG" --business-unit "$BUSINESS_UNIT" --run-url "$run_url")
+            [ -n "$VERSION" ] && args+=(--version "$VERSION")
+            python scripts/model_governance.py rollback "${args[@]}"
+          fi

@@ -1,0 +1,88 @@
+# Checks for every PR and every push to main, whatever changed.
+name: repo-checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Secret scan (same rules as scripts/secret-scan.ps1)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: "1"
+
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Semgrep OSS (app code)
+        run: |
+          if [ ! -d apps ]; then echo "::notice::no apps/ folder yet - SAST skipped"; exit 0; fi
+          # add actual value - WBD-approved rule packs
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:latest \
+            semgrep scan --config p/default --config p/python --config p/react --error --metrics=off apps
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: shellcheck scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Line endings (scripts, DAGs and the Lambda run on Linux)
+        run: |
+          bad=$(grep -rlU $'\r' scripts/*.sh scripts/*.py data infra/modules/data-trigger/lambda || true)
+          [ -z "$bad" ] || { echo "::error::CRLF line endings in: $bad"; exit 1; }
+
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: staging and prod use the same code as dev (scripts/sync-environments.ps1)
+        run: |
+          bad=0
+          for env in staging prod; do
+            [ -d "infra/environments/$env" ] || continue
+            short=$([ "$env" = staging ] && echo stg || echo prd)
+            for f in infra/environments/dev/*.tf infra/environments/dev/.terraform.lock.hcl infra/environments/dev/tests/*.tftest.hcl; do
+              rel=${f#infra/environments/dev/}
+              [ "$rel" = backend.tf ] && continue
+              cmp -s "$f" "infra/environments/$env/$rel" || { echo "::error file=infra/environments/$env/$rel::differs from dev"; bad=1; }
+            done
+            for f in infra/environments/"$env"/*.tf; do
+              n=$(basename "$f")
+              [ "$n" = backend.tf ] || [ -f "infra/environments/dev/$n" ] || { echo "::error file=$f::not in dev"; bad=1; }
+            done
+            for j in ecs/dev/*.json; do
+              sed "s/\"mmm-dev-/\"mmm-$short-/g; s/task definition mmm-dev-/task definition mmm-$short-/g" "$j" |
+                cmp -s - "ecs/$env/$(basename "$j")" || { echo "::error file=ecs/$env/$(basename "$j")::differs from ecs/dev"; bad=1; }
+            done
+          done
+          [ "$bad" = 0 ] || { echo "Run .\\scripts\\sync-environments.ps1 and commit the result."; exit 1; }
+          echo "staging and prod match dev"
+
+      - name: ECS templates
+        run: |
+          for f in ecs/*/*.json; do
+            env=$(basename "$(dirname "$f")") svc=$(basename "$f" .json)
+            short=$(jq -rn --arg e "$env" '{dev:"dev",staging:"stg",prod:"prd"}[$e]')
+            jq -e --arg fam "mmm-$short-$svc" '.family == $fam and (.repository | startswith("mmm/")) and (.container | type == "object")' "$f" > /dev/null \
+              || { echo "::error file=$f::family must be mmm-$short-$svc, repository mmm/*, container an object"; exit 1; }
+          done
+          echo "ECS templates OK"

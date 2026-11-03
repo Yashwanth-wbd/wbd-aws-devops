@@ -1,0 +1,52 @@
+# Reusable: plan + apply one environment behind its GitHub Environment gate (called by terraform.yml).
+name: terraform-apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      terraform_version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+    defaults:
+      run:
+        working-directory: infra/environments/${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: tf-apply-${{ github.run_id }}
+
+      - run: terraform init -no-color
+
+      - name: plan
+        run: |
+          terraform plan -no-color -lock-timeout=10m -out=tfplan | tee plan.txt
+          { echo "### ${{ inputs.environment }}"; grep -E '^(Plan:|No changes\.)' plan.txt || true; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: apply
+        run: terraform apply -no-color -lock-timeout=10m tfplan

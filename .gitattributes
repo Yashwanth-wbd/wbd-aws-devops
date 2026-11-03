@@ -1,0 +1,10 @@
+* text=auto
+
+# Run inside Linux containers and GitHub runners
+*.sh  text eol=lf
+*.py  text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.js  text eol=lf
+
+*.ps1 text eol=crlf

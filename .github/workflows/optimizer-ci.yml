@@ -1,0 +1,30 @@
+name: optimizer-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/optimizer-worker/**
+      - .github/workflows/optimizer-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/optimizer-worker/**
+      - .github/workflows/optimizer-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: optimizer-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/_python-service-ci.yml
+    with:
+      app_dir: apps/optimizer-worker
+      repository: mmm/optimizer-worker

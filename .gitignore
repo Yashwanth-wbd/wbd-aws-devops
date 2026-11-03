@@ -1,0 +1,49 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Provider lock files are committed for root stacks (bootstrap, environments) only
+infra/modules/**/.terraform.lock.hcl
+
+# Local-only variable files that could hold secrets (committed tfvars hold placeholders only)
+*.auto.tfvars
+secrets.tfvars
+*.secret.tfvars
+
+# Credentials and env files
+.env
+.env.*
+*.pem
+*.key
+credentials
+.aws/
+
+# Python / Node
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+coverage/
+
+# Scanner output
+results.sarif
+checkov-report.*
+trivy-report.*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

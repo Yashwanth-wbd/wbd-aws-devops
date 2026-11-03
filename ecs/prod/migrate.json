@@ -1,0 +1,11 @@
+{
+  "//": "Merged over the Terraform task definition mmm-prd-migrate by scripts/ecs-deploy.sh. Runs the API image once per deploy (scripts/run-migration.sh), as DB user mmm_migrator.",
+  "family": "mmm-prd-migrate",
+  "repository": "mmm/api",
+  "container": {
+    "//command": "add actual value - migration command of apps/api (dev team)",
+    "command": ["alembic", "upgrade", "head"],
+    "entryPoint": null,
+    "stopTimeout": 30
+  }
+}

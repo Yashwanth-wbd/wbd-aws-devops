@@ -1,0 +1,324 @@
+# Deploys application images to ECS (and, for releases, the frontend).
+#
+#   api-ci / optimizer-ci finished on main -> dev      image sha-<7char> (only the component that was built)
+#   git tag vX.Y.Z-rcN                     -> staging  image copied from dev ECR,     tagged vX.Y.Z-rcN
+#   git tag vX.Y.Z                         -> prod     image copied from staging ECR, tagged vX.Y.Z (needs the rc on the same commit)
+#   manual dispatch                        -> redeploy an image already in that environment's ECR (rollback)
+#
+# One job per run does everything after the approval gate: promote image -> (prod) RDS snapshot ->
+# migration task -> new task definitions -> wait for stable -> smoke test -> frontend -> release record.
+# Any failure rolls the services (and frontend) back to the revisions that were running before.
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [api-ci, optimizer-ci]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+      image_tag:
+        description: "Image tag already in that environment's ECR (dev: sha-<7char>, staging: vX.Y.Z-rcN, prod: vX.Y.Z). Empty = the tag you run this on."
+        type: string
+        required: false
+      components:
+        description: What to deploy
+        type: choice
+        options: [all, api, workers]
+        default: all
+      run_migrations:
+        description: Run DB migrations first (switch off when rolling back to an older version)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  resolve:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      version: ${{ steps.r.outputs.version }}
+      commit: ${{ steps.r.outputs.commit }}
+      components: ${{ steps.r.outputs.components }}
+      promote: ${{ steps.r.outputs.promote }}
+      frontend: ${{ steps.r.outputs.frontend }}
+      migrations: ${{ steps.r.outputs.migrations }}
+    steps:
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          IN_ENV: ${{ inputs.environment }}
+          IN_TAG: ${{ inputs.image_tag }}
+          IN_COMPONENTS: ${{ inputs.components }}
+          IN_MIGRATIONS: ${{ inputs.run_migrations }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          rc='^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
+          rel='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          promote=false frontend=false
+          case "$EVENT" in
+            workflow_run)
+              environment=dev commit="$RUN_SHA" version="sha-${RUN_SHA::7}"
+              if [ "$RUN_NAME" = "api-ci" ]; then components=api migrations=true; else components=workers migrations=false; fi ;;
+            push)
+              commit="$GITHUB_SHA" version="$REF_NAME" components=all migrations=true promote=true frontend=true
+              if   [[ "$REF_NAME" =~ $rc  ]]; then environment=staging
+              elif [[ "$REF_NAME" =~ $rel ]]; then environment=prod
+              else echo "::error::$REF_NAME is not vX.Y.Z-rcN or vX.Y.Z"; exit 1; fi ;;
+            workflow_dispatch)
+              environment="$IN_ENV" commit="$GITHUB_SHA" migrations="$IN_MIGRATIONS"
+              components="$IN_COMPONENTS"
+              if [ -n "$IN_TAG" ]; then version="$IN_TAG"
+              elif [ "$environment" = dev ]; then version="sha-${GITHUB_SHA::7}"
+              else version="$REF_NAME"; fi
+              if [ "$environment" = prod ] && { [ "$REF_TYPE" != tag ] || ! [[ "$version" =~ $rel ]]; }; then
+                echo "::error::prod only deploys release tags: run this workflow on a vX.Y.Z tag"; exit 1
+              fi ;;
+          esac
+          [ "$components" = all ] && components="api workers"
+          {
+            echo "environment=$environment"; echo "version=$version"; echo "commit=$commit"
+            echo "components=$components"; echo "promote=$promote"; echo "frontend=$frontend"; echo "migrations=$migrations"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  frontend:
+    needs: resolve
+    if: needs.resolve.outputs.frontend == 'true'
+    uses: ./.github/workflows/frontend-ci.yml
+    with:
+      ref: ${{ needs.resolve.outputs.commit }}
+
+  deploy:
+    needs: [resolve, frontend]
+    if: always() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.frontend.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: ${{ needs.resolve.outputs.environment }}
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: deploy-${{ needs.resolve.outputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      COMMIT: ${{ needs.resolve.outputs.commit }}
+      COMPONENTS: ${{ needs.resolve.outputs.components }}
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+      REGISTRY: ${{ vars.ECR_REGISTRY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Prepare
+        run: |
+          echo "STATE=$RUNNER_TEMP/deploy-state" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/deploy-state"
+          prefix="${CLUSTER%-ecs}"
+          echo "PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "SSM_PREFIX=/mmm/${prefix#mmm-}" >> "$GITHUB_ENV"
+          [ -d "ecs/$ENVIRONMENT" ] || { echo "::error::ecs/$ENVIRONMENT templates missing"; exit 1; }
+
+      - name: Change ticket on the release tag (prod)
+        if: needs.resolve.outputs.environment == 'prod' && github.event_name == 'push'
+        env:
+          # add actual value - WBD change-ticket format (ServiceNow CHG number assumed)
+          PATTERN: ${{ vars.CHANGE_TICKET_PATTERN || 'CHG[0-9]{7}' }}
+        run: |
+          git fetch --force origin "refs/tags/$VERSION:refs/tags/$VERSION"
+          msg=$(git tag -l --format='%(contents)' "$VERSION")
+          ticket=$(grep -oE "$PATTERN" <<< "$msg" | head -n 1 || true)
+          [ -n "$ticket" ] || { echo "::error::annotate the tag with the change ticket: git tag -a $VERSION -m \"<ticket> ...\""; exit 1; }
+          echo "CHANGE_TICKET=$ticket" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------- promotion (release tags)
+      - name: Source registry login (previous environment)
+        if: needs.resolve.outputs.promote == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.SOURCE_ECR_READ_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: promote-src-${{ github.run_id }}
+
+      - name: Find source images
+        if: needs.resolve.outputs.promote == 'true'
+        env:
+          SOURCE_REGISTRY: ${{ vars.SOURCE_ECR_REGISTRY }}
+        run: |
+          scripts/promote-images.sh login "$SOURCE_REGISTRY"
+          if [ "$ENVIRONMENT" = prod ]; then
+            git fetch --force --tags origin
+            rc=$(scripts/promote-images.sh find-rc "$VERSION" "$COMMIT")
+            api_src="$rc" opt_src="$rc"
+          else
+            api_src=$(scripts/promote-images.sh find-build mmm/api apps/api "$COMMIT")
+            opt_src=$(scripts/promote-images.sh find-build mmm/optimizer-worker apps/optimizer-worker "$COMMIT")
+          fi
+          printf 'mmm/api\t%s\nmmm/optimizer-worker\t%s\n' "$api_src" "$opt_src" | tee "$STATE/sources.tsv"
+
+      - name: Target registry login
+        if: needs.resolve.outputs.promote == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: promote-dst-${{ github.run_id }}
+
+      - name: Copy images (same digest, no rebuild)
+        if: needs.resolve.outputs.promote == 'true'
+        env:
+          SOURCE_REGISTRY: ${{ vars.SOURCE_ECR_REGISTRY }}
+        run: |
+          scripts/promote-images.sh login "$REGISTRY"
+          while IFS=$'\t' read -r repo src <&3; do
+            scripts/promote-images.sh copy "$SOURCE_REGISTRY/$repo:$src" "$REGISTRY/$repo:$VERSION" > /dev/null
+          done 3< "$STATE/sources.tsv"
+
+      # ---------------------------------------------------------------- deploy
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: deploy-${{ github.run_id }}
+
+      - name: Check images and remember running revisions
+        run: |
+          : > "$STATE/services.tsv"
+          for c in $COMPONENTS; do
+            case "$c" in
+              api)     repo=mmm/api;              services="api" ;;
+              workers) repo=mmm/optimizer-worker; services="whatif-worker optimizer-worker" ;;
+            esac
+            digest=$(scripts/ecs-deploy.sh digest "$repo" "$VERSION") || { echo "::error::$repo:$VERSION not in $REGISTRY"; exit 1; }
+            printf '%s\t%s\n' "$repo" "$digest" >> "$STATE/digests.tsv"
+            for s in $services; do
+              printf '%s\t%s\t%s\n' "$s" "$repo" "$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$s")" >> "$STATE/services.tsv"
+            done
+          done
+          column -t "$STATE/services.tsv"
+
+      - name: RDS snapshot before migration (prod)
+        if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(needs.resolve.outputs.components, 'api')
+        run: |
+          id="$PREFIX-predeploy-${VERSION//./-}-${GITHUB_RUN_ID}"
+          aws rds create-db-snapshot --db-instance-identifier "$PREFIX-pg" --db-snapshot-identifier "$id" \
+            --tags "Key=release,Value=$VERSION" "Key=github_run,Value=$GITHUB_RUN_ID" > /dev/null
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$id"
+          echo "SNAPSHOT=$id" >> "$GITHUB_ENV"
+
+      - name: Database migration
+        if: needs.resolve.outputs.migrations == 'true' && contains(needs.resolve.outputs.components, 'api')
+        env:
+          SUBNETS: ${{ vars.APP_SUBNET_IDS }}
+          SG: ${{ vars.DATA_CLIENTS_SG_ID }}
+        run: |
+          td=$(scripts/ecs-deploy.sh render "ecs/$ENVIRONMENT/migrate.json" "$REGISTRY/mmm/api:$VERSION" "$VERSION")
+          scripts/run-migration.sh "$CLUSTER" "$td" "$SUBNETS" "$SG"
+
+      - name: Deploy services
+        id: services
+        run: |
+          echo "started=true" >> "$GITHUB_OUTPUT"
+          while IFS=$'\t' read -r s repo previous <&3; do
+            td=$(scripts/ecs-deploy.sh render "ecs/$ENVIRONMENT/$s.json" "$REGISTRY/$repo:$VERSION" "$VERSION")
+            printf '%s\t%s\t%s\n' "$s" "$previous" "$td" >> "$STATE/deployed.tsv"
+            scripts/ecs-deploy.sh update "$CLUSTER" "$PREFIX-$s" "$td"
+          done 3< "$STATE/services.tsv"
+
+      - name: Smoke test
+        if: contains(needs.resolve.outputs.components, 'api')
+        env:
+          BASE_URL: ${{ vars.SMOKE_BASE_URL || vars.APP_URL }}
+          EXPECT: ${{ vars.SMOKE_CHECK_VERSION == 'true' && needs.resolve.outputs.version || '' }}
+        run: scripts/smoke.sh "$BASE_URL" "$EXPECT"
+
+      # ---------------------------------------------------------------- frontend (release tags)
+      - if: needs.resolve.outputs.frontend == 'true' && needs.frontend.outputs.built == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/dist
+
+      - name: Publish frontend
+        id: frontend
+        if: needs.resolve.outputs.frontend == 'true' && needs.frontend.outputs.built == 'true'
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET }}
+          KVS: ${{ vars.FRONTEND_KVS_ARN }}
+          BASE_URL: ${{ vars.SMOKE_BASE_URL || vars.APP_URL }}
+        run: |
+          previous=$(scripts/deploy-frontend.sh "${RUNNER_TEMP}/dist" "$BUCKET" "$VERSION" "$KVS" "$SSM_PREFIX")
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$BASE_URL/" || echo 000)
+          [ "$code" = "200" ] || { echo "::error::frontend $BASE_URL/ returned $code"; exit 1; }
+
+      # ---------------------------------------------------------------- rollback
+      - name: Roll back
+        if: failure() && steps.services.outputs.started == 'true'
+        env:
+          KVS: ${{ vars.FRONTEND_KVS_ARN }}
+          PREVIOUS_FRONTEND: ${{ steps.frontend.outputs.previous }}
+        run: |
+          if [ -n "$PREVIOUS_FRONTEND" ] && [ "$PREVIOUS_FRONTEND" != none ]; then
+            scripts/deploy-frontend.sh switch "$KVS" "$PREVIOUS_FRONTEND" || true
+          fi
+          [ -f "$STATE/deployed.tsv" ] || exit 0
+          rc=0
+          while IFS=$'\t' read -r s previous _ <&3; do
+            now=$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$s")
+            [ "$now" = "$previous" ] && { echo "$s already on $previous"; continue; }
+            scripts/ecs-deploy.sh update "$CLUSTER" "$PREFIX-$s" "$previous" || rc=1
+          done 3< "$STATE/deployed.tsv"
+          echo "::warning::Rolled back to the previous revisions. Migrations are not reverted (expand-then-contract)."
+          exit $rc
+
+      # ---------------------------------------------------------------- release record
+      - name: Release record
+        if: always() && needs.resolve.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          STATE="${STATE:-$RUNNER_TEMP/deploy-state}"; mkdir -p "$STATE"
+          approvers=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' 2>/dev/null || echo "")
+          jq -n --arg env "$ENVIRONMENT" --arg version "$VERSION" --arg commit "$COMMIT" --arg outcome "$OUTCOME" \
+            --arg actor "$GITHUB_TRIGGERING_ACTOR" --arg approvers "${approvers:-none}" \
+            --arg ticket "${CHANGE_TICKET:-}" --arg snapshot "${SNAPSHOT:-}" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --rawfile digests <(cat "$STATE/digests.tsv" 2>/dev/null || true) \
+            --rawfile deployed <(cat "$STATE/deployed.tsv" 2>/dev/null || true) '
+            { environment: $env, version: $version, commit: $commit, outcome: $outcome,
+              triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, rds_snapshot: $snapshot, run: $run,
+              images:   [$digests  | split("\n")[] | select(length > 0) | split("\t") | { repository: .[0], digest: .[1] }],
+              services: [$deployed | split("\n")[] | select(length > 0) | split("\t") | { service: .[0], previous: .[1], deployed: .[2] }] }
+          ' | tee "$STATE/release-record.json"
+          {
+            echo "### Deploy \`$VERSION\` to $ENVIRONMENT: $OUTCOME"
+            echo; echo '```json'; cat "$STATE/release-record.json"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - if: always() && needs.resolve.result == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-record-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/deploy-state/release-record.json
+          retention-days: 90
+          if-no-files-found: ignore

@@ -1,0 +1,210 @@
+# Terraform for infra/environments/<env>.
+#   PR:        fmt, validate, tflint, Checkov, then plan for dev and staging (prod is never planned from PR code)
+#   main:      apply dev -> (approval) staging -> (approval) prod
+#   nightly:   drift check (plan -detailed-exitcode) for every environment, read-only role
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - infra/**
+      - .tflint.hcl
+      - scripts/db-bootstrap.py
+      - scripts/platform-check.sh
+      - .github/workflows/terraform.yml
+      - .github/workflows/_terraform-apply.yml
+  push:
+    branches: [main]
+    paths:
+      - infra/**
+      - .tflint.hcl
+      - scripts/db-bootstrap.py
+      - scripts/platform-check.sh
+      - .github/workflows/terraform.yml
+      - .github/workflows/_terraform-apply.yml
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      envs: ${{ steps.e.outputs.envs }}
+      pr_plan: ${{ steps.e.outputs.pr_plan }}
+      all: ${{ steps.e.outputs.all }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: e
+        run: |
+          envs=$(for d in infra/environments/*/backend.tf; do basename "$(dirname "$d")"; done | tr '\n' ' ')
+          to_json() { jq -cn --arg e "$1" '[$e | split(" ")[] | select(length > 0) | { env: ., role_var: ("TF_PLAN_ROLE_ARN_" + ascii_upcase) }]'; }
+          {
+            echo "envs=$envs"
+            echo "all=$(to_json "$envs")"
+            echo "pr_plan=$(to_json "$(tr ' ' '\n' <<< "$envs" | grep -vx prod | tr '\n' ' ')")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Environments: $envs"
+
+  static:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: fmt
+        run: terraform fmt -check -recursive -diff infra
+
+      - name: validate (bootstrap + every environment; modules are validated through them)
+        run: |
+          for d in infra/bootstrap infra/environments/*/; do
+            echo "::group::$d"
+            terraform -chdir="$d" init -backend=false -no-color > /dev/null
+            terraform -chdir="$d" validate -no-color
+            echo "::endgroup::"
+          done
+
+      - name: mock plan (offline, mocked AWS; tests/mock-plan.tftest.hcl)
+        run: |
+          for d in infra/environments/*/; do
+            echo "::group::$d"
+            terraform -chdir="$d" test -no-color
+            echo "::endgroup::"
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+      - name: tflint
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl" --chdir infra --format compact
+
+      - name: Checkov
+        run: pipx run checkov -d infra --framework terraform --quiet --compact --skip-path .terraform
+
+  plan:
+    if: github.event_name == 'pull_request' && needs.setup.outputs.pr_plan != '[]'
+    needs: [setup, static]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.pr_plan) }}
+    concurrency:
+      group: terraform-plan-${{ matrix.env }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Role configured?
+        id: role
+        env:
+          ROLE: ${{ vars[matrix.role_var] }}
+        run: |
+          if [ -z "$ROLE" ]; then echo "::notice::${{ matrix.role_var }} not set - plan skipped"; echo "ok=false" >> "$GITHUB_OUTPUT"
+          else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.role.outputs.ok == 'true'
+        uses: actions/checkout@v5
+      - if: steps.role.outputs.ok == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - if: steps.role.outputs.ok == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars[matrix.role_var] }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: tf-plan-${{ github.run_id }}
+
+      - name: plan
+        if: steps.role.outputs.ok == 'true'
+        working-directory: infra/environments/${{ matrix.env }}
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -no-color > /dev/null
+          terraform plan -no-color -lock-timeout=5m -out=tfplan | tee plan.txt
+          {
+            echo "### terraform plan: ${{ matrix.env }}"
+            grep -E '^(Plan:|No changes\.)' plan.txt || true
+            echo; echo "<details><summary>Full plan</summary>"; echo; echo '```'
+            terraform show -no-color tfplan | head -c 900000
+            echo '```'; echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply-dev:
+    if: github.event_name == 'push' && contains(needs.setup.outputs.envs, 'dev')
+    needs: [setup, static]
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: dev
+      terraform_version: "1.17.1"
+
+  apply-staging:
+    if: github.event_name == 'push' && contains(needs.setup.outputs.envs, 'staging')
+    needs: [setup, apply-dev]
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: staging
+      terraform_version: "1.17.1"
+
+  apply-prod:
+    if: github.event_name == 'push' && contains(needs.setup.outputs.envs, 'prod')
+    needs: [setup, apply-staging]
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: prod
+      terraform_version: "1.17.1"
+
+  drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.all) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars[matrix.role_var] }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: tf-drift-${{ github.run_id }}
+
+      - name: drift check
+        working-directory: infra/environments/${{ matrix.env }}
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          terraform init -no-color > /dev/null
+          set +e
+          terraform plan -no-color -lock=false -detailed-exitcode > plan.txt
+          code=$?
+          set -e
+          case $code in
+            0) echo "${{ matrix.env }}: no drift" | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            2) echo "::error::${{ matrix.env }}: drift detected - $(grep -E '^Plan:' plan.txt)"
+               { echo "### Drift in ${{ matrix.env }}"; echo '```'; grep -E '^\s+[#~+-]|^Plan:' plan.txt | head -n 200; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+               exit 1 ;;
+            *) cat plan.txt; exit 1 ;;
+          esac

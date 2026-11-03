@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wbd.example/mmm/run-manifest.schema.json",
+  "title": "MMM data run manifest",
+  "description": "Lineage record of one mmm_ingest run, written to s3://<results>/run-manifests/<dag_id>/<run_id>.json",
+  "type": "object",
+  "required": ["schema_version", "dag_id", "run_id", "environment", "trigger", "business_unit", "started_at", "finished_at", "tasks", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "dag_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "environment": { "enum": ["dev", "staging", "prod"] },
+    "trigger": { "enum": ["s3", "ondemand", "manual"] },
+    "business_unit": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket": { "type": ["string", "null"] },
+        "key": { "type": ["string", "null"] },
+        "etag": { "type": ["string", "null"] }
+      }
+    },
+    "requested_by": { "type": ["string", "null"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "databricks_runs": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "quality_results_uri": { "type": ["string", "null"] },
+    "status": { "enum": ["success", "skipped", "failed"] }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "//": "Merged over the Terraform task definition mmm-stg-optimizer-worker by scripts/ecs-deploy.sh. JOB_TYPE=optimize is set by Terraform.",
+  "family": "mmm-stg-optimizer-worker",
+  "repository": "mmm/optimizer-worker",
+  "container": {
+    "//command": "add actual value - worker start command of apps/optimizer-worker (dev team)",
+    "command": ["python", "-m", "worker"],
+    "entryPoint": null,
+    "stopTimeout": 120
+  }
+}

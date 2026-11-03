@@ -1,0 +1,172 @@
+# Data-team pipeline: Airflow DAGs, requirements.txt and data-quality suites -> MWAA.
+#
+#   pull request touching data/**   -> validate only (lint, DAG import test, manifest schema, thresholds)
+#   merge to main                   -> validate, publish to dev
+#   git tag data-vX.Y.Z-rcN         -> publish to staging (EY delivery lead approves)
+#   git tag data-vX.Y.Z             -> publish to prod (WBD approver); needs an rc tag on the same commit
+#
+# The data team never uploads to MWAA by hand. Databricks jobs and dbt are deployed by the data
+# team's own Databricks pipeline (Databricks Asset Bundles) once they provide it.
+name: data
+
+on:
+  pull_request:
+    paths: ["data/**", "scripts/model_governance.py", ".github/workflows/data.yml"]
+  push:
+    branches: [main]
+    paths: ["data/**", ".github/workflows/data.yml"]
+    tags: ["data-v*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Republish this ref to (prod only from a data-vX.Y.Z tag)"
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Airflow (same version and constraints as MWAA)
+        run: |
+          read -r af py < <(grep -oE 'constraints-[0-9.]+/constraints-[0-9.]+' data/requirements.txt | sed -E 's#constraints-([0-9.]+)/constraints-([0-9.]+)#\1 \2#')
+          [ -n "$af" ] || { echo "::error file=data/requirements.txt::first line must be the Airflow constraints URL"; exit 1; }
+          url="https://raw.githubusercontent.com/apache/airflow/constraints-$af/constraints-$py.txt"
+          pip install --quiet "apache-airflow==$af" -r data/requirements.txt pytest jsonschema ruff -c "$url"
+          echo "AIRFLOW_HOME=$RUNNER_TEMP/airflow" >> "$GITHUB_ENV"
+
+      - name: Lint (ruff)
+        run: ruff check --select E,F,W,B,I --ignore E501 --target-version py311 data scripts/model_governance.py
+
+      - name: DAG import test and run-manifest schema
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+          AIRFLOW__CORE__UNIT_TEST_MODE: "True"
+        run: |
+          airflow db migrate > /dev/null
+          pytest -q data/tests
+
+      - name: Model thresholds and quality suites
+        run: |
+          python scripts/model_governance.py --thresholds data/model-thresholds.yaml check-thresholds
+          for f in data/quality/*.json data/schemas/*.json; do jq -e . "$f" > /dev/null || { echo "::error file=$f::invalid JSON"; exit 1; }; done
+
+  resolve:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_ENV: ${{ inputs.environment }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          rc='^data-v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
+          rel='^data-v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ "$EVENT" = workflow_dispatch ]; then environment="$IN_ENV"
+          elif [ "$REF_TYPE" = branch ]; then environment=dev
+          elif [[ "$REF_NAME" =~ $rc ]]; then environment=staging
+          elif [[ "$REF_NAME" =~ $rel ]]; then environment=prod
+          else echo "::error::$REF_NAME is not data-vX.Y.Z-rcN or data-vX.Y.Z"; exit 1; fi
+
+          if [ "$environment" = prod ]; then
+            [[ "$REF_TYPE" = tag && "$REF_NAME" =~ $rel ]] || { echo "::error::prod only from a data-vX.Y.Z tag"; exit 1; }
+            git tag --points-at "$GITHUB_SHA" | grep -qE "^${REF_NAME}-rc[0-9]+$" \
+              || { echo "::error::$REF_NAME: no ${REF_NAME}-rcN tag on this commit - release what staging tested"; exit 1; }
+          fi
+          version=$([ "$REF_TYPE" = tag ] && echo "$REF_NAME" || echo "data-sha-${GITHUB_SHA::7}")
+          { echo "environment=$environment"; echo "version=$version"; } | tee -a "$GITHUB_OUTPUT"
+
+  publish:
+    needs: [validate, resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: ${{ needs.resolve.outputs.environment }}
+    concurrency:
+      group: data-publish-${{ needs.resolve.outputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ needs.resolve.outputs.environment }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      MWAA_BUCKET: ${{ vars.MWAA_BUCKET }}
+      MWAA_ENVIRONMENT: ${{ vars.MWAA_ENVIRONMENT }}
+      QUALITY_BUCKET: ${{ vars.QUALITY_BUCKET }}
+    steps:
+      - name: Data platform enabled?
+        id: on
+        run: |
+          if [ -z "$MWAA_BUCKET" ] || [ -z "$MWAA_ENVIRONMENT" ]; then
+            echo "::notice::$ENVIRONMENT has no MWAA_BUCKET/MWAA_ENVIRONMENT variables (enable_data_platform = false) - nothing to publish"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.on.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+
+      - if: steps.on.outputs.enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: data-${{ github.run_id }}
+
+      # Requirements first: new DAGs may import new packages. MWAA rolls back a failed update itself.
+      - name: requirements.txt (update MWAA only when it changed)
+        if: steps.on.outputs.enabled == 'true'
+        run: |
+          sha=$(sha256sum data/requirements.txt | cut -d' ' -f1)
+          current=$(aws s3api head-object --bucket "$MWAA_BUCKET" --key requirements.txt --query Metadata.sha256 --output text 2>/dev/null || echo none)
+          path=$(aws mwaa get-environment --name "$MWAA_ENVIRONMENT" --query 'Environment.RequirementsS3Path' --output text)
+          if [ "$current" = "$sha" ] && [ "$path" = requirements.txt ]; then echo "requirements.txt unchanged"; exit 0; fi
+
+          vid=$(aws s3api put-object --bucket "$MWAA_BUCKET" --key requirements.txt --body data/requirements.txt \
+            --metadata "sha256=$sha,version=$VERSION" --query VersionId --output text)
+          aws mwaa update-environment --name "$MWAA_ENVIRONMENT" \
+            --requirements-s3-path requirements.txt --requirements-s3-object-version "$vid" > /dev/null
+          echo "MWAA updating with requirements.txt version $vid (10-30 min)"
+          for _ in $(seq 1 120); do
+            sleep 30
+            status=$(aws mwaa get-environment --name "$MWAA_ENVIRONMENT" --query Environment.Status --output text)
+            case "$status" in
+              AVAILABLE) echo "MWAA available"; exit 0 ;;
+              UPDATE_FAILED | UNAVAILABLE) echo "::error::MWAA update $status - see the MWAA console / LastUpdate.Error (MWAA kept the previous requirements)"; exit 1 ;;
+            esac
+          done
+          echo "::error::MWAA still updating after 60 min"; exit 1
+
+      - name: DAGs and quality suites
+        if: steps.on.outputs.enabled == 'true'
+        run: |
+          aws s3 sync data/dags "s3://$MWAA_BUCKET/dags/" --delete --exclude "*__pycache__*" --no-progress
+          aws s3 sync data/quality "s3://$QUALITY_BUCKET/suites/" --delete --exclude "*.md" --no-progress
+          jq -n --arg v "$VERSION" --arg c "$GITHUB_SHA" --arg a "$GITHUB_TRIGGERING_ACTOR" \
+            --arg r "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{version: $v, commit: $c, published_by: $a, run: $r}' > release.json
+          aws s3 cp release.json "s3://$MWAA_BUCKET/release.json" --no-progress
+          {
+            echo "### Data release \`$VERSION\` published to $ENVIRONMENT"
+            echo; echo '```json'; cat release.json; echo '```'
+            echo "MWAA picks up DAG changes within a few minutes."
+          } >> "$GITHUB_STEP_SUMMARY"

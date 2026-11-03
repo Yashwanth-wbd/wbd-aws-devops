@@ -1,0 +1,41 @@
+# Week-1 acceptance thresholds for retrained media-mix models (scripts/model_governance.py).
+# A candidate is promoted only if EVERY metric passes AND the named WBD approver approves the
+# <env>-model-promotion GitHub Environment. A metric missing from the MLflow run fails the check.
+# Placeholder values until WBD and EY sign them off (docs/01).
+
+# Unity Catalog model name; {catalog} = MODEL_CATALOG_<ENV>, {business_unit} = key below
+model_name: "{catalog}.models.mmm_{business_unit}"
+candidate_alias: candidate
+production_alias: production
+
+business_units:
+  usnetworks:
+    metrics:
+      # add actual value
+      holdout_mape: { max: 0.15 }
+      # add actual value
+      r_squared: { min: 0.80 }
+      # add actual value
+      max_rhat: { max: 1.05 }
+      # add actual value
+      negative_contribution_channels: { max: 0 }
+  streaming:
+    metrics:
+      # add actual value
+      holdout_mape: { max: 0.15 }
+      # add actual value
+      r_squared: { min: 0.80 }
+      # add actual value
+      max_rhat: { max: 1.05 }
+      # add actual value
+      negative_contribution_channels: { max: 0 }
+  theatrical:
+    metrics:
+      # add actual value
+      holdout_mape: { max: 0.20 }
+      # add actual value
+      r_squared: { min: 0.75 }
+      # add actual value
+      max_rhat: { max: 1.05 }
+      # add actual value
+      negative_contribution_channels: { max: 0 }

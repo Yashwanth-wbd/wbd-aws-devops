@@ -1,0 +1,4 @@
+# scripts/model_governance.py (model-governance.yml). MLflow client only; no training libraries.
+mlflow-skinny>=2.16,<3
+databricks-sdk>=0.40,<1
+PyYAML>=6,<7

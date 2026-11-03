@@ -1,0 +1,69 @@
+# iam-oidc
+
+Lets GitHub Actions log in to this AWS account **without stored keys**, and creates the
+pipeline roles. Background: [docs/03-github-oidc.md](../../../docs/03-github-oidc.md).
+
+**Status:** implemented in Step 3.
+
+## What it creates
+
+| Resource | Name (dev) | Trusted GitHub OIDC subjects | Permissions |
+|---|---|---|---|
+| OIDC provider | `token.actions.githubusercontent.com` | – | – |
+| Role | `mmm-dev-gha-plan` | `environment:dev`, `pull_request` (off in prod), `ref:refs/heads/main` (nightly drift check) | `ReadOnlyAccess` + write the state lock file + state KMS + read `mmm/<env>/*` secret values (needed to refresh generated secrets) |
+| Role | `mmm-dev-gha-apply` | `environment:dev` | `AdministratorAccess`, capped by the permission boundary |
+| Role | `mmm-dev-gha-deploy` | `environment:dev` | Register task definitions, update `mmm-dev-*` services, run the `mmm-dev-migrate` task, pass `mmm-dev-task-*` / `mmm-dev-ecs-task-exec` roles to ECS, read migration logs, prod pre-migration RDS snapshot, upload frontend files, switch the frontend release (key value store `current_release`), read `/mmm/<env>/okta/*` for the frontend config, invalidate CloudFront. With `enable_data_deploy` (Step 13): upload to the `mwaa` and `data-quality` buckets and update the MWAA requirements |
+| Role | `mmm-dev-gha-ecr-push` | `environment:dev`, `ref:refs/heads/main` (dev only) | Push/pull `mmm/*` repositories in this account |
+| Role | `mmm-dev-gha-ecr-read` | the next environment (dev → `staging`, staging → `prod`) | Pull `mmm/*` to copy images forward |
+
+Subjects are always `repo:<github_org>/<github_repo>:...`, so no other repository can use
+these roles. Every role has the permission boundary and a 1-hour session limit.
+
+### Why gha-apply has AdministratorAccess
+
+Terraform creates almost every kind of AWS resource, so a narrow list breaks every time a
+module is added. Instead it is limited by:
+
+1. the **permission boundary** (no IAM users or keys, no roles without the boundary, no
+   disabling security services, approved regions only);
+2. the **trust policy**: only jobs in the approved GitHub Environment can assume it, and prod
+   requires a WBD approver;
+3. **CloudTrail**, which records every call with the GitHub run in the session name.
+
+### First apply (chicken-and-egg)
+
+The roles do not exist until this module is applied once, so the first apply of the dev
+stack is run by a DevOps engineer with the SSO `DevOps` profile. Until the CI/CD pipeline
+exists (Step 11), dev applies keep running that way; after Step 11 they run only from
+GitHub Actions (`terraform.yml`).
+
+Step 11 changed the deploy policy (key value store and Okta parameters instead of
+`UpdateDistribution`) and the plan trust (`main`). Apply this once with the SSO `DevOps` profile
+before the first pipeline run.
+
+## Inputs
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `name_prefix` | string | – | e.g. `mmm-dev` |
+| `environment` | string | – | GitHub Environment: `dev`, `staging`, `prod` |
+| `env_short` | string | – | `dev`, `stg`, `prd` |
+| `github_org`, `github_repo` | string | – | Repository allowed to assume the roles |
+| `create_oidc_provider` | bool | `true` | `false` + `existing_oidc_provider_arn` if the account already has one |
+| `permissions_boundary_arn` | string | – | From the permission-boundary module |
+| `plan_allow_pull_requests` | bool | `true` | Set `false` in prod |
+| `plan_allow_main_branch` | bool | `true` | Workflows on `main` without an Environment (drift check) may plan. The role is read-only, and `main` only holds reviewed code |
+| `ecr_push_allow_main_branch` | bool | `false` | `true` in dev (CI build on main) |
+| `ecr_read_trusted_environments` | list(string) | `[]` | dev `["staging"]`, staging `["prod"]` |
+| `state_bucket_name`, `state_kms_key_arn` | string | – | From `infra/bootstrap` |
+| `secrets_kms_key_arn`, `s3_kms_key_arn`, `ecr_kms_key_arn` | string | – | From the kms module |
+| `enable_data_deploy` | bool | `false` | Deploy role may publish DAGs and update MWAA (= `enable_data_platform`) |
+| `max_session_duration` | number | `3600` | Seconds |
+
+## Outputs
+
+| Name | Description |
+|---|---|
+| `oidc_provider_arn` | Provider ARN |
+| `role_arns` | `{ plan, apply, deploy, ecr_push, ecr_read }`, used as GitHub Environment variables |
+| `trusted_subjects` | Subjects each role trusts, for review |

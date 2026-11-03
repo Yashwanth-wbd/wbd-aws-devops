@@ -1,0 +1,143 @@
+# React frontend.
+# PR: lint, tests, dependency audit, build.
+# main: also publish the build as release sha-<7char> in dev and switch CloudFront to it.
+# Release tags: deploy.yml calls this workflow to build, then publishes in the same approved job.
+name: frontend-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/frontend/**
+      - .github/workflows/frontend-ci.yml
+      - scripts/deploy-frontend.sh
+  push:
+    branches: [main]
+    paths:
+      - apps/frontend/**
+      - .github/workflows/frontend-ci.yml
+      - scripts/deploy-frontend.sh
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit or tag to build
+        type: string
+        required: true
+    outputs:
+      built:
+        description: true when apps/frontend exists and the build artifact frontend-dist was uploaded
+        value: ${{ jobs.build.outputs.built }}
+
+concurrency:
+  group: frontend-ci-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: apps/frontend
+  # add actual value
+  NODE_VERSION: "22"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      built: ${{ steps.present.outputs.yes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - id: present
+        run: |
+          if [ -f "$APP_DIR/package.json" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::$APP_DIR not found - frontend skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.present.outputs.yes == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Install, lint, test, build
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npm ci
+          npm run lint
+          npm test -- --coverage
+          npm run build
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Dependency audit (package-lock, fixable Critical/High)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - if: steps.present.outputs.yes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          # add actual value - build output folder of the frontend (Vite default: dist)
+          path: ${{ env.APP_DIR }}/dist
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: dev
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: frontend-deploy-dev
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist
+          path: ${{ runner.temp }}/dist
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: frontend-${{ github.run_id }}
+
+      - name: Publish release
+        id: publish
+        env:
+          BUCKET: ${{ vars.FRONTEND_BUCKET }}
+          KVS: ${{ vars.FRONTEND_KVS_ARN }}
+        run: |
+          release="sha-${GITHUB_SHA::7}"
+          previous=$(scripts/deploy-frontend.sh "${RUNNER_TEMP}/dist" "$BUCKET" "$release" "$KVS" /mmm/dev)
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "Frontend \`$release\` live in dev (previous: \`$previous\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        env:
+          BASE_URL: ${{ vars.SMOKE_BASE_URL || vars.APP_URL }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$BASE_URL/" || echo 000)
+          [ "$code" = "200" ] || { echo "::error::$BASE_URL/ returned $code"; exit 1; }
+
+      - name: Roll back to the previous release
+        if: failure() && steps.publish.outputs.previous != '' && steps.publish.outputs.previous != 'none'
+        run: scripts/deploy-frontend.sh switch "${{ vars.FRONTEND_KVS_ARN }}" "${{ steps.publish.outputs.previous }}"

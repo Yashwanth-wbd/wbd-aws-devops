@@ -1,0 +1,11 @@
+{
+  "//": "Merged over the Terraform task definition mmm-dev-api by scripts/ecs-deploy.sh. Only app-owned fields of the 'app' container go here.",
+  "family": "mmm-dev-api",
+  "repository": "mmm/api",
+  "container": {
+    "//command": "add actual value - start command of apps/api (dev team)",
+    "command": ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*"],
+    "entryPoint": null,
+    "stopTimeout": 30
+  }
+}

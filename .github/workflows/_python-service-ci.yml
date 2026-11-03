@@ -1,0 +1,141 @@
+# Reusable CI for a Python service (api, optimizer-worker; genai-gateway in Release 2).
+# PR and main: lint, type-check, tests with a coverage gate, dependency + image scan.
+# main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
+name: python-service-ci
+
+on:
+  workflow_call:
+    inputs:
+      app_dir:
+        description: Service folder, e.g. apps/api
+        type: string
+        required: true
+      repository:
+        description: ECR repository, e.g. mmm/api
+        type: string
+        required: true
+      python_version:
+        type: string
+        default: "3.12"
+      coverage_min:
+        description: Minimum test coverage in percent
+        type: number
+        default: 80
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.app_dir }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ inputs.python_version }}
+          enable-cache: true
+
+      - name: Install (locked)
+        run: uv sync --frozen
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy .
+
+      - name: Tests (coverage gate ${{ inputs.coverage_min }} %)
+        run: uv run pytest --cov --cov-report=term --cov-fail-under=${{ inputs.coverage_min }}
+
+      - name: Dependency audit (uv.lock, fixable Critical/High)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.app_dir }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: meta
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build "${{ inputs.app_dir }}" \
+            --tag "local/${{ inputs.repository }}:${{ steps.meta.outputs.tag }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+      - name: Image scan (block fixable Critical/High)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: local/${{ inputs.repository }}:${{ steps.meta.outputs.tag }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Save image for the push job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save "local/${{ inputs.repository }}:${{ steps.meta.outputs.tag }}" | gzip > "${RUNNER_TEMP}/image.tar.gz"
+
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ steps.meta.outputs.tag }}
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 1
+
+  push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: image-${{ needs.build.outputs.tag }}
+          path: ${{ runner.temp }}
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: ci-${{ github.run_id }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push sha tag (immutable - skipped if it already exists)
+        env:
+          REPO: ${{ inputs.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          REGISTRY: ${{ vars.ECR_REGISTRY }}
+        run: |
+          if aws ecr describe-images --repository-name "$REPO" --image-ids "imageTag=$TAG" > /dev/null 2>&1; then
+            echo "$REPO:$TAG already in ECR"; exit 0
+          fi
+          gunzip -c "${RUNNER_TEMP}/image.tar.gz" | docker load
+          docker tag "local/$REPO:$TAG" "$REGISTRY/$REPO:$TAG"
+          docker push "$REGISTRY/$REPO:$TAG"
+          echo "Pushed \`$REGISTRY/$REPO:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
