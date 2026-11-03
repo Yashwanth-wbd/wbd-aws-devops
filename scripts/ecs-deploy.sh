@@ -18,7 +18,7 @@ die() { echo "::error::$*" >&2; exit 1; }
 render() {
   local template="$1" image="$2" version="$3" family base out
   family=$(jq -r '.family' "$template")
-  [ -n "$family" ] && [ "$family" != "null" ] || die "$template has no family"
+  if [ -z "$family" ] || [ "$family" = "null" ]; then die "$template has no family"; fi
 
   base=$(mktemp)
   out=$(mktemp)

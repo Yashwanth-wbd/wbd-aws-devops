@@ -55,7 +55,7 @@ jobs:
         run: uv run pytest --cov --cov-report=term --cov-fail-under=${{ inputs.coverage_min }}
 
       - name: Dependency audit (uv.lock, fixable Critical/High)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: fs
           scan-ref: ${{ inputs.app_dir }}
@@ -84,7 +84,7 @@ jobs:
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
 
       - name: Image scan (block fixable Critical/High)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: local/${{ inputs.repository }}:${{ steps.meta.outputs.tag }}
           scanners: vuln,secret

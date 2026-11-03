@@ -30,23 +30,45 @@ jobs:
       run:
         working-directory: infra/environments/${{ inputs.environment }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: hashicorp/setup-terraform@v3
+      # Until setup-github.ps1 has run for this environment there is nothing to apply with.
+      - name: Environment configured?
+        id: on
+        working-directory: .
+        env:
+          ROLE: ${{ vars.TF_APPLY_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ -z "$ROLE" ] || [ -z "$REGION" ]; then
+            echo "::notice::$ENVIRONMENT has no TF_APPLY_ROLE_ARN / AWS_REGION variables yet (run scripts/setup-github.ps1) - apply skipped"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.on.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+      - if: steps.on.outputs.enabled == 'true'
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-      - uses: aws-actions/configure-aws-credentials@v5
+      - if: steps.on.outputs.enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: tf-apply-${{ github.run_id }}
 
-      - run: terraform init -no-color
+      - if: steps.on.outputs.enabled == 'true'
+        run: terraform init -no-color
 
       - name: plan
+        if: steps.on.outputs.enabled == 'true'
         run: |
           terraform plan -no-color -lock-timeout=10m -out=tfplan | tee plan.txt
           { echo "### ${{ inputs.environment }}"; grep -E '^(Plan:|No changes\.)' plan.txt || true; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: apply
+        if: steps.on.outputs.enabled == 'true'
         run: terraform apply -no-color -lock-timeout=10m tfplan
