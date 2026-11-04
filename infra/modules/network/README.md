@@ -113,6 +113,8 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `interface_endpoints` | list(string) | 11 services above | Interface endpoint suffixes |
 | `app_port` | number | `8080` | API container port |
 | `create_mwaa_security_group` | bool | `false` | Step 13: creates `mwaa` and `data_trigger` |
+| `create_genai_security_group` | bool | `false` | Step 14: creates `genai` (app port from `api` only; HTTPS to the endpoints SG and S3 prefix list only) and the `api` → `genai` egress rule |
+| `additional_interface_endpoints` | list(string) | `[]` | Extra endpoint suffixes (Step 14 adds `ecs-agent` for the Service Connect proxy of the GenAI gateway) |
 | `flow_logs_retention_days` | number | `365` | Flow log retention |
 | `logs_kms_key_arn` | string | – | `module.kms.key_arns["logs"]` |
 | `permissions_boundary_arn` | string | – | `module.permission_boundary.policy_arn` |

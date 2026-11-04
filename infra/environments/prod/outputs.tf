@@ -206,6 +206,8 @@ output "github_environment_variables" {
       APP_URL                    = module.edge.app_url
       CLOUDFRONT_DISTRIBUTION_ID = module.edge.distribution_id
       FRONTEND_KVS_ARN           = module.edge.frontend_kvs_arn
+      # Step 14: deploy.yml rolls out genai-gateway only when "true"
+      GENAI_ENABLED = tostring(var.enable_genai)
     },
     # Step 13: data.yml
     var.enable_data_platform ? {
@@ -266,5 +268,26 @@ output "data_platform" {
     workspace_endpoint_id = module.databricks_access[0].workspace_endpoint_id
     model_catalog         = local.model_catalog
     airflow_connection    = module.secrets.secret_names["airflow/connections/databricks_default"]
+  } : null
+}
+
+# ------------------------------------------------------------------ Step 14 - Release 2 GenAI
+output "genai" {
+  description = "GenAI gateway, guardrail, endpoint, logging and monitoring values (null while enable_genai = false)."
+  value = var.enable_genai ? {
+    gateway_service       = module.svc_genai[0].service_name
+    gateway_url           = local.genai_gateway_url
+    gateway_task_role     = module.svc_genai[0].task_role_arn
+    gateway_log_group     = module.svc_genai[0].log_group_name
+    model_ids             = var.genai_approved_model_ids
+    guardrail_id          = module.bedrock[0].guardrail_id
+    guardrail_version     = module.bedrock[0].guardrail_version
+    bedrock_endpoint_id   = module.bedrock[0].vpc_endpoint_id
+    invocation_log_bucket = module.bedrock[0].invocation_log_bucket
+    invocation_log_group  = module.bedrock[0].invocation_log_group
+    dashboard             = module.bedrock[0].dashboard_name
+    alarms                = module.bedrock[0].alarm_names
+    budget                = module.bedrock[0].budget_name
+    parameters            = { for k, p in aws_ssm_parameter.genai : k => p.name }
   } : null
 }

@@ -76,5 +76,7 @@ run "plan_all_features" {
     enable_data_platform           = true
     databricks_self_assume_enabled = true
     enable_databricks_privatelink  = true
+
+    enable_genai = true
   }
 }

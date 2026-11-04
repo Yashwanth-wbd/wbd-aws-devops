@@ -40,14 +40,15 @@ module "kms" {
 
   name_prefix = local.name_prefix
 
-  # Step 13: MWAA key + one S3 key per business unit (data isolation)
-  purposes              = concat(["rds", "s3", "logs", "secrets", "sqs", "ecr"], local.data_platform_kms_purposes)
-  logs_service_purposes = var.enable_data_platform ? ["logs", "mwaa"] : ["logs"]
+  # Step 13: MWAA key + one S3 key per business unit (data isolation); Step 14: GenAI key
+  purposes              = concat(["rds", "s3", "logs", "secrets", "sqs", "ecr"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
+  logs_service_purposes = concat(["logs"], var.enable_data_platform ? ["mwaa"] : [], var.enable_genai ? ["genai"] : [])
 
-  # Step 8: CloudFront (OAC) decrypts frontend objects; Step 13: EventBridge dead letters
+  # Step 8: CloudFront (OAC) decrypts frontend objects; Step 13: EventBridge dead letters; Step 14: Bedrock logging
   additional_policy_documents = merge(
     { s3 = data.aws_iam_policy_document.s3_key_cloudfront.json },
     var.enable_data_platform ? { sqs = data.aws_iam_policy_document.sqs_key_eventbridge.json } : {},
+    var.enable_genai ? { genai = data.aws_iam_policy_document.genai_key_bedrock.json } : {},
   )
 }
 
@@ -117,6 +118,10 @@ module "network" {
   resolver_target_ips        = var.resolver_target_ips
 
   create_mwaa_security_group = var.enable_data_platform
+
+  # Step 14: GenAI gateway security group and the endpoint its Service Connect proxy needs
+  create_genai_security_group    = var.enable_genai
+  additional_interface_endpoints = local.genai_interface_endpoints
 }
 
 # ================================================================== Step 5 - Secrets and configuration

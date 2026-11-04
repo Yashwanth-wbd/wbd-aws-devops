@@ -434,3 +434,57 @@ variable "databricks_promote_client_id" {
   description = "Databricks service principal that may move the production alias; its federation policy trusts only the <env>-model-promotion GitHub Environment."
   type        = string
 }
+
+# ------------------------------------------------------------------ Step 14 - Release 2 GenAI (Bedrock)
+variable "enable_genai" {
+  description = "Create the Release 2 GenAI stack: Bedrock PrivateLink endpoint, guardrail, invocation logging, genai-gateway service, alarms and budget."
+  type        = bool
+  default     = false
+}
+
+variable "genai_approved_model_ids" {
+  description = "Bedrock model IDs WBD approved; the first one is the gateway default (SSM genai/model_id). Nothing else can be invoked."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for id in var.genai_approved_model_ids : can(regex("^[a-z0-9][a-z0-9.:-]+$", id))])
+    error_message = "genai_approved_model_ids must be Bedrock model IDs such as anthropic.claude-3-5-sonnet-20240620-v1:0."
+  }
+}
+
+variable "genai_monthly_budget_usd" {
+  description = "Monthly Bedrock cost budget (alerts at 50/80/100 % actual, 100 % forecast)."
+  type        = number
+  default     = 500
+}
+
+variable "genai_budget_service_names" {
+  description = "Cost Explorer service names counted by the GenAI budget (Amazon Bedrock plus the Marketplace names of third-party models)."
+  type        = list(string)
+  default     = ["Amazon Bedrock"]
+}
+
+variable "genai_guardrail_version_label" {
+  description = "Change (v1 -> v2) to publish a new guardrail version after a guardrail policy change."
+  type        = string
+  default     = "v1"
+}
+
+variable "genai_grounding_threshold" {
+  description = "Contextual grounding threshold (0-0.99): answers not supported by the supplied MMM sources are blocked."
+  type        = number
+  default     = 0.75
+}
+
+variable "genai_relevance_threshold" {
+  description = "Contextual relevance threshold (0-0.99): answers that do not address the question are blocked."
+  type        = number
+  default     = 0.75
+}
+
+variable "enable_bedrock_invocation_logging" {
+  description = "Configure Bedrock model invocation logging in this account and region (false if WBD already manages it centrally)."
+  type        = bool
+  default     = true
+}

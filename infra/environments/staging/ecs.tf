@@ -289,7 +289,7 @@ module "svc_api" {
     EXPORTS_BUCKET  = module.buckets["exports"].bucket_name
     APPROVED_BUCKET = module.buckets["approved-worm"].bucket_name
     DB_USER         = "mmm_app"
-  })
+  }, var.enable_genai ? { GENAI_GATEWAY_URL = local.genai_gateway_url } : {})
   secrets            = local.api_secrets
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]

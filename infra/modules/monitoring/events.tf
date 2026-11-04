@@ -39,6 +39,22 @@ locals {
         paths   = { severity = "$.detail.severity", type = "$.detail.type", title = "$.detail.title" }
       }
     } : {},
+    # IAM Identity Center roles are named AWSReservedSSO_<permission set>_<suffix>. API calls reach
+    # EventBridge only through a CloudTrail trail (WBD organization trail); console sign-ins are
+    # delivered in the region where the user signed in.
+    var.enable_breakglass_alert ? {
+      breakglass-used = {
+        description = "BreakGlass permission set used (console sign-in or a change) - needs an incident ticket"
+        pattern = {
+          "detail-type" = ["AWS Console Sign In via CloudTrail", "AWS API Call via CloudTrail"]
+          detail = {
+            userIdentity = { arn = [{ prefix = "arn:${local.partition}:sts::${local.account_id}:assumed-role/AWSReservedSSO_${var.breakglass_permission_set}_" }] }
+          }
+        }
+        message = "\"BREAK-GLASS used by <user>: <event>. Open / link the incident ticket and reproduce any change in Terraform.\""
+        paths   = { user = "$.detail.userIdentity.arn", event = "$.detail.eventName" }
+      }
+    } : {},
   )
 }
 

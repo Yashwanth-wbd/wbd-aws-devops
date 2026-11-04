@@ -1,0 +1,26 @@
+# Weekly dependency and monthly base-image update PRs (docs/13 §2). The app teams add their
+# folders (apps/api, apps/optimizer-worker, apps/frontend) here once those apps are in the repo.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /apps/genai-gateway
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /apps/genai-gateway
+    schedule:
+      interval: monthly

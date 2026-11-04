@@ -68,6 +68,10 @@ git grep -n -A1 "add actual value"
 | Splunk index and source type of the HEC token (indexer acknowledgement on) | – | Splunk side | WBD Splunk | Open |
 | Ship VPC flow logs to Splunk? (licence volume) | `ship_vpc_flow_logs = false` | log-shipping | WBD Security / Splunk | Open |
 | Existing account-level CloudWatch Logs data protection policy? | `enable_log_data_protection = true` | monitoring | WBD Cloud | Open |
+| Break-glass permission set name (prod) and CloudTrail organization trail delivering to EventBridge | `breakglass_permission_set = "BreakGlass"` (module default) | monitoring rule `mmm-prd-breakglass-used` | WBD Identity / Security | Open (Step 15) |
+| Severity levels, response times, on-call tool (paging) | proposal in `docs/runbooks/README.md` | runbooks, SNS subscriptions | WBD Ops | Open (Step 15) |
+| WBD security incident contact / escalation path | – | `docs/runbooks/security-incident.md` | WBD Security | Open (Step 15) |
+| Operations owner after handover, RACI, hypercare length | proposal in `docs/13` (4 weeks hypercare) | `docs/13-operations-and-handover.md` | WBD Ops / EY delivery lead | Open (Step 15) |
 | Splunk HEC token | none in Git – stored in Secrets Manager | `mmm/<env>/splunk/hec` | WBD Splunk | Open |
 | Object Lock retention for approved scenarios | `2555` days (7 years), GOVERNANCE in dev/staging, COMPLIANCE in prod | S3 module | WBD Legal / Audit | Open |
 | RDS instance class + storage per env | dev `db.t4g.medium` 50 GB; staging `db.r6g.large` 100 GB; prod `db.r6g.xlarge` 200 GB (autoscale to 1000) | env tfvars `rds_*` | WBD / EY sizing | Open |
@@ -110,8 +114,15 @@ git grep -n -A1 "add actual value"
 | Databricks service-principal token | none in Git – Secrets Manager | `mmm/<env>/databricks/sp` | WBD Databricks | Open |
 | Source feed delivery method (S3 / SFTP / API) | S3 drop to landing bucket | data-trigger module | WBD Data owners | Open |
 | Orchestration: MWAA or Databricks Workflows | MWAA + EventBridge + Lambda behind `enable_data_platform` | Step 13 | User / WBD | Decided |
-| Approved LLM model ID (Release 2) | `anthropic.claude-3-5-sonnet-20240620-v1:0` | bedrock module | WBD Responsible AI | Open |
+| Approved LLM model ID(s) (Release 2) | `genai_approved_model_ids = ["anthropic.claude-3-5-sonnet-20240620-v1:0"]` | bedrock module, gateway task role | WBD Responsible AI | Open |
 | Token capacity / per-BU quotas | `1000000` tokens/day per BU | SSM quotas | WBD | Open |
+| Guardrail thresholds (prompt attack, PII, grounding, relevance) | prompt attack `HIGH`, content `MEDIUM`, PII anonymize email/phone/name/address, block SSN/card/bank/keys/passwords, `genai_grounding_threshold = 0.75`, `genai_relevance_threshold = 0.75` | Bedrock Guardrails (Step 14) | WBD Responsible AI | Open |
+| Bedrock invocation logging already configured in the accounts? | assumed no: `enable_bedrock_invocation_logging = true` | bedrock module (account + region singleton) | WBD Cloud Platform | Open |
+| Monthly Bedrock budget | `genai_monthly_budget_usd` dev `200`, staging `500`, prod `2000` | bedrock module budget | WBD | Open |
+| Cost Explorer service names of the approved models | `["Amazon Bedrock", "Claude 3.5 Sonnet (Amazon Bedrock Edition)"]` | `genai_budget_service_names` | WBD Finance | Open (check Cost Explorer after the first calls) |
+| Bedrock model access / EULA per account | manual, Bedrock console (once per account) | Step 14 | WBD Cloud Platform | Open |
+| Approved GenAI gateway base image | `python:3.12-slim` | `apps/genai-gateway/Dockerfile` | WBD Security | Open |
+| Release 1 gate sign-offs (G1–G5) | – | `docs/11-release-1-readiness.md` | EY delivery lead / WBD | Open |
 | Model-promotion approver | `wbd-model-approver` | GitHub Environment `<env>-model-promotion` | WBD | Open |
 | Enable the data platform per environment | `enable_data_platform = false` | env tfvars (Step 13) | User / WBD Data | Open |
 | Business unit names (S3 prefixes, keys, models) | `usnetworks`, `streaming`, `theatrical` | env tfvars `business_units` | WBD Data owners | Open |

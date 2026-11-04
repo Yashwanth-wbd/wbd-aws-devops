@@ -1,0 +1,88 @@
+# 13 – Operations and handover
+
+How the platform is run after go-live, and how EY hands it over to the WBD (or managed-service)
+operations team. Procedures for incidents and changes: [runbooks/](runbooks/README.md).
+
+## 1. Who does what (proposal – confirm with WBD, docs/01)
+
+| Activity | EY DevOps (hypercare) | WBD platform / ops team (after handover) | WBD app owner | WBD security |
+|---|---|---|---|---|
+| Alarms, on-call, runbooks | R | R (after handover) | I | I (security alerts: R) |
+| Releases to prod | R (executes) | R (after handover) | A (approves) | C |
+| Terraform changes, drift | R | R | I | C (IAM, network) |
+| Patching (images, dependencies) | R | R | C | I |
+| Access reviews | C | R | A | C |
+| Restore / DR tests | R | R | A | I |
+| Model promotion | C | C | A (model approvers) | I |
+| GenAI policy (models, guardrail, quotas) | C | C | A | A |
+
+R = responsible, A = approves, C = consulted, I = informed.
+
+## 2. Ongoing operations schedule
+
+| When | Task | How | Evidence |
+|---|---|---|---|
+| Daily | Check alarms in ALARM and overnight alerts | `aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix mmm-prd`; dashboards `mmm-prd-platform`, `mmm-prd-genai` | – |
+| Nightly 03:00 UTC | Drift check (automatic) | `terraform.yml` schedule plans every environment; a red run means a change outside Terraform → [pipeline-failure.md](runbooks/pipeline-failure.md) | Actions history |
+| Nightly | Backups (automatic) | AWS Backup plan `mmm-<env>-daily`; alarm `mmm-<env>-backup-job-failed` | Backup console |
+| Weekly (Mon) | Vulnerability fixes | Merge Dependabot PRs (actions, Python); triage ECR Inspector findings (`aws inspector2 list-findings --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"PREFIX","value":"mmm/"}],"severity":[{"comparison":"EQUALS","value":"CRITICAL"}]}'`); fixable Critical/High in prod images → release within 7 days (High 30 days) | PR links, release record |
+| Weekly | Cost check | Budgets `mmm-<env>-monthly`, `mmm-<env>-genai-monthly`; Cost Anomaly emails | – |
+| Monthly | Patch base images | Dependabot docker PR (genai-gateway) / app teams bump the base image digest → CI → normal release. Fargate platform is patched by AWS (`platform_version = LATEST` picks it up on each deploy) | Release record |
+| Monthly | Review Security Hub / GuardDuty | Findings for the MMM accounts with WBD security | Ticket |
+| Monthly | Minor version upgrades | RDS minor (maintenance window), Valkey/Redis, Terraform provider (`terraform init -upgrade` in dev → sync → PR), GitHub actions | PR |
+| Quarterly | Access review | Permission-set assignments per account with WBD Identity; GitHub environment reviewers; no IAM users / keys (`aws iam list-users` empty); break-glass test ([break-glass.md](runbooks/break-glass.md)) | Signed review |
+| Quarterly | Restore test | RDS point-in-time + S3 restore in staging ([docs/08 §7](08-backup-and-dr.md#7-regular-tests)), record RPO / RTO achieved | Restore record (docs/11 §4.2 format) |
+| Quarterly | Rotate long-lived tokens due | [rotation.md](runbooks/rotation.md) schedule | Ticket |
+| Twice a year | DR exercise | Rebuild staging from code + restore data (docs/08 §5); prod region failover rehearsal if WBD approved the DR region (§6) | DR report |
+| Twice a year | Failover tests | RDS / cache failover, kill tasks (docs/11 §4.3) in staging | Test record |
+| Yearly | Major upgrades | PostgreSQL major, Python runtime, Airflow / MWAA version, Terraform major – planned changes with a staging soak | Change ticket |
+| Before planning season | Scale up | [scale-planning-season.md](runbooks/scale-planning-season.md) | PR |
+
+## 3. Alarm → runbook
+
+| Alarm / alert | Runbook |
+|---|---|
+| `api-no-healthy-targets`, `api-5xx-rate`, `ecs-deployment-failed`, `ecs-service-error` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [rollback.md](runbooks/rollback.md) |
+| `queue-oldest-job`, `<service>-backlog-high`, `whatif-p95` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [scale-planning-season.md](runbooks/scale-planning-season.md) |
+| `dlq-not-empty`, `data-trigger-dlq-not-empty`, `data-trigger-errors` | [dlq.md](runbooks/dlq.md) |
+| `rds-cpu`, `rds-free-storage` | Scale the instance / storage (PR); [db-restore.md](runbooks/db-restore.md) if data is affected |
+| `redis-cpu-*`, `redis-memory-*` | [cache-failure.md](runbooks/cache-failure.md) |
+| `cert-expiry-*` | [rotation.md](runbooks/rotation.md) |
+| `backup-job-failed` | [docs/08](08-backup-and-dr.md); re-run the job on demand |
+| `splunk-delivery`, `splunk-freshness` | HEC token / endpoint ([rotation.md](runbooks/rotation.md)); failed records are in the log bucket |
+| `airflow-scheduler-heartbeat` | [docs/10 §9](10-data-platform-and-model-governance.md#9-troubleshooting) |
+| `genai-*`, GenAI budget | [genai.md](runbooks/genai.md) |
+| `guardduty-high`, `breakglass-used` | [security-incident.md](runbooks/security-incident.md), [break-glass.md](runbooks/break-glass.md) |
+
+## 4. Handover (knowledge transfer)
+
+### Sessions (about 2 weeks, recorded)
+
+| # | Topic | Material | Hands-on (in staging) |
+|---|---|---|---|
+| 1 | Architecture, accounts, naming, tags | README, docs/00–02 | SSO login to every account |
+| 2 | Terraform layout, modules, dev → sync → staging/prod, state | `infra/`, docs/03, environment READMEs | Small PR → plan → apply in dev |
+| 3 | Secrets, config, IAM model, OIDC | docs/03, 05, 06 | Fill a secret, read a parameter |
+| 4 | CI/CD and releases | docs/07, 09, `runbooks/deploy.md` | Cut an rc, promote, roll back by dispatch |
+| 5 | Monitoring, logging, Splunk, alarms | docs/09 §6, Step 9 README | Fire a test alarm, follow it to the runbook |
+| 6 | Backup, restore, DR | docs/08, `runbooks/db-restore.md` | Point-in-time restore next to staging |
+| 7 | Data platform and model governance | docs/10, `runbooks/model-rollback.md`, `dlq.md` | On-demand trigger, redrive a DLQ, model rollback |
+| 8 | GenAI (if Release 2 is live) | docs/12, `runbooks/genai.md` | Flag off / on |
+| 9 | Security operations | `runbooks/security-incident.md`, `break-glass.md` | Break-glass drill |
+| 10 | Shadowing → reverse shadowing | all runbooks | WBD engineer runs a release and an incident drill with EY watching |
+
+### Handover checklist
+
+| Item | Done |
+|---|---|
+| GitHub: WBD ops team are repo admins / environment reviewers; EY access reduced to what hypercare needs | ☐ |
+| AWS: WBD ops team in the DevOps / ReadOnly / BreakGlass groups; EY assignments end at hypercare exit | ☐ |
+| Alerts: `mmm-<env>-alerts` subscribed by WBD on-call (email / paging tool); EY addresses removed at exit | ☐ |
+| Budgets and anomaly emails go to WBD owners (`budget_alert_emails`) | ☐ |
+| All `# add actual value` placeholders replaced (`git grep -n "add actual value"` shows only documentation) | ☐ |
+| docs/01 tracker: every row Closed or accepted as an open risk by WBD | ☐ |
+| Release 1 gate (docs/11) and, if live, Release 2 sign-off archived | ☐ |
+| Last restore test and DR exercise records handed over | ☐ |
+| Open vulnerabilities and technical debt list reviewed with WBD (owner + due date) | ☐ |
+| Runbooks walked through and accepted by the WBD ops lead | ☐ |
+| Hypercare period agreed (proposal: 4 weeks after go-live), then exit sign-off | ☐ |

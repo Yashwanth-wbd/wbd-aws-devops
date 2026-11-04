@@ -27,6 +27,7 @@ locals {
       airflow-task      = module.mwaa[0].log_group_names.task
       airflow-scheduler = module.mwaa[0].log_group_names.scheduler
     } : {},
+    var.enable_genai ? { genai-gateway = module.svc_genai[0].log_group_name } : {},
   )
 }
 
@@ -44,13 +45,16 @@ module "monitoring" {
   rds_instance_id             = module.rds.db_instance_identifier
   redis_node_ids              = local.redis_node_ids
   ecs_cluster_name            = module.ecs_cluster.cluster_name
-  ecs_service_names           = [module.svc_api.service_name, module.svc_whatif.service_name, module.svc_optimizer.service_name]
+  ecs_service_names           = concat([module.svc_api.service_name, module.svc_whatif.service_name, module.svc_optimizer.service_name], var.enable_genai ? [module.svc_genai[0].service_name] : [])
   certificate_arns            = local.watched_certificates
   waf_web_acl_name            = "${local.name_prefix}-cdn"
   cloudfront_distribution_id  = module.edge.distribution_id
 
   rds_free_storage_gib       = var.environment == "dev" ? 5 : 20
   enable_log_data_protection = var.enable_log_data_protection
+
+  # Step 15: the BreakGlass permission set exists only in prod (docs/02 §6)
+  enable_breakglass_alert = local.is_prod
 }
 
 module "log_shipping" {

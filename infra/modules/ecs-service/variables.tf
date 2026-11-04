@@ -140,6 +140,15 @@ variable "service_connect_namespace_arn" {
   default     = null
 }
 
+variable "service_connect_server" {
+  description = "Publish the container port \"http\" in the Service Connect namespace so other services call http://<discovery_name>:<port>. null = client only."
+  type = object({
+    discovery_name = string
+    port           = number
+  })
+  default = null
+}
+
 variable "enable_execute_command" {
   description = "Allow ECS Exec (break-glass shell, audited)."
   type        = bool

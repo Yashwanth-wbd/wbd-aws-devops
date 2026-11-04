@@ -155,8 +155,11 @@ When the session expires, run `aws sso login` again.
 ## 6. Break-glass
 
 - A separate `BreakGlass` permission set on prod, assigned to a small named Okta group.
-- An EventBridge rule (Step 9) alerts security when it is used.
+- The EventBridge rule `mmm-prd-breakglass-used` (monitoring module, Step 15) sends an alert to
+  `mmm-prd-alerts` on every console sign-in or change made with it (API calls need the WBD
+  CloudTrail organization trail).
 - Every use needs an incident ticket. Afterwards, the change is reproduced in Terraform.
+  Procedure: [runbooks/break-glass.md](runbooks/break-glass.md).
 
 ## 7. Troubleshooting
 

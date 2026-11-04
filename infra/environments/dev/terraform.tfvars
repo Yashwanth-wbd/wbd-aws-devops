@@ -175,3 +175,21 @@ databricks_privatelink_service_name = "com.amazonaws.vpce.us-east-1.vpce-svc-000
 databricks_eval_client_id = "00000000-0000-0000-0000-00000000e001"
 # add actual value
 databricks_promote_client_id = "00000000-0000-0000-0000-00000000a001"
+
+# ------------------------------------------------------------------ Release 2 GenAI (Step 14)
+# Turn on after the Release 1 gate (docs/11) and WBD approval of the model and guardrail settings
+enable_genai = false
+# add actual value
+genai_approved_model_ids = ["anthropic.claude-3-5-sonnet-20240620-v1:0"]
+# add actual value
+genai_monthly_budget_usd = 200
+# Cost Explorer names of the approved models (third-party models bill under Marketplace names)
+# add actual value
+genai_budget_service_names = ["Amazon Bedrock", "Claude 3.5 Sonnet (Amazon Bedrock Edition)"]
+# add actual value
+genai_grounding_threshold = 0.75
+# add actual value
+genai_relevance_threshold     = 0.75
+genai_guardrail_version_label = "v1"
+# false if WBD already configures Bedrock invocation logging for this account centrally
+enable_bedrock_invocation_logging = true

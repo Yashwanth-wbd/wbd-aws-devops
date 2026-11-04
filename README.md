@@ -103,18 +103,21 @@ wbd_devops_implmenetation_1/
 ├── README.md                 ✅ this file
 ├── .gitignore                ✅
 ├── .tflint.hcl               ✅ tflint rules used locally and in CI
-├── docs/                     ✅ architecture, access, OIDC, Okta, secrets, authorization guides
+├── docs/                     ✅ architecture, access, OIDC, Okta, secrets, authorization guides, Release 1 gate, GenAI, operations
+│   └── runbooks/             ✅ Step 15 – deploy, rollback, scaling, DLQ, restore, cache, ECS, rotation, pipeline, model, GenAI, security, break-glass
 ├── scripts/                  ✅ install-prereqs, checkov-scan, validate-modules, secret-scan, setup-github; deploy scripts used by the pipelines
+├── apps/
+│   └── genai-gateway/        ✅ Step 14 – reference GenAI gateway (FastAPI, guardrail on every Bedrock call); other apps belong to the app teams
 ├── infra/
 │   ├── bootstrap/            ✅ Step 1 – Terraform state bucket + KMS key (per account)
-│   ├── modules/              ✅ Step 2 – 23 reusable module skeletons (see infra/modules/README.md)
+│   ├── modules/              ✅ Steps 2–14 – 23 reusable modules (see infra/modules/README.md)
 │   └── environments/
-│       ├── dev/              ✅ Steps 3–13 foundation, network, secrets, platform, ECS, edge, monitoring, backup, pipeline roles, data platform (data.tf)
+│       ├── dev/              ✅ Steps 3–14 foundation, network, secrets, platform, ECS, edge, monitoring, backup, pipeline roles, data platform (data.tf), GenAI (genai.tf)
 │       ├── staging/          ✅ Step 12 – same code as dev (scripts/sync-environments.ps1); own backend + tfvars
 │       └── prod/             ✅ Step 12 – same code as dev; own backend + tfvars
-├── ecs/                      ✅ Steps 11–12 – app-owned task definition settings used by deploy.yml (dev, staging, prod)
+├── ecs/                      ✅ Steps 11–14 – app-owned task definition settings used by deploy.yml (dev, staging, prod)
 ├── data/                     ✅ Step 13 – Airflow DAGs, requirements.txt, data-quality suites, run-manifest schema, model thresholds
-└── .github/workflows/        ✅ Steps 11, 13 – api/optimizer/frontend CI, deploy, terraform, repo checks, data, model-governance
+└── .github/                  ✅ Steps 11–15 – workflows (api/optimizer/genai/frontend CI, deploy, terraform, repo checks, data, model-governance), dependabot.yml
 ```
 
 ## 5. Implementation steps
@@ -137,10 +140,10 @@ does the next one start.
 | 10 | Backup and DR | ✅ Validated (apply pending accounts) |
 | 11 | CI/CD pipelines, GitHub Environments and variables | ✅ Validated (apply pending accounts) |
 | 12 | Promote platform to staging, then prod | ✅ Validated (apply pending accounts) |
-| 13 | Data-team platform: MWAA, data trigger, Databricks access, model governance | ✅ Code done – awaiting validation |
-| 🚦 | **Release 1 complete gate** | ⏳ |
-| 14 | Release 2: Bedrock GenAI gateway | ⏳ |
-| 15 | Handover runbooks and operations | ⏳ |
+| 13 | Data-team platform: MWAA, data trigger, Databricks access, model governance | ✅ Code done (validation deferred until client values and accounts) |
+| 🚦 | **Release 1 complete gate** – checklist and evidence in [docs/11](docs/11-release-1-readiness.md) | 📋 Gate pack ready – sign-offs open |
+| 14 | Release 2: Bedrock GenAI gateway (behind `enable_genai`, default off) – [docs/12](docs/12-genai-bedrock.md) | ✅ Code done (validated offline; apply after the Release 1 gate and WBD model approval) |
+| 15 | Handover runbooks and operations – [docs/13](docs/13-operations-and-handover.md), [runbooks](docs/runbooks/README.md) | ✅ Written (KT sessions and sign-offs at handover) |
 
 Deferred until the client provides details: CODEOWNERS reviewers, Route 53 DNS records,
 account-level security baseline (owned by WBD).
@@ -199,6 +202,9 @@ client team owns it.
 8. Backup, restore and DR (RPO/RTO): [docs/08-backup-and-dr.md](docs/08-backup-and-dr.md)
 9. CI/CD pipelines, GitHub setup, releases and rollback: [docs/09-cicd-pipelines.md](docs/09-cicd-pipelines.md)
 10. Data platform (MWAA, Databricks) and model promotion: [docs/10-data-platform-and-model-governance.md](docs/10-data-platform-and-model-governance.md)
+11. Release 1 gate (before Release 2): [docs/11-release-1-readiness.md](docs/11-release-1-readiness.md)
+12. Release 2 GenAI (Bedrock, guardrails, gateway): [docs/12-genai-bedrock.md](docs/12-genai-bedrock.md)
+13. Running the platform, schedule, handover: [docs/13-operations-and-handover.md](docs/13-operations-and-handover.md) and [docs/runbooks/](docs/runbooks/README.md)
 
 ## 8. Documentation index
 
@@ -215,3 +221,7 @@ client team owns it.
 | [08-backup-and-dr](docs/08-backup-and-dr.md) | RPO/RTO per failure, what protects what, RDS / S3 restore, rebuild, region DR, test schedule |
 | [09-cicd-pipelines](docs/09-cicd-pipelines.md) | Workflows, GitHub Environments and variables, app-team contract, release steps, rollback, troubleshooting |
 | [10-data-platform-and-model-governance](docs/10-data-platform-and-model-governance.md) | Data flow, MWAA, trigger idempotency, Databricks setup (Unity Catalog role, PrivateLink, service principals), DAG release, model thresholds, approval, rollback |
+| [11-release-1-readiness](docs/11-release-1-readiness.md) | Release 1 gate (G1–G5), rollout per environment, production readiness checklist with commands, restore / failover / performance records, Release 2 inputs |
+| [12-genai-bedrock](docs/12-genai-bedrock.md) | Release 2: switches, what gets built, controls (approved models, PrivateLink, guardrail, logging, quotas), turning on / off, guardrail versions, gateway contract, validation |
+| [13-operations-and-handover](docs/13-operations-and-handover.md) | RACI, ongoing operations schedule (patching, vulnerabilities, drift, access and restore tests, DR), alarm → runbook map, KT sessions, handover checklist |
+| [runbooks/](docs/runbooks/README.md) | Deploy, rollback, planning-season scaling, DLQ, DB restore, cache failure, ECS task stuck, secret / certificate rotation, pipeline failure, model rollback, GenAI on / off, security incident, break-glass |

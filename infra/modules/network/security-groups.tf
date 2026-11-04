@@ -19,6 +19,7 @@ locals {
       data_trigger = "Data-trigger Lambda - no inbound, HTTPS out (MWAA API)"
     } : {},
     var.enable_resolver_forwarding ? { resolver = "Route 53 Resolver outbound endpoint - DNS to WBD servers" } : {},
+    var.create_genai_security_group ? { genai = "GenAI gateway tasks - app port from API tasks only, HTTPS to VPC endpoints and S3 only" } : {},
   )
 
   # Every rule has all fields so the map has one object type; unused fields are null.
@@ -31,6 +32,7 @@ locals {
     redis_from_api            = { sg = "redis", description = "Redis TLS from API tasks", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "api", enabled = true }
     redis_from_workers        = { sg = "redis", description = "Redis TLS from worker tasks", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "workers", enabled = true }
     mwaa_from_self            = { sg = "mwaa", description = "All traffic between MWAA components", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "mwaa", enabled = var.create_mwaa_security_group }
+    genai_from_api            = { sg = "genai", description = "App port from API tasks (Service Connect)", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "api", enabled = var.create_genai_security_group }
   }
 
   static_egress_rules = {
@@ -46,6 +48,9 @@ locals {
     mwaa_to_self              = { sg = "mwaa", description = "All traffic between MWAA components", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "mwaa", enabled = var.create_mwaa_security_group }
     mwaa_https_out            = { sg = "mwaa", description = "HTTPS to AWS endpoints, S3, PyPI and Databricks", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_mwaa_security_group }
     data_trigger_https_out    = { sg = "data_trigger", description = "HTTPS to the MWAA API and AWS endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_mwaa_security_group }
+    api_to_genai              = { sg = "api", description = "App port to the GenAI gateway (Service Connect)", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "genai", enabled = var.create_genai_security_group }
+    genai_to_endpoints        = { sg = "genai", description = "HTTPS to interface endpoints (Bedrock runtime, ECR, logs, SSM, ECS)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = var.create_genai_security_group }
+    genai_to_s3               = { sg = "genai", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = aws_vpc_endpoint.gateway["s3"].prefix_list_id, source_sg = null, enabled = var.create_genai_security_group }
   }
 
   resolver_egress_rules = {

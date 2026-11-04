@@ -1,9 +1,12 @@
 # Deploys application images to ECS (and, for releases, the frontend).
 #
-#   api-ci / optimizer-ci finished on main -> dev      image sha-<7char> (only the component that was built)
-#   git tag vX.Y.Z-rcN                     -> staging  image copied from dev ECR,     tagged vX.Y.Z-rcN
-#   git tag vX.Y.Z                         -> prod     image copied from staging ECR, tagged vX.Y.Z (needs the rc on the same commit)
-#   manual dispatch                        -> redeploy an image already in that environment's ECR (rollback)
+#   api-ci / optimizer-ci / genai-ci on main -> dev      image sha-<7char> (only the component that was built)
+#   git tag vX.Y.Z-rcN                       -> staging  image copied from dev ECR,     tagged vX.Y.Z-rcN
+#   git tag vX.Y.Z                           -> prod     image copied from staging ECR, tagged vX.Y.Z (needs the rc on the same commit)
+#   manual dispatch                          -> redeploy an image already in that environment's ECR (rollback)
+#
+# genai-gateway (Release 2) is part of a deploy only where the Environment variable GENAI_ENABLED is
+# "true" (set from Terraform enable_genai); turn it on in staging before prod so the rc image exists.
 #
 # One job per run does everything after the approval gate: promote image -> (prod) RDS snapshot ->
 # migration task -> new task definitions -> wait for stable -> smoke test -> frontend -> release record.
@@ -12,7 +15,7 @@ name: deploy
 
 on:
   workflow_run:
-    workflows: [api-ci, optimizer-ci]
+    workflows: [api-ci, optimizer-ci, genai-ci]
     types: [completed]
     branches: [main]
   push:
@@ -31,7 +34,7 @@ on:
       components:
         description: What to deploy
         type: choice
-        options: [all, api, workers]
+        options: [all, api, workers, genai]
         default: all
       run_migrations:
         description: Run DB migrations first (switch off when rolling back to an older version)
@@ -75,7 +78,11 @@ jobs:
           case "$EVENT" in
             workflow_run)
               environment=dev commit="$RUN_SHA" version="sha-${RUN_SHA::7}"
-              if [ "$RUN_NAME" = "api-ci" ]; then components=api migrations=true; else components=workers migrations=false; fi ;;
+              case "$RUN_NAME" in
+                api-ci)   components=api     migrations=true ;;
+                genai-ci) components=genai   migrations=false ;;
+                *)        components=workers migrations=false ;;
+              esac ;;
             push)
               commit="$GITHUB_SHA" version="$REF_NAME" components=all migrations=true promote=true frontend=true
               if   [[ "$REF_NAME" =~ $rc  ]]; then environment=staging
@@ -91,7 +98,7 @@ jobs:
                 echo "::error::prod only deploys release tags: run this workflow on a vX.Y.Z tag"; exit 1
               fi ;;
           esac
-          [ "$components" = all ] && components="api workers"
+          [ "$components" = all ] && components="api workers genai"
           {
             echo "environment=$environment"; echo "version=$version"; echo "commit=$commit"
             echo "components=$components"; echo "promote=$promote"; echo "frontend=$frontend"; echo "migrations=$migrations"
@@ -137,6 +144,20 @@ jobs:
           echo "SSM_PREFIX=/mmm/${prefix#mmm-}" >> "$GITHUB_ENV"
           [ -d "ecs/$ENVIRONMENT" ] || { echo "::error::ecs/$ENVIRONMENT templates missing"; exit 1; }
 
+      - name: GenAI switch (Release 2)
+        env:
+          GENAI_ENABLED: ${{ vars.GENAI_ENABLED }}
+        run: |
+          components=""
+          for c in $COMPONENTS; do
+            if [ "$c" = genai ] && [ "$GENAI_ENABLED" != true ]; then
+              echo "::notice::genai-gateway skipped: GENAI_ENABLED is not true in $ENVIRONMENT"; continue
+            fi
+            components="${components:+$components }$c"
+          done
+          echo "COMPONENTS=$components" >> "$GITHUB_ENV"
+          echo "Deploying: ${components:-nothing}"
+
       - name: Change ticket on the release tag (prod)
         if: needs.resolve.outputs.environment == 'prod' && github.event_name == 'push'
         env:
@@ -167,12 +188,18 @@ jobs:
           if [ "$ENVIRONMENT" = prod ]; then
             git fetch --force --tags origin
             rc=$(scripts/promote-images.sh find-rc "$VERSION" "$COMMIT")
-            api_src="$rc" opt_src="$rc"
-          else
-            api_src=$(scripts/promote-images.sh find-build mmm/api apps/api "$COMMIT")
-            opt_src=$(scripts/promote-images.sh find-build mmm/optimizer-worker apps/optimizer-worker "$COMMIT")
           fi
-          printf 'mmm/api\t%s\nmmm/optimizer-worker\t%s\n' "$api_src" "$opt_src" | tee "$STATE/sources.tsv"
+          : > "$STATE/sources.tsv"
+          for c in $COMPONENTS; do
+            case "$c" in
+              api)     repo=mmm/api;              dir=apps/api ;;
+              workers) repo=mmm/optimizer-worker; dir=apps/optimizer-worker ;;
+              genai)   repo=mmm/genai-gateway;    dir=apps/genai-gateway ;;
+            esac
+            if [ "$ENVIRONMENT" = prod ]; then src="$rc"; else src=$(scripts/promote-images.sh find-build "$repo" "$dir" "$COMMIT"); fi
+            printf '%s\t%s\n' "$repo" "$src" >> "$STATE/sources.tsv"
+          done
+          cat "$STATE/sources.tsv"
 
       - name: Target registry login
         if: needs.resolve.outputs.promote == 'true'
@@ -206,6 +233,7 @@ jobs:
             case "$c" in
               api)     repo=mmm/api;              services="api" ;;
               workers) repo=mmm/optimizer-worker; services="whatif-worker optimizer-worker" ;;
+              genai)   repo=mmm/genai-gateway;    services="genai-gateway" ;;
             esac
             digest=$(scripts/ecs-deploy.sh digest "$repo" "$VERSION") || { echo "::error::$repo:$VERSION not in $REGISTRY"; exit 1; }
             printf '%s\t%s\n' "$repo" "$digest" >> "$STATE/digests.tsv"

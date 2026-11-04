@@ -4,13 +4,14 @@ GitHub Actions pipelines. The full guide (flow, GitHub setup, app contract, roll
 [docs/09-cicd-pipelines.md](../../docs/09-cicd-pipelines.md).
 
 **Status:** implemented in Step 11; `data.yml` and `model-governance.yml` in Step 13
-([docs/10](../../docs/10-data-platform-and-model-governance.md)).
+([docs/10](../../docs/10-data-platform-and-model-governance.md)); `genai-ci.yml` in Step 14.
 
 | File | Trigger | Environment(s) | AWS roles |
 |---|---|---|---|
 | `api-ci.yml` | `apps/api/**` PR / main | `dev` (push job only) | `mmm-dev-gha-ecr-push` |
 | `optimizer-ci.yml` | `apps/optimizer-worker/**` PR / main | `dev` (push job only) | `mmm-dev-gha-ecr-push` |
-| `_python-service-ci.yml` | called by the two above | | |
+| `genai-ci.yml` (Release 2) | `apps/genai-gateway/**` PR / main | `dev` (push job only) | `mmm-dev-gha-ecr-push` |
+| `_python-service-ci.yml` | called by the three above | | |
 | `frontend-ci.yml` | `apps/frontend/**` PR / main; called by `deploy.yml` for releases | `dev` (main) | `mmm-dev-gha-deploy` |
 | `deploy.yml` | CI finished on main → dev; `vX.Y.Z-rcN` → staging; `vX.Y.Z` → prod; manual | the target | previous env `gha-ecr-read`, own `gha-ecr-push`, own `gha-deploy` |
 | `terraform.yml` | `infra/**` PR / main; nightly; manual | `dev` → `staging` → `prod` (apply) | `gha-plan` (PR, drift), `gha-apply` |
@@ -29,4 +30,6 @@ Rules for changes here:
   `run:` with `${{ }}`, which prevents script injection.
 - `repo-checks.yml` runs actionlint on this folder.
 
-Release 2 adds `genai-ci.yml` (Step 14).
+Release 2 (Step 14): `genai-ci.yml` builds the GenAI gateway; `deploy.yml` has a `genai` component
+that is skipped wherever the Environment variable `GENAI_ENABLED` is not `true`
+([docs/12](../../docs/12-genai-bedrock.md)).

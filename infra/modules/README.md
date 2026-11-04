@@ -50,7 +50,7 @@ Shared conventions for all modules:
 | [mwaa](mwaa/) | 13 | 1 | MWAA Airflow environment |
 | [data-trigger](data-trigger/) | 13 | 1 | S3 / on-demand → EventBridge → Lambda → MWAA DAG run |
 | [databricks-access](databricks-access/) | 13 | 1 | Unity Catalog role, Databricks PrivateLink, private DNS |
-| [bedrock](bedrock/) | 14 | 2 | Bedrock endpoint, guardrails, invocation logging, alarms |
+| [bedrock](bedrock/) | 14 | 2 | Bedrock PrivateLink endpoint, guardrail + version, invocation logging, alarms, dashboard, cost budget |
 
 ## Adding a module
 

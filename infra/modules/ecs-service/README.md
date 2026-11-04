@@ -70,6 +70,7 @@ on (the CloudWatch agent default is `latest`; pin a version).
 | `create_service`, `desired_count`, `use_fargate_spot` | `true`, `1`, `false` | |
 | `target_group_arn` | `null` | API only |
 | `service_connect_namespace_arn` | `null` | |
+| `service_connect_server` | `null` | `{ discovery_name, port }`: publish port `http` so others call `http://<discovery_name>:<port>` (Step 14, genai-gateway); null = client only |
 | `enable_execute_command`, `exec_audit_log_group_arn`, `exec_kms_key_arn` | `true`, `null`, `null` | |
 | `autoscaling` | `null` | `{ type, min, max, cpu_target, queue_name, scale_out_threshold }` |
 | `enable_application_signals` | `false` | |

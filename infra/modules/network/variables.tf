@@ -56,6 +56,12 @@ variable "interface_endpoints" {
   ]
 }
 
+variable "additional_interface_endpoints" {
+  description = "Extra interface endpoint suffixes added to interface_endpoints (e.g. the ECS control-plane endpoints the GenAI gateway needs in Step 14)."
+  type        = list(string)
+  default     = []
+}
+
 # ------------------------------------------------------------------ Security groups
 variable "app_port" {
   description = "Container port of the API service (ALB -> API)."
@@ -65,6 +71,12 @@ variable "app_port" {
 
 variable "create_mwaa_security_group" {
   description = "Create the MWAA and data-trigger Lambda security groups (turned on with the data platform in Step 13)."
+  type        = bool
+  default     = false
+}
+
+variable "create_genai_security_group" {
+  description = "Create the GenAI gateway security group: app port from API tasks only, HTTPS out to VPC endpoints and S3 only (Release 2, Step 14)."
   type        = bool
   default     = false
 }

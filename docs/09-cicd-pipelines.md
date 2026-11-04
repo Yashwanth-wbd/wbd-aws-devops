@@ -16,7 +16,7 @@ or applies Terraform from a laptop after this step. No AWS keys or app secrets a
 | `model-governance.yml` | hourly, manual | Evaluates new `candidate` model versions against `data/model-thresholds.yaml`; passing ones wait for a WBD approver in `<env>-model-promotion`, then the `production` alias moves. Manual promote / rollback ([docs/10 §7](10-data-platform-and-model-governance.md#7-model-governance-model-governanceyml)) |
 | `_python-service-ci.yml`, `_terraform-apply.yml` | called by the workflows above | Shared steps |
 
-`genai-ci.yml` is added in Step 14 (Release 2).
+| `genai-ci.yml` (Release 2) | PR or push to `main` touching `apps/genai-gateway/**` | Same `_python-service-ci.yml` steps for the GenAI gateway; pushes `mmm/genai-gateway:sha-<7char>` to the dev ECR. `deploy.yml` rolls it out only where the Environment variable `GENAI_ENABLED` is `true` ([docs/12](12-genai-bedrock.md)) |
 
 ## 2. How a change reaches production
 
@@ -34,7 +34,10 @@ flowchart LR
 ```
 
 - **Dev** deploys only the component that was built. An `api-ci` run deploys `api` and runs the
-  migration. An `optimizer-ci` run deploys `whatif-worker` and `optimizer-worker`.
+  migration. An `optimizer-ci` run deploys `whatif-worker` and `optimizer-worker`. A `genai-ci`
+  run deploys `genai-gateway`, or only logs a notice while `GENAI_ENABLED` is not `true`.
+- **Release tags** deploy `api`, the workers and (where `GENAI_ENABLED` is `true`) `genai-gateway`.
+  Turn GenAI on in staging before prod: prod copies the gateway image from the staging rc.
 - **Staging**: for each app, `promote-images.sh find-build` picks the newest dev image built from
   the tagged commit or one of its ancestors. It fails if the app folder changed after that build
   (for example, the CI run on `main` failed), so a stale image is never promoted.

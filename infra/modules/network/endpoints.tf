@@ -11,7 +11,7 @@ resource "aws_vpc_endpoint" "gateway" {
 }
 
 resource "aws_vpc_endpoint" "interface" {
-  for_each = toset(var.interface_endpoints)
+  for_each = toset(concat(var.interface_endpoints, var.additional_interface_endpoints))
 
   vpc_id              = aws_vpc.this.id
   service_name        = "com.amazonaws.${local.region}.${each.key}"

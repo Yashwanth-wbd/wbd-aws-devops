@@ -49,6 +49,20 @@ resource "aws_ecs_service" "this" {
     content {
       enabled   = true
       namespace = var.service_connect_namespace_arn
+
+      dynamic "service" {
+        for_each = var.service_connect_server == null ? [] : [var.service_connect_server]
+
+        content {
+          port_name      = "http"
+          discovery_name = service.value.discovery_name
+
+          client_alias {
+            port     = service.value.port
+            dns_name = service.value.discovery_name
+          }
+        }
+      }
     }
   }
 
@@ -57,6 +71,11 @@ resource "aws_ecs_service" "this" {
   # The deploy pipeline registers new task definitions and autoscaling owns the task count.
   lifecycle {
     ignore_changes = [task_definition, desired_count]
+
+    precondition {
+      condition     = var.service_connect_server == null || (var.service_connect_namespace_arn != null && var.container_port != null)
+      error_message = "service_connect_server needs service_connect_namespace_arn and container_port (the \"http\" port mapping)."
+    }
   }
 
   depends_on = [aws_iam_role_policy.app]

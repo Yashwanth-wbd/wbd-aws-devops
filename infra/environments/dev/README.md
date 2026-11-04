@@ -251,6 +251,27 @@ Expected `terraform plan` for Step 13 with the flag still `false`: **2 to add, 2
 the next deploy). With `enable_data_platform = true`: about **55** more to add plus in-place
 changes (KMS, landing bucket policy, deploy role); PrivateLink adds 3 (endpoint, zone, record).
 
+### Step 14 – Release 2 GenAI (`genai.tf`, module `bedrock`, `apps/genai-gateway`, `genai-ci.yml`)
+
+Everything is behind `enable_genai` (default `false`); users see GenAI only when `genai_enabled`
+is also `true`. Full guide: [docs/12](../../../docs/12-genai-bedrock.md).
+
+| Piece | Resources |
+|---|---|
+| KMS | key `alias/mmm-dev-genai` (Bedrock logging + CloudWatch Logs in the key policy) |
+| Network | SG `mmm-dev-genai-sg` (app port from `api` only; HTTPS to the endpoints SG and S3 prefix list only), `api` → `genai` egress rule, interface endpoint `ecs-agent` (Service Connect proxy) |
+| Bedrock (module `bedrock`) | `bedrock-runtime` endpoint (policy: gateway role, approved models, guardrail), guardrail `mmm-dev-genai` + version, invocation logging (bucket `wbd-mmm-dev-genai-logs-use1`, log group, role `mmm-dev-bedrock-logging`), alarms, dashboard `mmm-dev-genai`, budget `mmm-dev-genai-monthly` |
+| Gateway | ECS service `mmm-dev-genai-gateway` (no load balancer, Service Connect server `genai-gateway:8080`, CPU autoscaling 1–2 / 1–3 / 2–6), task role `mmm-dev-task-genai` (approved models + guardrail only, deny outside PrivateLink, deny Bedrock changes) |
+| SSM | `/mmm/dev/genai/{model_id,guardrail_id,guardrail_version}` |
+| API | `GENAI_GATEWAY_URL=http://genai-gateway:8080` (only with the flag on) |
+| Monitoring | gateway added to the platform ECS alarms and to Splunk shipping |
+| Outputs | `genai`; `github_environment_variables.GENAI_ENABLED` (`deploy.yml` deploys `genai-gateway` only when `true`) |
+
+Expected `terraform plan` for Step 14 with the flag still `false`: **No changes** (only the new
+`GENAI_ENABLED = "false"` output value). With `enable_genai = true`: about **47** to add plus
+in-place changes (API task definition, platform alarms). Offline mock plan: `Plan: 292 to add`
+(**431** with every optional feature on).
+
 ## Placeholders to replace before the first apply
 
 `terraform.tfvars`: `aws_account_id`, `aws_region`, `allowed_regions`, `cost_center`,
@@ -273,6 +294,9 @@ For Step 13: `enable_data_platform`, `business_units`, `databricks_account_id`,
 `databricks_catalog`, `databricks_eval_client_id`, `databricks_promote_client_id`,
 `enable_databricks_privatelink`, `databricks_privatelink_service_name`; outside tfvars:
 `data/model-thresholds.yaml` and `-ModelApproverTeams` of `setup-github.ps1`.
+For Step 14: `enable_genai`, `genai_approved_model_ids`, `genai_monthly_budget_usd`,
+`genai_budget_service_names`, `genai_grounding_threshold`, `genai_relevance_threshold`,
+`enable_bedrock_invocation_logging`; outside tfvars: the base image in `apps/genai-gateway/Dockerfile`.
 
 `backend.tf`: `bucket`, `region`, `kms_key_id` (from `terraform output backend_config` in
 `infra/bootstrap`).
@@ -1043,3 +1067,27 @@ model-loading code.
   `dev-model-promotion`. Approving it as someone other than the requester moves `production`,
   and the version gets `promoted_by` and `previous_production_version`.
 - Rollback: `-f action=rollback -f business_unit=streaming`, approved, moves `production` back.
+
+## Validate Step 14
+
+The full checklist with commands is in [docs/12 §7](../../../docs/12-genai-bedrock.md#7-validate-step-14).
+
+### Without AWS
+
+```powershell
+.\scripts\validate-modules.ps1 -Name bedrock,network,ecs-service   # all "ok"
+.\scripts\mock-plan.ps1 -Environment dev,staging,prod               # 292/309/309; all features 431/450/452
+cd apps\genai-gateway; uv sync --frozen; uv run ruff check .; uv run mypy .; uv run pytest --cov   # 100 % coverage
+```
+
+### With AWS (dev, after `enable_genai = true` and the first `genai-ci` run)
+
+1. `mmm-dev-genai-gateway` runs 1/1 and its deployment shows the Service Connect name `genai-gateway`.
+2. From an API task (ECS Exec), `POST http://genai-gateway:8080/v1/explain` answers with a citation,
+   `grounded: true`, `ai_generated: true`; a prompt attack or an SSN in the question returns `intervened: true`.
+3. The same call with the task role from outside the VPC (`aws bedrock-runtime converse` with the
+   role's credentials) is denied (`DenyBedrockOutsidePrivateLink`).
+4. `/aws/bedrock/mmm-dev-invocations` and `s3://wbd-mmm-dev-genai-logs-use1/bedrock-invocations/` have the test call.
+5. `aws cloudwatch describe-alarms --alarm-name-prefix mmm-dev-genai` lists the model, token and
+   BU alarms; dashboard `mmm-dev-genai` shows the call; budget `mmm-dev-genai-monthly` exists.
+6. With `genai_enabled = false` (and a gateway redeploy) the gateway returns 503.

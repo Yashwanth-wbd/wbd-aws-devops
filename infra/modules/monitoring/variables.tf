@@ -136,6 +136,18 @@ variable "enable_guardduty_alerts" {
   default     = true
 }
 
+variable "enable_breakglass_alert" {
+  description = "Alert when the break-glass IAM Identity Center permission set signs in or makes a change (prod)."
+  type        = bool
+  default     = false
+}
+
+variable "breakglass_permission_set" {
+  description = "Name of the break-glass permission set (role AWSReservedSSO_<name>_<suffix>)."
+  type        = string
+  default     = "BreakGlass"
+}
+
 variable "enable_log_data_protection" {
   description = "Account-level CloudWatch Logs data protection policy (only one is allowed per account; turn off if WBD already has one)."
   type        = bool

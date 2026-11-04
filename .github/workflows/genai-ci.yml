@@ -1,0 +1,30 @@
+name: genai-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/genai-gateway/**
+      - .github/workflows/genai-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/genai-gateway/**
+      - .github/workflows/genai-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: genai-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/_python-service-ci.yml
+    with:
+      app_dir: apps/genai-gateway
+      repository: mmm/genai-gateway

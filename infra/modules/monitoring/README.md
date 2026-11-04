@@ -37,6 +37,7 @@ Event alerts:
 | `ecs-deployment-failed` | A deployment failed and the circuit breaker rolled it back |
 | `ecs-service-error` | ECS cannot start or place tasks, for example the image pull or a secret failed |
 | `guardduty-high` | A GuardDuty finding with severity ≥ 7 (`enable_guardduty_alerts`). GuardDuty itself is WBD's baseline. |
+| `breakglass-used` | Console sign-in or change by the `BreakGlass` permission set (`enable_breakglass_alert`, prod; API calls need the WBD CloudTrail trail). Step 15 |
 
 Budget alerts come from the `budgets` module (Step 3) and are emailed directly.
 
@@ -89,6 +90,8 @@ aws application-signals start-discovery
 | Thresholds | see `variables.tf` | `api_5xx_percent_threshold` 2, `queue_oldest_age_seconds` 300, `rds_cpu_percent` 80, `rds_free_storage_gib` 10, `redis_percent` 80, `whatif_p95_ms` 10000, `certificate_days_to_expiry` 30 |
 | `app_metric_namespace` | `MMM` | |
 | `enable_guardduty_alerts` | `true` | |
+| `enable_breakglass_alert` | `false` | prod stack sets `true` |
+| `breakglass_permission_set` | `BreakGlass` | IAM Identity Center permission set name |
 | `enable_log_data_protection` | `true` | Only one account-level policy is allowed. Set `false` if WBD already has one. |
 | `data_protection_identifiers` | secret keys, private keys, card numbers | Emails are left out on purpose: user emails in audit logs must stay readable. |
 

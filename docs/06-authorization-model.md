@@ -34,7 +34,7 @@ too broad, the boundary blocks:
 
 Redis access is by network (security group) and the auth token, not by IAM.
 The task roles are defined in `infra/environments/<env>/ecs.tf` (Step 7).
-| `mmm-<env>-task-genai` (R2) | `bedrock:InvokeModel*` on the approved model ARN, `bedrock:ApplyGuardrail` | Training, customization, changing logging config (explicit deny) |
+| `mmm-<env>-task-genai` (R2) | `bedrock:InvokeModel*` on the approved model ARNs, `bedrock:ApplyGuardrail` on the platform guardrail, read `/mmm/<env>/genai/*` | Any Bedrock call not through the PrivateLink endpoint; training, customization, provisioned throughput, logging and guardrail changes (explicit deny) – [docs/12](12-genai-bedrock.md) |
 
 Each service also has its own **security group** (Step 4), so network access is limited too:
 the API only accepts traffic from the ALB, the workers accept nothing inbound, the database

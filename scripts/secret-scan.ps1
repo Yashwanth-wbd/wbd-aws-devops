@@ -3,7 +3,7 @@
   Scans the repository for committed secrets with Trivy, also when the repo sits on a network (UNC) share.
 
 .DESCRIPTION
-  The repo is copied to %TEMP% (without .terraform and .git) and scanned there, because Trivy
+  The repo is copied to %TEMP% (without .terraform, .git and local Python/Node caches) and scanned there, because Trivy
   does not reliably walk UNC paths on Windows. Exit code 1 means a secret was found.
   CI runs gitleaks / Trivy directly on the checkout (Step 11).
 
@@ -21,7 +21,7 @@ $src = (Resolve-Path $Path).ProviderPath
 $dst = Join-Path $env:TEMP 'mmm-secretscan'
 
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-robocopy $src $dst /E /XD .terraform .git /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $src $dst /E /XD .terraform .git .venv __pycache__ .pytest_cache .mypy_cache .ruff_cache node_modules /NFL /NDL /NJH /NJS /NP | Out-Null
 
 trivy fs --scanners secret --quiet --exit-code 1 $dst
 $code = $LASTEXITCODE
