@@ -1,0 +1,369 @@
+# PROMPT — Build the WBD MMM AWS Platform (Infra + CI/CD) on Amazon ECS Fargate
+
+> **How to use this file:** Give this entire document to an AI coding agent (or follow it
+> yourself) on the target/client system. It reproduces the **infrastructure (Terraform,
+> modularized)**, **deployment**, and **GitHub Actions CI/CD** for the WBD MMM platform —
+> **exactly** matching the agreed ECS architecture and the AWS resource list. Implement the
+> steps **in order**; each step has a **Validate** gate — do not proceed until it passes.
+>
+> **Scope:** DevOps only — **do NOT write frontend or backend application code** (the
+> developers own `apps/api`, `apps/optimizer-worker`, `apps/frontend`). This prompt builds
+> everything that **provisions, secures, and deploys** their containers, plus the data-team
+> platform and Release 2 (GenAI).
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+**Execute exactly ONE numbered step at a time. Do NOT start the next step until the user
+explicitly confirms the current step is validated.**
+
+After completing a step you MUST:
+1. Create only the files/resources for **that single step** — nothing from later steps.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands** to run in
+   the terminal, and (c) any Git/AWS inputs to set for that step (keys, variables, secrets).
+3. **WAIT** for the user to run the commands manually and reply with confirmation
+   (e.g. "validated" / "passed").
+4. Only after that confirmation, begin the next step.
+
+**Hard rules:** Never batch or chain multiple steps in one go. Never run `terraform apply`
+for the next step before the user confirms the previous one. If a validation fails, fix only
+the current step and re-present the validation — do not move forward. If anything is
+ambiguous, ask before creating resources.
+
+---
+
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Build the WBD MMM platform's infrastructure and
+delivery pipeline on **Amazon ECS on Fargate** (WBD chose ECS over EKS — no Kubernetes,
+Helm, Karpenter, or KEDA). Mirror the delivery pattern of the internal **Flywheel** app
+(which runs on Azure Container Apps) but **re-implemented on AWS**.
+
+**Golden rules (apply to every step):**
+1. **Everything is Terraform**, run **only from GitHub Actions via OIDC** — never from laptops, never with static AWS keys.
+2. **No secrets in Git or images.** Runtime secrets live in **AWS Secrets Manager / SSM**; ECS injects them at task start.
+3. **Modularize**: reusable modules in `infra/modules/`, thin per-environment stacks in `infra/environments/{dev,staging,prod}/`.
+4. **Build order: Shared/bootstrap → Dev → prove it works → Staging (same code) → Prod (same code).**
+5. **Validate after every step.** `terraform fmt -check`, `terraform validate`, then a targeted plan/apply check.
+6. **Naming:** `mmm-<env>-<component>` where env ∈ `dev|stg|prd`. **Tags on every resource:** `Application, Environment, Owner, CostCenter, BusinessUnit, DataClassification, ManagedBy, Component`.
+
+---
+
+## 1. Final target stack (what you are building)
+
+`Terraform · GitHub Actions (OIDC) · ECR · ECS on Fargate + ALB · ECS Service Auto Scaling
+(SQS) · ECS task roles · RDS PostgreSQL + RDS Proxy · ElastiCache · SQS FIFO · S3 (+ Object
+Lock + versioning + cross-region replication) · KMS · Secrets Manager + Parameter Store ·
+CloudFront + WAF + ACM + Route 53 · Okta SSO/MFA · AWS Backup · CloudWatch (+ Splunk via
+Firehose) · AWS Backup · MWAA + EventBridge + Lambda + Databricks (data team) · Bedrock (R2).`
+
+**Flywheel (Azure) → WBD MMM (AWS) mapping:** Container Apps→ECS Fargate · ACR→ECR · Key
+Vault→Secrets Manager+SSM · Storage Account→S3 · Log Analytics→CloudWatch · PostgreSQL
+Flexible→RDS+Proxy · Front Door/Entra→CloudFront+WAF+Okta · Azure OIDC→GitHub OIDC→IAM ·
+Container App Job→one-off ECS task.
+
+---
+
+## 2. Prerequisite tools (install + verify before Step 0)
+
+| Tool | Min version | Verify | Purpose |
+| --- | --- | --- | --- |
+| **Terraform** | ≥ 1.6 | `terraform version` | IaC |
+| **AWS CLI v2** | latest | `aws --version` | AWS access |
+| **Docker** | latest | `docker version` | build/scan images locally |
+| **Git** | latest | `git --version` | source control |
+| **GitHub CLI** (`gh`) | latest | `gh --version` | set repo/env variables |
+| **jq** | latest | `jq --version` | JSON in scripts |
+| **tflint**, **Checkov**, **Trivy** | latest | `tflint -v` etc. | CI security gates (also run in Actions) |
+| **Node.js 22 + uv** (optional, local) | — | — | only if testing app builds locally |
+
+> Corporate proxy note: if `terraform init`/`aws`/`npm` fail with SSL "unable to get local
+> issuer certificate", add the corporate CA bundle to `NODE_EXTRA_CA_CERTS` (Node/npm) and
+> `REQUESTS_CA_BUNDLE` (AWS CLI/Python).
+
+---
+
+## 3. Access & accounts to request before starting (ASK the client)
+
+- **AWS accounts** (WBD-owned): `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod`. Record account IDs. Confirm baseline is ON: CloudTrail, GuardDuty, Security Hub, AWS Config, S3 account-level Block Public Access, EBS default encryption.
+- **Approved region(s)** and **VPC CIDR ranges** per env (non-overlapping with WBD networks).
+- **IAM Identity Center + Okta** permission sets for engineers (ReadOnly/Developer/DevOps/Security/BreakGlass). No IAM users.
+- **GitHub org** + permission to create repos, Environments, and OIDC trust.
+- **DNS + ACM**: who owns the domain; app names `mmm-dev / mmm-stg / mmm`; who issues certs.
+- **CloudFront origin-facing prefix list id** for the region (for the ALB ingress SG).
+- **Okta app per environment** (end-user planner login) — WBD registers; you get client IDs.
+- **Databricks** workspace, Unity Catalog, PrivateLink details, service-principal secret.
+- **Splunk** HEC endpoint + token; log retention requirements.
+- **CAB** process for prod; named **WBD model-promotion approver**; approved **LLM** + token capacity (R2).
+
+---
+
+## 4. GitHub branching strategy (recommended — industry standard, easy to track)
+
+Use **trunk-based development with short-lived feature branches + release tags** (this is
+what the pipelines in this project assume and the cleanest for audit):
+
+- `main` is always releasable. Protected: **PR required, 1–2 reviewers via CODEOWNERS, all checks green, no force-push, linear history, signed commits if WBD requires.**
+- **Feature branches**: `feature/<ticket>-<short-desc>`, `fix/…`, `chore/…`, `infra/…`. Short-lived; squash-merge to `main`.
+- **Deployment is tag/branch driven, not branch-per-env:**
+  - merge to `main` → **auto-deploy to Dev** (`sha-<7char>` image).
+  - tag `vX.Y.Z-rcN` → **Staging** (EY lead approves).
+  - tag `vX.Y.Z` → **Prod** (WBD approver + CAB; release tags only).
+- **Reviewers / CODEOWNERS:** add a `.github/CODEOWNERS` mapping `infra/**`, `.github/**`, `ecs/**` to the DevOps team; require their review on those paths. App paths map to the dev teams.
+- **Release tags for identification:** image tags `sha-<7char>` (dev), `vX.Y.Z-rcN` (staging/UAT), `vX.Y.Z` (prod). ECR tag immutability ON. The pipeline records tag + task-def revision + digest in release notes.
+
+---
+
+## 5. Repository & folder structure to create
+
+In the real setup use **separate repos** (`wbd-mmm-infra`, `wbd-mmm-api`, `wbd-mmm-optimizer`,
+`wbd-mmm-frontend`, `wbd-mmm-deploy`). This prompt builds the **infra + pipelines**; keep the
+layout below in the infra repo (or a monorepo if WBD prefers):
+
+```
+infra/
+├── bootstrap/                 # one-time: S3 state bucket + DynamoDB lock (local state)
+├── modules/                   # reusable modules (build these in Step 2)
+│   ├── network/  kms/  iam-oidc/  permission-boundary/  ecr/
+│   ├── ecs-cluster/  ecs-service/  alb/
+│   ├── rds/  elasticache/  sqs/  s3-bucket/  log-bucket/
+│   ├── secrets/  monitoring/  edge/  backup/  budgets/
+│   └── (data-platform: mwaa/  data-trigger/  databricks-access/  log-shipping/)  # Step 13
+│   └── (bedrock/)                                                  # Step 14 (R2)
+└── environments/
+    ├── dev/      # creates ECR + OIDC provider; 2 AZs; small sizing
+    ├── staging/  # 3 AZs; multi-AZ RDS; AWS Backup; reuses dev ECR
+    └── prod/     # 3 AZs; HA; deletion protection; AWS Backup + vault lock + cross-region copy
+ecs/{dev,staging,prod}/        # task definition JSON templates per service
+.github/workflows/             # api-ci, optimizer-ci, frontend-ci, terraform, deploy, data
+scripts/                       # smoke.sh, run-migration.sh
+docs/                          # architecture, deployment, security, oidc, secrets, logging, backup, runbooks
+```
+
+Each `environments/<env>/` has: `provider.tf`, `backend.tf`, `variables.tf`, `main.tf`,
+`outputs.tf`, `terraform.tfvars`. Decision: **ECR registry + GitHub OIDC provider are created
+in the `dev` stack and reused by staging/prod** (like Flywheel keeps ACR in dev). Confirm
+shared-vs-per-env ECR with the client.
+
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION (do in order; validate each)
+
+> For every step: **(a) Create** the Terraform/module, **(b) Configure** any Git/AWS inputs
+> (keys, env vars, secrets), **(c) Validate** before moving on.
+
+### Step 0 — Prereqs & access
+- Install tools (§2). Configure AWS CLI SSO for the **dev** account.
+- **Validate:** `aws sts get-caller-identity` returns the dev account; `terraform version` ≥ 1.6.
+
+### Step 1 — Bootstrap the Terraform state backend (per account)
+- Create `infra/bootstrap/` (local state, no backend block): S3 **state bucket** (versioned, KMS-encrypted, public-access blocked) + **DynamoDB lock table** + a KMS key.
+- Run once per account with that account's creds and tfvars.
+- **Configure:** none in Git yet.
+- **Validate:** `terraform apply` in bootstrap; confirm bucket + table exist; a second `plan` waits on the lock.
+
+### Step 2 — Module skeletons
+- Create all `infra/modules/*` with `main.tf` (+ `variables.tf`/`outputs.tf` where large), each pinning `aws ~> 5.60`, `terraform >= 1.6`.
+- **Validate:** `terraform fmt -recursive` clean; each module parses.
+
+### Step 3 — Foundation (dev first): KMS, permission boundary, OIDC, budgets
+- **KMS** keys per purpose (rds, s3, logs, secrets, sqs) + key policies, rotation on.
+- **permission-boundary** module: an IAM policy attached to **every** Terraform-created role (deny IAM user/key creation, boundary tampering, disabling security services, non-approved regions).
+- **iam-oidc** module: GitHub **OIDC provider** + roles `gha-plan` (read-only), `gha-apply` (Terraform), `gha-deploy` (ECS deploy, least-privilege), `gha-ecr-push`. Trust condition binds to `repo:<org>/<repo>:environment:<env>`.
+- **budgets** module: monthly budget 50/80/100% + Cost Anomaly Detection.
+- **Configure (AWS):** confirm the OIDC provider thumbprint; record role ARNs (used as GitHub variables in Step 11).
+- **Validate:** `terraform validate`; `plan` shows the OIDC provider, boundary policy, 5 KMS keys.
+
+### Step 4 — Networking
+- **network** module: VPC `/19`, subnets (public / private-app / private-data / private-endpoint) across AZs (2 in dev, 3 in stg/prod), IGW, **NAT** (1 in dev, 1-per-AZ in stg/prod), route tables, **VPC gateway endpoints** (S3, DynamoDB) + **interface endpoints** (ECR api/dkr, STS, Secrets Manager, SSM, SSM Messages, KMS, CloudWatch Logs/Monitoring, X-Ray, SQS), per-service **security groups**, and **VPC Flow Logs → CloudWatch** (self-contained log group + role).
+- **WBD hub connectivity (optional, gated on WBD inputs):** the network module also creates a **Transit Gateway attachment** (`transit_gateway_id`) and a **Route 53 Resolver outbound endpoint + FORWARD rules** (`resolver_outbound_target_ips`, `resolver_forward_domains`) so tasks resolve WBD-internal names (Splunk, Databricks, on-prem) over the hub. **Databricks PrivateLink + private hosted zone** are in the `databricks-access` module (Step 13). All default off until WBD shares the hub details.
+- **Validate:** data subnets have no internet route (VPC Reachability Analyzer); a test task can reach S3/ECR/SQS/Secrets via endpoints.
+
+### Step 5 — Security baseline & secret containers
+- **secrets** module: create **empty** Secrets Manager containers (`mmm/<env>/api/db`, `mmm/<env>/rds/proxy`, `mmm/<env>/redis/token`, + Databricks/Splunk/3rd-party) and **SSM parameters** (`/mmm/<env>/genai_enabled`, endpoints, quotas).
+- Enforce: TLS 1.2+ everywhere, KMS at rest on every store.
+- **Secrets handling (no plaintext anywhere):** the **RDS master password** is **RDS-managed** with auto-rotation in Secrets Manager; the **Redis auth token** and the **CloudFront→ALB `X-Origin-Verify` secret** are **generated by Terraform** (`random_password`) and live only in the KMS-encrypted state; the **RDS Proxy** secret (`mmm/<env>/rds/proxy`) holds the **application** DB user `{username,password}`, set out-of-band after the first migration — never the admin user. **No secret is a Terraform variable or has a `change-me` default.** The Splunk HEC token is passed only via `TF_VAR_splunk_hec_token` in CI.
+- **Validate:** a repo secret scan finds nothing; `aws secretsmanager get-secret-value` works for a test secret.
+
+### Step 6 — Platform services (data & storage)
+- **ecr** module (dev stack): repos `mmm/api`, `mmm/optimizer-worker`, `mmm/genai-gateway`; **tag immutability ON**, scan-on-push (Inspector), lifecycle policy.
+- **s3-bucket** module → create: `landing`, `results`, `approved-worm` (**Object Lock**), `exports` (30-day expiry), `frontend`, `logs`. **Enable versioning on all; add cross-region replication** on `results` + `approved-worm` + state (prod, if WBD approves); HTTPS-only policy; KMS. (Note: the **logs** bucket for ALB/CloudFront logging needs **SSE-S3 + ACLs enabled (BucketOwnerPreferred) + log-delivery policy** — give it a dedicated config, not the generic KMS bucket.)
+- **Data buckets hardening + per-BU keys:** `landing`/`results`/`approved-worm`/`exports` additionally **deny non-KMS uploads** and send **S3 access logs** to the logs bucket; **landing** transitions to Glacier after 1 year but **keeps 3+ years** of source history. Create **one S3 KMS CMK per business unit** (data classification / BU isolation) and a **data-quality** bucket (Great Expectations results) — both under the `enable_data_platform` data layer (Step 13).
+- **rds** module: RDS PostgreSQL (+ parameter group: `force_ssl`, `pgaudit`; Enhanced Monitoring role; Performance Insights) + **RDS Proxy** (IAM auth, TLS). Multi-AZ in stg/prod; deletion protection in prod.
+- **elasticache** module: Redis/Valkey replication group, TLS + auth token, **daily snapshots** (snapshot retention 1 in dev, 7 in prod), primary+replica with auto-failover in stg/prod.
+- **sqs** module: FIFO job queue + DLQ (maxReceiveCount 3), visibility timeout > longest job (15 min).
+- **Configure (AWS):** none new in Git.
+- **Validate:** a test ECS task can write SQS, read/write S3 (TLS), connect RDS via Proxy and Redis; buckets are versioned and block public access.
+
+### Step 7 — ECS compute (cluster, ALB, services, autoscaling, tracing)
+- **ecs-cluster** module: ECS cluster (Fargate + **Container Insights enhanced**), **Service Connect (Cloud Map) namespace**, **task execution role** (ECR pull, logs, read listed secrets, KMS decrypt).
+- **alb** module: ALB in public subnets (ingress from **CloudFront prefix list only**), **target group type `ip`**, HTTPS listener (TLS 1.2+), access logs to the logs bucket.
+- **ecs-service** module (reused for api + workers): task definition, **per-service task role**, SG, CloudWatch log group, **rolling update (min 100 / max 200)**, **deployment circuit breaker with rollback ON**, AZ spread, ECS Exec (break-glass). **Autoscaling:** API = CPU target-tracking (~60%); workers = **SQS backlog step scaling with alarms wired via `alarm_actions`** (scale-out alarm → scale-out policy, scale-in alarm → scale-in policy). Worker turns on **task scale-in protection** while a job runs. Optional **CloudWatch-agent sidecar (Application Signals)** gated by a flag + `CloudWatchAgentServerPolicy` on the task role.
+- Create services: `mmm-<env>-api` (ALB), `mmm-<env>-whatif-worker` (always-on min 1–2), `mmm-<env>-optimizer-worker` (scale 0→N), and `mmm-<env>-migrate` (one-off task).
+- **Terraform contract:** set `lifecycle { ignore_changes = [task_definition, desired_count] }` on each service so the deploy pipeline + autoscaling aren't reverted by `apply`.
+- **Validate:** API tasks healthy behind ALB across AZs; 5 test SQS messages scale the optimizer out then back to 0 without killing a running job; each service has its own task role; a bad image auto-rolls-back.
+
+### Step 8 — Edge & front door (+ Okta)
+- **edge** module (us-east-1 provider alias): **WAF** web ACL (managed rules + rate limit) + logging; **ACM** cert (us-east-1 for CloudFront, region cert for ALB); **CloudFront** (OAC to frontend S3, `/api/*` → ALB with an `X-Origin-Verify` shared-secret header, security-headers policy, TLS 1.2+); **Route 53** records.
+- **Okta:** WBD registers one app per env (Auth Code + PKCE, MFA; step-up MFA for approvals/overrides); groups carry business-unit + role claims. API enforces authz + **PostgreSQL row-level security** per BU.
+- **Configure (AWS):** fill `cloudfront_certificate_arn`, `alb_certificate_arn`, `cloudfront_prefix_list_id`, domain aliases.
+- **Validate:** Okta login + MFA works; hitting the ALB directly (bypassing CloudFront) is refused; one BU can't see another BU's data.
+
+### Step 9 — Monitoring & logging
+- **monitoring** module: SNS alert topic (+ optional Chatbot/Teams); CloudWatch **Container Insights**, **Application Signals**, **alarms** (API 5xx>2%, SQS oldest>5min, **DLQ not empty**, RDS CPU>80%, what-if>10s, cert<30d, budget, **ECS deploy rolled back**), dashboards; **Kinesis Firehose → Splunk** + CloudWatch Logs **subscription filters** + IAM roles; Logs **data-protection policy**.
+- **Validate:** a test alarm reaches the on-call channel; one `run_id` is searchable in Splunk across API/worker/audit.
+
+### Step 10 — Backup & DR
+- **backup** module: **AWS Backup vault** (+ **vault lock** in prod), **daily backup plan**, backup IAM role, **selection by tag `backup=true`**. Tag RDS + `results` + `approved-worm` with `backup=true`. Add RDS PITR (14–35 days), **ElastiCache snapshots**, **S3 versioning** (Step 6), and **cross-region backup copy** in prod (if WBD approves).
+- **Validate:** restore RDS to a point in time in staging; rebuild a whole env from code; document RPO/RTO met.
+
+### Step 11 — CI/CD pipelines + GitHub Environments/variables/secrets + reviewers
+- Create `.github/workflows/`:
+  - `api-ci.yml` / `optimizer-ci.yml` / `genai-ci.yml` (R2): lint, type-check, **tests (coverage gate)**, dependency audit, **build**, **Trivy scan (block Critical/High w/ fix)**, **push `sha-<7char>` to ECR** (main only), via **OIDC**.
+  - `frontend-ci.yml`: build React → S3 release folder → switch CloudFront `/current` → invalidate.
+  - `data.yml`: validate DAGs → sync DAGs + `requirements.txt` to the MWAA bucket (dev→staging→prod, `data-v*` tags). `model-governance.yml`: evaluate a retrained model vs thresholds, then move the MLflow `production` alias on pass + named-approver sign-off.
+  - `terraform.yml`: PR = fmt/validate/tflint/Checkov/plan; merge = apply **dev → (approve) staging → (approve) prod**; nightly drift.
+  - `deploy.yml` triggers on a **CI build completing** (`workflow_run` of api-ci/optimizer-ci/genai-ci on `main` → dev — so the image exists before ECS is told to use it), tag `v*-rc*` → staging, tag `v*` → prod, or manual dispatch (rollback). For tags it **promotes the image by re-tagging in ECR** (`scripts/promote-images.sh`, no rebuild). Steps: remember current revision → **(prod) RDS snapshot** → **run DB migration as one-off ECS task** → render task def with new image → **update ECS service, wait for stability** → **smoke test (`/api/health`) → rollback on failure**. Deploys `genai-gateway` only when `GENAI_ENABLED=true`.
+  - `scripts/smoke.sh`, `scripts/run-migration.sh`, `scripts/promote-images.sh`, `scripts/trigger-ondemand.sh`.
+- **GitHub Environments** (`dev`, `staging`, `prod`) with protection rules: dev auto; **staging = EY lead approval**; **prod = WBD approver(s) + CAB, prevent self-review, release tags only, change ticket**.
+- **Reviewers:** add `.github/CODEOWNERS` for `infra/**`, `.github/**`, `ecs/**` → DevOps team.
+- **Configure (GitHub) — per Environment variables (non-secret):** `AWS_REGION`, `AWS_DEPLOY_ROLE_ARN`, `ECR_PUSH_ROLE_ARN`, `TF_PLAN_ROLE_ARN`, `TF_APPLY_ROLE_ARN`, `ECR_REGISTRY`, `ECS_CLUSTER`, `APP_URL`, `APP_SUBNET_IDS`, `DATA_CLIENTS_SG_ID`, `FRONTEND_BUCKET`, `CLOUDFRONT_DISTRIBUTION_ID` (values from Terraform outputs). **GitHub secrets:** none needed for deploys (OIDC); only add scanner tokens (e.g. `SONAR_TOKEN`) if used.
+  ```bash
+  gh variable set ECS_CLUSTER --env dev --body "mmm-dev-ecs"
+  gh variable set AWS_DEPLOY_ROLE_ARN --env dev --body "arn:aws:iam::<dev-acct>:role/mmm-dev-gha-deploy"
+  # repeat for staging/prod
+  ```
+- **Configure (AWS) — runtime secrets/config injected by ECS** (not GitHub): populate `mmm/<env>/api/db`, `mmm/<env>/rds/proxy`, `mmm/<env>/redis/token`, `/mmm/<env>/genai_enabled`.
+- **Validate:** a merge to `main` auto-deploys to dev; a seeded vuln/secret is blocked; prod deploy waits for WBD approval and records who approved; rollback tested in staging.
+
+### Step 12 — Promote the whole platform to Staging then Prod
+- Re-run Steps 3–11 for `staging` then `prod` using the **same modules** (only sizing, AZ count, approvals, backup/vault-lock, cross-region differ). OIDC provider is per-account; ECR is reused from dev.
+- **Validate:** staging & prod stacks `validate` + `plan` cleanly; promotion by tag works end-to-end.
+
+### Step 13 — Data-team platform (so the data team can deploy pipelines & models)
+> The **data team does not hand-deploy to prod**; you provide the platform + pipeline + governance, and a **named WBD approver** authorizes model promotion.
+
+**Where the data-modelling work runs (it is split across 3 runtimes — NOT just ECS):**
+- **AWS MWAA (managed Airflow)** = **orchestration** — the DAGs decide when/what runs; no servers to manage.
+- **Databricks (WBD-owned)** = **compute + data layers** (Bronze/Silver/Gold, dbt) + model **training** + the **MLflow** registry. Reached over **PrivateLink** with a **Unity Catalog** IAM role.
+- **ECS optimizer/what-if workers** = model **scoring only** — they load "whatever MLflow `production` points to" and run the solver. **ECS never trains models.**
+- **AWS Lambda + EventBridge** = the data-arrival / on-demand **trigger** (serverless, not ECS).
+
+**Flow:** source file → **S3 `landing`** (per-BU KMS key) → **EventBridge → Lambda** (or an on-demand `mmm.ondemand` event) → **MWAA DAG `mmm_ingest`** → calls **Databricks** (transform / retrain) + **Great Expectations** (data-quality) → writes a **run manifest** (lineage) to `results`. Planner request → **API** → **SQS** → **ECS optimizer-worker** reads the model from **MLflow / Databricks SQL warehouse** → writes results to **S3 + RDS**.
+
+**Build:**
+- **mwaa** module: Amazon MWAA (Airflow) + execution role + MWAA S3 bucket (DAGs/requirements), private web UI.
+- **data-trigger** module: **S3 (landing) → EventBridge → Lambda → one MWAA DAG run** on **data arrival** (idempotent per object+etag), **plus an on-demand path** (`mmm.ondemand` EventBridge event via `scripts/trigger-ondemand.sh` or any `events:PutEvents` caller → the same DAG). (Alternative to confirm with WBD: **Databricks Workflows file-arrival triggers** instead of MWAA + Lambda.)
+- **databricks-access** module: IAM role for **Unity Catalog** + **PrivateLink** + private DNS; service-principal token in Secrets Manager. Workers also receive the **Databricks SQL warehouse** HTTP path + `DATABRICKS_HOST` / `MLFLOW_*`. Databricks workspace/account/host/warehouse are WBD-owned — use the **dummy placeholders** in `terraform.tfvars` until WBD supplies the real values.
+- **Per-BU data isolation:** one **S3 CMK per business unit** (`business_units`), granted to the Unity Catalog role and MWAA.
+- **Data quality:** Great Expectations results bucket + sample suite (`data/quality/`).
+- **Lineage:** every run writes a **run manifest** (`data/schemas/run-manifest.schema.json`) to `results`; **Unity Catalog lineage** is enabled on the Databricks side.
+- **log-shipping** module: CloudWatch → Firehose → **Splunk** HEC when `splunk_hec_endpoint` is set.
+- **`data.yml` pipeline:** DAG import checks → lint → upload DAGs + `requirements.txt` to the **MWAA bucket** (add dbt compile/test, data-quality suites and Databricks job deploys as the data team provides them), promoted **dev→staging→prod** (`data-v*` tags). The data team never uploads by hand.
+- **Model governance** (`model-governance.yml` + `scripts/model_governance.py` + `data/model-thresholds.yaml`): every retrain is auto-evaluated against the **Week-1 acceptance thresholds** (placeholder values until signed off); register the candidate in **MLflow**; promote to the `production` alias **only on pass + the named WBD approver** (a second `<env>-model-promotion` GitHub Environment gate); **log failed candidates with metrics**. Model updates are a registry change — usually **no ECS redeploy**.
+- **Gate + caveats:** all of the above sits behind `enable_data_platform` (default false). The Databricks UC role is **two-phase** (apply → register in Databricks → set `databricks_self_assume_enabled=true` → apply again); MWAA takes 20–30 min to create.
+- **Validate:** dropping a test file in `landing` (or running `trigger-ondemand.sh`) starts exactly one Airflow run; MLflow access from ECS tasks works; a failing model is blocked and logged.
+
+---
+
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2 (do not skip)
+
+**Release 2 (GenAI / Bedrock) is the LAST thing you build. Do NOT start Step 14 until
+Release 1 is fully done and live in all three environments.** Everything up to here
+(**Steps 0–13**, plus runbooks) is **Release 1 — the core platform**. Before proceeding to
+Release 2, confirm ALL of the following:
+
+- ☐ Release 1 infra + CI/CD built and **deployed to Dev, then Staging, then Prod** (same code).
+- ☐ The data-team platform (Step 13) is live and model governance works.
+- ☐ Production readiness checklist passed (§11): security sign-off, pen test clean, backups + restore tested, failover tested, perf targets met, dashboards/alerts live, runbooks written.
+- ☐ **Parallel run + UAT signed off by WBD** and **Release 1 go-live accepted** in Prod.
+- ☐ WBD has approved starting Release 2 (approved LLM from the list + token capacity confirmed).
+
+Only after the user confirms **"Release 1 complete / go for Release 2"** do you begin Step 14.
+
+---
+
+### Step 14 — Release 2: GenAI (Amazon Bedrock)  — *starts only after the Release 1 gate above*
+Everything here is gated by `enable_genai` (default **false**) + the `GENAI_ENABLED` GitHub Environment variable, so Release 1 applies and deploys without any of it.
+
+- **bedrock** module: enable **only the WBD-approved model(s)** (`genai_approved_model_ids`); **Bedrock-runtime VPC endpoint (PrivateLink)** whose endpoint policy allows **only those model ARNs + the guardrail**; **Bedrock Guardrails** (prompt-injection filter, PII anonymize/block, contextual grounding + relevance thresholds); **invocation logging** (prompt + answer) to an **encrypted S3 bucket + CloudWatch**; **GenAI dashboard**, Bedrock **alarms** (server/client errors, latency, daily-token-quota) and a **Bedrock cost budget**.
+- **ECS `mmm-<env>-genai-gateway`** service (`genai.tf`): internal only — reached from the API via **Service Connect**, **no ALB**; CPU target-tracking autoscaling; **restricted egress** (only VPC endpoints + the S3 gateway endpoint); its own **task role** that can invoke **only the approved model + ApplyGuardrail**, with training / model-customization / logging-config **explicitly denied**; SG accepts traffic from the **API SG only**.
+- **Config (SSM, read by the task at start):** `/mmm/<env>/genai/{model_id,guardrail_id,guardrail_version}` and per-BU `/mmm/<env>/genai/token_quota/<bu>`; the API gets the `/mmm/<env>/genai_enabled` flag as `GENAI_ENABLED` and `GENAI_GATEWAY_URL` when enabled. No model/guardrail IDs are hard-coded in Git.
+- **App + CI/CD:** sample gateway in `apps/genai-gateway` (FastAPI, `/health`, every call passes `guardrailConfig`); **`genai-ci.yml`** builds/scans/pushes `mmm/genai-gateway:sha-…`; **`deploy.yml`** deploys it via `workflow_run` **only when `GENAI_ENABLED=true`**; the `mmm/genai-gateway` ECR repo is created in the dev registry.
+- **Manual steps (cannot be automated):** accept the model EULA / enable the model in the **Bedrock console** (per account+env); note **Bedrock model-invocation logging is an account+region singleton** — import or disable if another stack already configures it.
+- **Configure (tfvars):** `enable_genai = true`, `genai_approved_model_ids = ["<WBD-approved model id>"]` (+ optional `genai_token_quotas`, `genai_monthly_budget_usd`).
+- **Validate:** calls work **only through the private endpoint**; guardrails block test attack prompts; every AI answer is logged with its data sources/citations; the API reaches the gateway by name over Service Connect.
+
+### Step 15 — Handover & ongoing operations
+- Write runbooks (deploy, rollback, scale for planning season, DLQ handling, DB restore, cache failure, ECS task stuck, secret/cert rotation, pipeline failure, model rollback, GenAI on/off, security incident, break-glass).
+- Ongoing: patch base images monthly (Fargate platform patched by AWS), weekly vuln fixes, nightly drift check, quarterly access + restore tests, DR exercise twice a year.
+
+---
+
+## 7. Environment variables — quick reference
+
+**GitHub (per Environment, non-secret):** `AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_PUSH_ROLE_ARN,
+TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, ECR_REGISTRY, ECS_CLUSTER, APP_URL, APP_SUBNET_IDS,
+DATA_CLIENTS_SG_ID, FRONTEND_BUCKET, CLOUDFRONT_DISTRIBUTION_ID` (+ `GENAI_ENABLED`, `MWAA_BUCKET`,
+`MLFLOW_TRACKING_URI` once Steps 13/14 are reached). In **staging/prod**, `ECR_PUSH_ROLE_ARN` is the
+**dev-account** role (the registry lives in dev). **No AWS keys, no app secrets.**
+
+**AWS Secrets Manager:** `mmm/<env>/api/db`, `mmm/<env>/rds/proxy`, `mmm/<env>/redis/token`,
+(+ Databricks SP, Splunk token, 3rd-party keys).
+**AWS SSM Parameter Store:** `/mmm/<env>/genai_enabled`, endpoints, per-BU quotas.
+**ECS task-def env (set by IaC, non-secret):** `APP_ENV, AWS_REGION, OPTIMIZE_QUEUE_URL,
+RESULTS_BUCKET, DB_HOST`.
+
+---
+
+## 8. Security, authorization & OIDC (apply throughout)
+
+- **Keyless CI/CD:** GitHub OIDC → short-lived IAM role per environment; trust bound to `repo:<org>/<repo>:environment:<env>`. No stored AWS keys.
+- **Identity:** engineers via Okta SSO + permission sets; **ECS tasks via per-service task roles**; app users via Okta OIDC (MFA + step-up) → app authz → **Postgres row-level security** per BU.
+- **Permission boundary** on every Terraform-created role. **No IAM users / access keys.**
+- **Encryption:** KMS at rest everywhere; TLS 1.2+ in transit. **WORM (Object Lock)** for approved scenarios; **pgaudit** + append-only audit tables.
+- **Pipeline security gates:** SAST, dependency scan, secret scan, **Trivy image scan**, **Checkov (IaC)**, DAST before prod.
+- **Edge:** WAF managed rules + rate limit; CloudFront-only ALB ingress; Shield Standard.
+
+---
+
+## 9. Deployment strategy & rollback
+
+- **Default: rolling update** (ECS starts new tasks, waits for ALB health, drains old; **circuit breaker auto-rollback**).
+- **Blue/green** (ECS native + ALB) for big changes; **linear/canary** (shift % of ALB traffic) for risky features; **feature flags** for GenAI.
+- **DB changes:** versioned Alembic migrations run as a one-off ECS task **before** the new app version; **expand-then-contract**; RDS snapshot before prod migration.
+- **Rollback:** app → circuit breaker / `aws ecs update-service --task-definition <prev>` / redeploy previous tag; frontend → repoint CloudFront `/current`; infra → revert PR + apply; model → move MLflow `production` alias back; GenAI → flag off. **Practise every rollback in staging.**
+
+---
+
+## 10. Release tagging (for identification)
+
+- `sha-<7char>` — every build on `main`, deployed to **Dev**.
+- `vX.Y.Z-rcN` — release candidate, deployed to **Staging / UAT** (same image, ECR tag added, no rebuild).
+- `vX.Y.Z` — approved release, deployed to **Prod**. ECR tag immutability ON; pipeline records tag + task-def revision + digest.
+
+---
+
+## 11. Per-step validation checklist (gate before proceeding)
+
+For **every** Terraform step: `terraform fmt -check -recursive` · `terraform validate` ·
+`terraform plan` (reviewed) · targeted smoke (e.g. endpoint reachability, task health, alarm
+fires). For **CI/CD**: PR gates block a seeded vuln/secret; dev auto-deploys on merge; staging
+needs EY approval; prod needs WBD + CAB; rollback verified. **Production readiness:** WBD
+security sign-off, pen test clean, backups + restore tested, failover tested, perf targets met,
+dashboards/alerts live, runbooks written, access reviewed, UAT signed off, CAB approved.
+
+---
+
+## 12. Order-of-operations summary (one line)
+
+**Install tools → request accounts/access → bootstrap state → build modules → dev:
+foundation → network → security/secrets → platform (ECR/S3+versioning+replication/RDS+Proxy/
+Redis+snapshots/SQS) → ECS+ALB+autoscaling+App Signals → edge+Okta → monitoring+Splunk →
+AWS Backup (+vault lock/cross-region in prod) → CI/CD + GitHub Environments/vars + reviewers →
+promote to staging → prod → data-team platform (MWAA/trigger/Databricks + model governance) →
+🚦 RELEASE 1 COMPLETE (live + signed off in dev, staging AND prod) → ONLY THEN →
+Release 2 (Bedrock) → handover.** Validate at every step; do one step at a time and wait for
+confirmation; populate GitHub variables and AWS secrets at the step where they're first
+needed; keep all three environments on identical code.
