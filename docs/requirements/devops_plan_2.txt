@@ -17,7 +17,7 @@
 >
 > Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
 >
-> **Implementation status (5 Nov 2026):** all steps are implemented in the repo (not committed yet).
+> **Implementation status (5 Nov 2026):** all steps are implemented in the repo (pushed to `main`).
 > Every [ASK]/[ASM] was built with the simpler industry-standard default; the chosen defaults and the
 > differences from this plan are in `PROJECT_CONTEXT_2.md` sections 4a and 6, and the points WBD
 > still has to confirm are in `PROJECT_CONTEXT.md` §5.2 (Q1–Q6). In short: Aurora Serverless v2 +

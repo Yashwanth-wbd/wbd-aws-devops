@@ -4,7 +4,7 @@ Companion to `PROJECT_CONTEXT.md` (v1, project root). v1 describes what is **bui
 (Steps 0–15 of `devops_plan_1.txt`). This file describes the **v2 target** from the client deck
 `wbd_Presentation.pptx` and what has to change in the code to get there.
 
-Status (5 Nov 2026): **v2 is implemented in the code** (all environments, not committed yet). The
+Status (5 Nov 2026): **v2 is implemented in the code** (all environments, pushed to `main`). The
 open questions in section 6 were implemented with the simpler industry-standard default shown there;
 `PROJECT_CONTEXT.md` (root) is now the v2 continuation guide and lists what WBD still has to confirm
 (§5.2 Q1–Q6). Sections 2–5 below are the original plan; section 4a lists where the build differs.
@@ -187,4 +187,5 @@ tflint, Checkov, actionlint, `sync-environments.ps1 -Check`.
    `wbd_mmm_ecs_final_2.docx`, this file). No code changed; not committed yet.
 2. 5 Nov 2026: v2 implemented (modules, dev stack synced to staging/prod, ECS templates, workflows,
    scripts, docs, `PROJECT_CONTEXT.md`); open points implemented with the defaults in section 6;
-   xlsx/docx regenerated with an implementation-status column/section. Not committed yet.
+   xlsx/docx regenerated with an implementation-status column/section. Pushed to `main`
+   (`89382f2`, `bf4a051`).

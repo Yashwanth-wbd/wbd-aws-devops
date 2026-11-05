@@ -5,7 +5,7 @@ needed to continue is written here. **Attach this file (plus `docs/requirements/
 to a new chat to resume.**
 
 Last updated: 5 Nov 2026 (v2 architecture from `wbd_Presentation.pptx` implemented and validated
-offline; **not committed yet**).
+offline; pushed to `main` as `89382f2` + `bf4a051`).
 
 ---
 
@@ -29,7 +29,7 @@ If the tools are missing after a VDI reset, ask the agent to run section 3.1 fir
 |---|---|
 | What | DevOps for the WBD Media-Mix-Modeling (MMM) platform: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App, data-engineering and model code belong to the WBD / EY teams – nothing app-side is in this repo. |
 | Project folder (source of truth) | `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
-| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`, last pushed commit `211f89a` (v1). **The v2 changes are local and uncommitted** (commit only when the user asks). |
+| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`, v2 pushed on 5 Nov 2026 (`89382f2` implementation, `bf4a051` CI guards); all push workflows green. Commit only when the user asks. |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset run `gh auth login --web --scopes repo,workflow` again. |
 | Requirement documents (`docs/requirements/`) | **`wbd_Presentation.pptx`** (new v2 target architecture – the one being followed), `devops_plan_2.txt` (v2 plan: v1 → v2 delta, decisions), `aws_resource_list_2.xlsx` (v2 resources per env), `wbd_mmm_ecs_final_2.docx` (v2 design doc), `PROJECT_CONTEXT_2.md` (v2 planning context). v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
@@ -176,7 +176,9 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 
 - Done on 5 Nov 2026: fmt, validate-modules, mock plan (all envs), `sync-environments.ps1 -Check`,
   tflint, Checkov (0 failed, accepted skips have a reason comment), actionlint, secret scan – all clean.
-- At commit time: set the executable bit on the new `.sh` files (`git add --chmod=+x scripts/*.sh`).
+- Executable bit is set on every `scripts/*.sh` in Git; new `.sh` files need `git add --chmod=+x`.
+- App CI workflows (`api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci`) skip while the
+  app folder is absent; `deploy.yml` deploys only when the triggering CI run's test job succeeded.
 
 ### 5.2 Open questions for WBD (implemented with the simpler industry-standard default)
 
@@ -292,4 +294,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 2. 4 Nov 2026: Release 1 gate pack, GenAI, handover, reviews; this file created.
 3. 5 Nov 2026: v2 requirement (`wbd_Presentation.pptx`) reviewed, plan and `_2` documents written,
    then v2 implemented: services removed / added as listed in 1.2 and 4, D1–D4 fixed, docs rewritten,
-   offline validation passed. Not committed.
+   offline validation passed; pushed to `main` (`89382f2`), then CI guards for absent app folders
+   and a shellcheck fix (`bf4a051`); all push workflows green.
