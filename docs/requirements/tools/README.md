@@ -17,7 +17,13 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v2.py $req
 
 # Quick check of the generated files (row counts per sheet, headings, tables)
 uv run --no-project --with openpyxl --with python-docx python .\check_v2.py $req
+
+# Regenerate devops_2_client_question.xlsx (inputs only WBD can provide; edit INPUTS / DECISIONS first)
+uv run --no-project --with openpyxl python .\build_client_questions.py $req
 ```
+
+Regenerating `devops_2_client_question.xlsx` overwrites the values typed into it – once WBD starts
+answering, edit the workbook directly instead.
 
 For a new requirement (v3), copy `build_v2.py` to `build_v3.py`, change the output names to `_3`,
 and edit the `ROWS`, `REMOVED`, `STATUS` and `DECISIONS` lists and the docx sections.

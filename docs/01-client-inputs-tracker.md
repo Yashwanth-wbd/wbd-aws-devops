@@ -5,6 +5,9 @@ placeholder in code has a `# add actual value` comment on the line above it. Whe
 supplies a value, update it everywhere it appears, set its status to **Received**, and run
 `terraform plan` for the affected environment.
 
+The client-facing version of this list (only what WBD must provide, with dev / staging / prod
+columns to fill) is `docs/requirements/devops_2_client_question.xlsx`.
+
 ```powershell
 # list every remaining placeholder
 git grep -n -A1 "add actual value"
@@ -51,7 +54,7 @@ git grep -n -A1 "add actual value"
 | SAST tool licence (CodeQL / Semgrep / SonarQube) | Semgrep OSS (`p/default`, `p/python`, `p/react`) | `repo-checks.yml` | WBD | Open |
 | GitHub team slugs for approvers | `ey-delivery-leads`, `wbd-release-approvers` | `scripts/setup-github.ps1` | EY / WBD | Open |
 | Change-ticket format for prod (CAB) | `CHG` + 7 digits in the annotated tag message | `deploy.yml` (`CHANGE_TICKET_PATTERN`) | WBD CAB | Open |
-| Pin actions to commit SHAs? | major tags (`@v5`), Dependabot | `.github/workflows/` | WBD Security | Open |
+| Pin actions to commit SHAs? | pinned (`@<sha> # vX.Y.Z`), Dependabot updates them | `.github/workflows/` | WBD Security | Decided |
 | GitHub Advanced Security (secret scanning push protection, CodeQL) | not assumed | repo settings | WBD | Open |
 | App start / migration commands, health paths | API: `uvicorn app.main:app`, migrate: `alembic upgrade head`, `/api/health`, UI: `/healthz` | `ecs/<env>/{api,ui,migrate}.json`, `api-ci.yml`, `ui-ci.yml` | EY dev teams | Open |
 | Test coverage gate | 80 % | `_python-service-ci.yml` (`coverage_min`) | EY / WBD | Open |
