@@ -279,6 +279,32 @@ are known). DevOps to-do with the teams: starter Dockerfile skeletons with healt
 (env changes, quotas, cost), releases (main → dev, `-rc` → staging, `vX.Y.Z` → prod), model approvals,
 runbooks / KT to WBD (Release 1 in 8 weeks, Release 2 and handover by week 16 – `wbd_final.docx`).
 
+### 6.5 Working without AWS admin access (WBD VDI)
+
+No admin and no access keys – IAM Identity Center (Okta + MFA) short-lived credentials, GitHub
+Actions does the applies, WBD teams do the one-time admin steps. Details: `docs/02`, `docs/03`.
+
+**Ask WBD Cloud Platform for (Okta group → permission set):** `DevOps` in dev and staging (scoped to
+`mmm-*`, no Identity Center / Organizations / CloudTrail changes), prod read-only + time-limited
+elevation per change ticket; `ReadOnly` everywhere; `SecurityAudit` in prod.
+
+| Task | How without admin |
+|---|---|
+| AWS CLI login | `aws configure sso`, `aws sso login --profile wbd-mmm-dev` (temporary credentials) |
+| Terraform | `fmt` / `validate` locally (no AWS); `plan` locally with `DevOps`; `apply` only by GitHub Actions (`gha-apply`), approvals in GitHub Environments |
+| Bootstrap + GitHub OIDC provider + `gha-*` roles (needs IAM create) | Once per account: WBD Cloud runs `infra/bootstrap` + first apply, or gives time-limited elevation under a change ticket; afterwards the permission boundary limits the roles to `mmm-*` |
+| Secret values | Not needed – RDS-managed DB password, apps read via task roles, owners fill their own secrets; ask for `PutSecretValue` on `mmm/<env>/*`, `GetSecretValue` in dev only |
+| App URL / DNS / certificate | Output `dns_records_for_wbd` → WBD DNS team; ACM certificate issued by WBD, ARN into tfvars |
+| Okta SAML app | Output `okta_app_settings` → WBD Identity team → metadata URL |
+| Quotas, GuardDuty / CloudTrail / Config, Databricks admin, GitHub repo admin | Quota request (WBD Cloud approves); account baseline; WBD Databricks admins; repo admin for `setup-github.ps1` |
+| External URLs (LLM providers, Splunk, Databricks) | Egress via NAT, allow-list / proxy by WBD network team; on the VDI set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` |
+| Service-to-service access | Already in code: per-service IAM roles (API task, SageMaker, Step Functions, publisher) |
+
+**Fallbacks if access is even smaller:** pipeline only (`ReadOnly` + PRs, GitHub Actions plans and
+applies – preferred by security teams); a sandbox account; just-in-time elevation (e.g. AWS TEAM);
+WBD runs the bootstrap while DevOps guides on a shared screen. One access request to WBD covering
+all of the above – most items are already in `docs/01-client-inputs-tracker.md`.
+
 ---
 
 ## 7. Values to collect from the client and where they go
@@ -416,4 +442,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 11 | 5 Nov 2026 | Keep the chat context in one file | This file (`Project_memory.md`); doc generator scripts moved to `docs/requirements/tools/` |
 | 12 | 5 Nov 2026 | Review the whole project against requirement 2 (no code), then "fix all" | Built the missing plan items: Step 9 alarms + 7 dashboards, backup of training-data/lakehouse, deploy dry run, actions pinned to SHAs; Cognito threat protection recorded as not applicable; doc fixes (docs/08, 09, 11, 13, runbooks README, module READMEs, xlsx cells); offline validation passed; pushed to `main` (`d52c7cf`), all workflows green |
 | 13 | 5 Nov 2026 | Confirm code, docs and this file are pushed | Local = `origin/main`, nothing uncommitted; Dependabot PRs for the pinned actions may be open – review and merge |
-| 14 | 5 Nov 2026 | Check the `_2` xlsx / plan / docx; second full review; slide-by-slide service check; DevOps-only confirmation; how to work with the app teams | `devops_plan_2.txt` status note (`1c92341`); sections 1.3 (3 SSM differences, evaluation, curves), 1.4 and 6.4 added; `PROJECT_CONTEXT_2.md` 4a updated; all pushed |
+| 14 | 5 Nov 2026 | Check the `_2` xlsx / plan / docx; second full review; slide-by-slide service check; DevOps-only confirmation; how to work with the app teams | `devops_plan_2.txt` status note (`1c92341`); sections 1.3 (3 SSM differences, evaluation, curves), 1.4 and 6.4 added; `PROJECT_CONTEXT_2.md` 4a updated; all pushed (`87f3b2f`) |
+| 15 | 5 Nov 2026 | Chat lost on reinstall? Which approach (v1 or v2)? How to work without AWS admin on the VDI | Chat history is local to the machine – continue by attaching this file; recommended v2 (client deck, managed services); section 6.5 (access without admin) added and pushed |
