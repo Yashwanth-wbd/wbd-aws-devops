@@ -153,8 +153,9 @@ account-level security baseline (owned by WBD).
 **Naming:** `mmm-<env>-<component>`, with `env` = `dev` | `stg` | `prd` (e.g. `mmm-prd-vpc`,
 `mmm-dev-jobs.fifo`). Secrets: `mmm/<env>/<service>/<name>`. SSM: `/mmm/<env>/<name>`.
 
-**Mandatory tags on every resource:** `Application`, `Environment`, `Owner`, `CostCenter`,
-`BusinessUnit`, `DataClassification`, `ManagedBy`, `Component`.
+**Mandatory tags on every resource:** `Application`, `Environment`, `Owner`,
+`BusinessUnit`, `DataClassification`, `ManagedBy`, `Component`. The `CostCenter` tag from the
+plan is left out by decision; add it back in the `tags` locals if WBD Finance asks for chargeback.
 
 **Placeholder values.** No client values (account IDs, CIDRs, Okta, Databricks, Splunk, …)
 have been shared yet. Every placeholder has this comment on the line above it:

@@ -17,7 +17,6 @@ locals {
     Application        = "mmm-media-allocation"
     Environment        = local.env_short
     Owner              = var.owner
-    CostCenter         = var.cost_center
     BusinessUnit       = "shared"
     DataClassification = var.data_classification
     ManagedBy          = "terraform"

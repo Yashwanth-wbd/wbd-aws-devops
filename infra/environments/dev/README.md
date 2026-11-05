@@ -274,7 +274,7 @@ in-place changes (API task definition, platform alarms). Offline mock plan: `Pla
 
 ## Placeholders to replace before the first apply
 
-`terraform.tfvars`: `aws_account_id`, `aws_region`, `allowed_regions`, `cost_center`,
+`terraform.tfvars`: `aws_account_id`, `aws_region`, `allowed_regions`,
 `state_kms_key_arn`, `github_org`, `github_repo`, `monthly_budget_usd`, `budget_alert_emails`,
 `vpc_cidr`, `availability_zone_ids`, `enable_nat_gateway`, and (only when the hub is turned on)
 `transit_gateway_id`, `transit_gateway_routes`, `resolver_forward_domains`, `resolver_target_ips`.

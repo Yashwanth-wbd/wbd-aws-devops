@@ -54,7 +54,8 @@ If the tools are missing after a VDI reset, ask the agent to run section 3.1 fir
 | Release 2 (GenAI) | Built but **off**: `enable_genai = false` + GitHub variable `GENAI_ENABLED` | `docs/12` |
 | Data platform | MWAA + EventBridge + Lambda + Databricks, **off**: `enable_data_platform = false` | `docs/10` |
 | Placeholders | Every placeholder has `# add actual value` on the line above | `README.md` §6 |
-| Naming / tags | `mmm-<env>-<component>`, env = `dev`/`stg`/`prd`; tags Application, Environment, Owner, CostCenter, BusinessUnit, DataClassification, ManagedBy, Component | `README.md` §6 |
+| Naming / tags | `mmm-<env>-<component>`, env = `dev`/`stg`/`prd`; tags Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component | `README.md` §6 |
+| CostCenter tag | **Removed** (5 Nov 2026): only a finance label, no effect on resources; add back to the `tags` locals if WBD Finance needs chargeback or a tag policy requires it | `README.md` §6 |
 
 ---
 
@@ -214,7 +215,6 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 |---|---|
 | Account IDs dev / staging / prod | `infra/bootstrap/<env>.tfvars` `aws_account_id`; `infra/environments/<env>/terraform.tfvars` `aws_account_id` |
 | Region (+ allowed regions, DR region) | `aws_region`, `allowed_regions`, `dr_region` (tfvars), `region` in `backend.tf` |
-| Cost center | `cost_center` (bootstrap + env tfvars) |
 | SSO access (permission sets: ReadOnly/Developer/DevOps/Security/BreakGlass) | `docs/02`; break-glass permission set name: if it isn't `BreakGlass`, pass `breakglass_permission_set` to `module "monitoring"` in `infra/environments/dev/monitoring.tf` (module default today) |
 | Existing GitHub OIDC provider in the account? | if yes: `create_github_oidc_provider = false` + `existing_github_oidc_provider_arn` |
 | Existing cost anomaly monitor / Bedrock invocation logging / CloudWatch Logs data-protection policy? | if yes: `enable_cost_anomaly_detection`, `enable_bedrock_invocation_logging`, `enable_log_data_protection` = `false` |

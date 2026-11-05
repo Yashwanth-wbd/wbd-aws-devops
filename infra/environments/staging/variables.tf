@@ -36,11 +36,6 @@ variable "owner" {
   default     = "wbd-mmm-platform"
 }
 
-variable "cost_center" {
-  description = "CostCenter tag value (WBD finance code)."
-  type        = string
-}
-
 variable "data_classification" {
   description = "DataClassification tag value."
   type        = string

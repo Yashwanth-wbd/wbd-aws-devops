@@ -14,10 +14,6 @@ aws_region = "us-east-1"
 # add actual value
 allowed_regions = ["us-east-1", "us-west-2"]
 
-# ------------------------------------------------------------------ Tags
-# add actual value
-cost_center = "CC-000000"
-
 # ------------------------------------------------------------------ Terraform state (bootstrap output state_kms_key_arn)
 # add actual value
 state_kms_key_arn = "arn:aws:kms:us-east-1:333333333333:key/00000000-0000-0000-0000-000000000000"

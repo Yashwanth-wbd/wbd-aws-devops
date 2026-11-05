@@ -43,8 +43,7 @@ nothing. Set `enable_dynamodb_lock = true` only if WBD requires a DynamoDB table
 
 ## How to run (after WBD provides the accounts)
 
-Replace the placeholders in the three tfvars files first (`aws_account_id`, `aws_region`,
-`cost_center`).
+Replace the placeholders in the three tfvars files first (`aws_account_id`, `aws_region`).
 
 ```powershell
 cd infra\bootstrap

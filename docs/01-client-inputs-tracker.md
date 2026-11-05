@@ -61,7 +61,6 @@ git grep -n -A1 "add actual value"
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
-| CostCenter tag | `CC-000000` | all tfvars | WBD Finance | Open |
 | Monthly budget per account (USD) | dev `3000`, staging `6000`, prod `15000` | budgets module | WBD Finance | Open |
 | Alert email (on-call / DevOps list) | `alert_emails = ["mmm-devops-alerts@example.wbd.com"]` | SNS topic `mmm-<env>-alerts` | WBD Ops | Open (Teams/Slack via AWS Chatbot can be added later) |
 | Splunk HEC endpoint (reachable from Firehose IP ranges, CA-signed cert) | `splunk_hec_endpoint`, `enable_splunk_shipping = false` | log-shipping | WBD Splunk | Open |
