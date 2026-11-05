@@ -1,0 +1,31 @@
+# Results-publisher Lambda: tests only (no image). deploy.yml zips the code and moves alias "live".
+name: publisher-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/results-publisher/**
+      - .github/workflows/publisher-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/results-publisher/**
+      - .github/workflows/publisher-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: publisher-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/_python-service-ci.yml
+    with:
+      app_dir: apps/results-publisher
+      build_image: false

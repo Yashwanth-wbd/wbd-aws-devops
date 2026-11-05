@@ -1,7 +1,8 @@
 # ================================================================== Step 10 - Backup and DR
 locals {
-  # RDS is selected through instance_tags in module "rds"; these buckets through their tags.
-  backed_up_buckets = ["results", "approved-worm"]
+  # Aurora is selected through cluster_tags in module "aurora"; these buckets through their tags.
+  # training-data is not backed up: it is immutable (Object Lock) and can be rebuilt from the lakehouse.
+  backed_up_buckets = ["results", "approved-worm", "models"]
 
   backup_retention = {
     dev     = { daily = 7, monthly = null }

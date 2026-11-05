@@ -8,14 +8,14 @@ Private, least-privilege access between this account and the **WBD-owned** Datab
 
 | Resource | Notes |
 |---|---|
-| IAM role `mmm-<env>-databricks-uc` | Unity Catalog **storage credential**. Read/write on the landing, results and data-quality buckets and their keys (s3 + per-BU keys). Permission boundary |
+| IAM role `mmm-<env>-databricks-uc` | Unity Catalog **storage credential**. Read/write on the landing, lakehouse and training-data buckets and their keys (s3 + per-BU keys). Permission boundary |
 | VPC endpoint (Interface) | `enable_privatelink`: the workspace REST/UI endpoint service, in the private-endpoint subnets, `endpoints` SG (HTTPS from the VPC) |
-| Route 53 private zone `<workspace host>` | `enable_privatelink`: A alias to the endpoint, so ECS workers and MWAA reach the normal workspace URL over PrivateLink |
+| Route 53 private zone `<workspace host>` | `enable_privatelink`: A alias to the endpoint, so tasks in the VPC reach the normal workspace URL over PrivateLink |
 
-The Databricks service-principal credential is **not** created here. Its container
-`mmm/<env>/databricks/sp` already exists (secrets module, Step 5), and Airflow reads its
-connection from `mmm/<env>/airflow/connections/databricks_default`. DevOps fills both from the
-values WBD Databricks admins hand over (docs/05).
+The Databricks service-principal credential is **not** created here. The model-refresh state
+machine calls the Jobs API through the EventBridge connection `<prefix>-databricks` (OAuth client
+credentials, stack `data.tf`); DevOps sets its client secret out of band from the values WBD
+Databricks admins hand over (docs/05).
 
 ## Two-phase Unity Catalog role
 
@@ -32,8 +32,10 @@ The trust always requires `sts:ExternalId = databricks_account_id`.
 
 Off until WBD gives the endpoint service name for the region (`databricks_privatelink_service_name`)
 and registers the endpoint ID (`workspace_endpoint_id` output) in the Databricks account
-console. Without it, workers and MWAA reach the workspace over HTTPS through NAT. The workspace
-IP access list must then allow `nat_public_ips`.
+console. Without it, tasks reach the workspace over HTTPS through NAT; the workspace IP access
+list must then allow `nat_public_ips`. Step Functions HTTP tasks always call the public workspace
+URL, so the IP access list must also allow AWS Step Functions (or stay open to the WBD-approved
+ranges) – confirm with WBD Databricks.
 
 ## Inputs
 

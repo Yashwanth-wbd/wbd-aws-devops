@@ -15,11 +15,8 @@ allowed_regions = ["us-east-1", "us-west-2"]
 state_kms_key_arn = "arn:aws:kms:us-east-1:111111111111:key/00000000-0000-0000-0000-000000000000"
 
 # ------------------------------------------------------------------ GitHub OIDC
-# add actual value
-github_org = "wbd-org"
-
-# add actual value
-github_repo = "wbd-mmm-platform"
+github_org  = "Yashwanth-wbd"
+github_repo = "wbd-aws-devops"
 
 create_github_oidc_provider = true
 
@@ -72,19 +69,7 @@ generated_secret_rotation_id = "initial"
 genai_enabled                = false
 
 # add actual value
-okta_issuer = "https://wbd.okta.com/oauth2/aus0000000000000000"
-
-# add actual value
-okta_spa_client_id = "0oa00000000000000000"
-
-# add actual value
-okta_audience = "api://mmm-dev"
-
-# add actual value
 databricks_host = "https://dbc-00000000-0000.cloud.databricks.com"
-
-# add actual value
-databricks_sql_http_path = "/sql/1.0/warehouses/0000000000000000"
 
 # add actual value
 genai_token_quotas = {
@@ -104,36 +89,46 @@ approved_worm_lock_mode = "GOVERNANCE"
 approved_worm_retention_days = 2555
 
 # add actual value
-rds_instance_class    = "db.t4g.medium"
-rds_allocated_storage = 50
+training_data_retention_days = 365
 
+# Aurora Serverless v2 (dev: 0.5-4 ACU, writer only)
+aurora_engine_version = "16.6"
 # add actual value
-redis_node_type = "cache.t4g.small"
-
-# ------------------------------------------------------------------ ECS (Step 7)
-# ACM certificate for the ALB origin name, e.g. origin-mmm-dev.<wbd-domain>, issued in aws_region
+aurora_min_acu = 0.5
 # add actual value
-alb_certificate_arn = "arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000"
+aurora_max_acu = 4
 
+# ------------------------------------------------------------------ ECS and optimization (Step 7)
 enable_application_signals = false
-databricks_token_available = false
 enable_db_bootstrap        = false
 enable_platform_check_task = true
 
-# ------------------------------------------------------------------ Edge (Step 8)
-# App domain name(s); WBD DNS points them (CNAME) to the CloudFront domain (terraform output edge)
 # add actual value
-cloudfront_aliases = ["mmm-dev.example.wbd.com"]
-# ACM certificate in us-east-1 for the names above
+optimizer_instance_type       = "ml.m5.xlarge"
+optimizer_max_runtime_seconds = 3600
+
+# ------------------------------------------------------------------ Front door and sign-in (Step 8)
+# App host name; WBD DNS points it (CNAME) to terraform output front_door.alb_dns_name
 # add actual value
-cloudfront_certificate_arn = "arn:aws:acm:us-east-1:111111111111:certificate/11111111-1111-1111-1111-111111111111"
-# Name on alb_certificate_arn, CNAME to terraform output alb_dns_name
+app_domain_name = "mmm-dev.example.wbd.com"
+# ACM certificate in aws_region for app_domain_name
 # add actual value
-alb_origin_domain_name = "origin-mmm-dev.example.wbd.com"
+alb_certificate_arn = "arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000"
+# Internet + WAF + Cognito by default; set the WBD egress ranges to restrict further
 # add actual value
-geo_allow_countries    = []
-cloudfront_price_class = "PriceClass_100"
-waf_rate_limit         = 2000
+alb_ingress_cidrs = ["0.0.0.0/0"]
+# Route 53 zone in this account (null = WBD DNS adds the CNAME)
+route53_zone_id = null
+# Metadata URL of the WBD Okta SAML app for dev (from the WBD Okta team)
+# add actual value
+okta_saml_metadata_url = "https://wbd.okta.com/app/exk00000000000000000/sso/saml/metadata"
+# add actual value
+cognito_domain_prefix = "wbd-mmm-dev"
+session_hours         = 12
+# add actual value
+geo_allow_countries = []
+waf_rate_limit      = 2000
+waf_count_only      = []
 
 # ------------------------------------------------------------------ Monitoring and Splunk (Step 9)
 # On-call / DevOps distribution list for alarms
@@ -155,8 +150,8 @@ dr_region = "us-west-2"
 enable_cross_region_copy = false
 enable_vault_lock        = false
 
-# ------------------------------------------------------------------ Data-team platform (Step 13)
-# Turn on once WBD Databricks has shared the values below (MWAA takes 20-30 min to create)
+# ------------------------------------------------------------------ Data-team platform and model refresh (Step 13)
+# Turn on once WBD Databricks has shared the values below
 enable_data_platform = false
 # Phase 2 of the Unity Catalog role: true after WBD registered the storage credential
 databricks_self_assume_enabled = false
@@ -166,26 +161,35 @@ enable_databricks_privatelink = false
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 # add actual value
 databricks_privatelink_service_name = "com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000"
-# Service principals (application IDs) with GitHub OIDC federation policies (docs/10)
+# Service principal used by the model-refresh state machine (its OAuth secret is set on the connection, docs/05)
 # add actual value
-databricks_eval_client_id = "00000000-0000-0000-0000-00000000e001"
+databricks_sp_client_id = "00000000-0000-0000-0000-00000000c001"
+# Lakeflow job that builds the training snapshot (databricks.yml output)
 # add actual value
-databricks_promote_client_id = "00000000-0000-0000-0000-00000000a001"
+databricks_refresh_job_id = 0
+# add actual value
+training_instance_type       = "ml.m5.2xlarge"
+training_max_runtime_seconds = 14400
+# add actual value
+model_refresh_schedule        = "cron(0 6 ? * MON *)"
+model_refresh_timezone        = "America/New_York"
+enable_model_refresh_schedule = false
 
 # ------------------------------------------------------------------ Release 2 GenAI (Step 14)
-# Turn on after the Release 1 gate (docs/11) and WBD approval of the model and guardrail settings
+# Turn on after the Release 1 gate (docs/11) and WBD approval of data egress to the providers
 enable_genai = false
+# Approved providers; each gets the secret mmm/dev/llm/<name> ({"api_key": "..."}, filled by DevOps)
 # add actual value
-genai_approved_model_ids = ["anthropic.claude-3-5-sonnet-20240620-v1:0"]
-# add actual value
-genai_monthly_budget_usd = 200
-# Cost Explorer names of the approved models (third-party models bill under Marketplace names)
-# add actual value
-genai_budget_service_names = ["Amazon Bedrock", "Claude 3.5 Sonnet (Amazon Bedrock Edition)"]
+llm_providers = {
+  openai    = { base_url = "https://api.openai.com", auth = "bearer" }
+  anthropic = { base_url = "https://api.anthropic.com", auth = "x-api-key" }
+  google    = { base_url = "https://generativelanguage.googleapis.com", auth = "x-goog-api-key" }
+}
+genai_reserved_concurrency = 20
+# false if WBD already sets the account-level API Gateway CloudWatch role
+manage_apigw_account_logging_role = true
 # add actual value
 genai_grounding_threshold = 0.75
 # add actual value
 genai_relevance_threshold     = 0.75
 genai_guardrail_version_label = "v1"
-# false if WBD already configures Bedrock invocation logging for this account centrally
-enable_bedrock_invocation_logging = true

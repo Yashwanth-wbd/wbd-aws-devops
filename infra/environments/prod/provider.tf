@@ -11,7 +11,7 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
-    # zips the data-trigger Lambda (Step 13)
+    # zips the seed / proxy Lambda code (lambda-function, llm-gateway)
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.4"
@@ -21,17 +21,6 @@ terraform {
 
 provider "aws" {
   region              = var.aws_region
-  allowed_account_ids = [var.aws_account_id]
-
-  default_tags {
-    tags = local.tags
-  }
-}
-
-# CloudFront-scope WAF, its logs and the CloudFront certificate live in us-east-1.
-provider "aws" {
-  alias               = "us_east_1"
-  region              = "us-east-1"
   allowed_account_ids = [var.aws_account_id]
 
   default_tags {

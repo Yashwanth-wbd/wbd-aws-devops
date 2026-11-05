@@ -8,25 +8,17 @@ services that use the value.
 
 | Value | Rotation | How |
 |---|---|---|
-| RDS admin password | automatic, 7 days (RDS-managed secret) | nothing to do; check `aws rds describe-db-instances --query 'DBInstances[0].MasterUserSecret'` |
+| Aurora admin password | automatic (RDS-managed secret) | nothing to do; `terraform output aurora.master_user_secret_arn` |
 | App / migration DB users (`mmm/<env>/rds/proxy`, `rds/migrate`) | every 90 days | below |
-| Redis auth token, CloudFront origin-verify header | every 180 days, or on suspicion | below (`generated_secret_rotation_id`) |
-| Databricks service-principal token, Splunk HEC token, third-party keys | when the issuer rotates them (at least yearly) | below |
-| ACM certificates (ALB, CloudFront) | automatic (DNS validation) | alarm `cert-expiry-*` 30 days before expiry means renewal is failing |
+| LLM provider keys (`mmm/<env>/llm/<provider>`) | when the issuer rotates (at least yearly) | below |
+| Databricks OAuth client secret (model refresh) | when WBD rotates the service principal | EventBridge connection (below), not Secrets Manager |
+| Splunk HEC token, third-party keys | when the issuer rotates them | below |
+| ACM certificate (ALB) | automatic (DNS validation) | alarm `cert-expiry-alb` 30 days before expiry means renewal is failing |
 | GitHub OIDC | no secret to rotate | – |
-| Okta SPA client | public client (PKCE), no secret | – |
+| Cognito / Okta SAML | metadata cert rotation at Okta | update `okta_saml_metadata_url` if WBD changes the app |
 
-## Generated secrets (Redis token, origin-verify)
-
-1. PR: change `generated_secret_rotation_id` in `infra/environments/<env>/terraform.tfvars`
-   (e.g. `"initial"` → `"2026-11"`). Apply.
-2. Terraform writes new random values; ElastiCache rotates the auth token (strategy `ROTATE`
-   keeps the old one valid during the switch); CloudFront and the ALB rule get the new header.
-3. Force new deployments so tasks read the new token:
-   ```bash
-   for s in api whatif-worker optimizer-worker; do aws ecs update-service --cluster $P-ecs --service $P-$s --force-new-deployment; done
-   ```
-4. Verify: no `NOAUTH` errors, smoke test passes through CloudFront, direct ALB access still 403.
+Terraform does **not** generate Redis, CloudFront or other platform secrets in v2 – every container
+is filled out of band once.
 
 ## DB users
 
@@ -35,17 +27,30 @@ services that use the value.
    (RDS Proxy reads the secret; apps use IAM auth to the proxy and are not affected).
 3. Test a connection through the proxy; repeat for `rds/migrate` / `mmm_migrator`.
 
-## External tokens (Databricks, Splunk, third-party)
+## External tokens (Splunk, third-party, LLM)
 
 1. The issuer creates the new token (keep the old one valid until step 3).
 2. `aws secretsmanager put-secret-value --secret-id mmm/<env>/<name> --secret-string '<new>'` –
-   type it in a terminal without history, never in a file or ticket.
-3. Force new deployments of the users (workers for Databricks; Firehose reads Splunk on its own;
-   MWAA reads `airflow/connections/*` on the next task). Then the issuer revokes the old token.
+   type it in a terminal without history, never in a file or ticket. LLM keys use
+   `{"api_key":"..."}`.
+3. Force new deployment of `api` (and any other reader). Firehose reads Splunk on its own.
+   Then the issuer revokes the old token.
+
+## Databricks connection (model refresh)
+
+The OAuth client secret is **not** in Secrets Manager. Update the EventBridge connection WBD owns:
+
+```bash
+# name from: terraform output -json data_platform | jq -r .databricks_connection
+aws events update-connection --name mmm-dev-databricks --authorization-type OAUTH_CLIENT_CREDENTIALS \
+  --auth-parameters 'OAuthParameters={ClientParameters={ClientID=<databricks_sp_client_id>,ClientSecret=<new>},AuthorizationEndpoint=<token-url>,HttpMethod=POST}'
+```
+
+No Terraform apply is required if only the secret changed (Terraform ignores the connection secret).
 
 ## Certificates
 
-`cert-expiry-alb` / `cert-expiry-cloudfront` alarm: ACM could not renew. Check the DNS
-validation CNAME still exists in the WBD zone (`aws acm describe-certificate --certificate-arn <arn>
+`cert-expiry-alb` alarm: ACM could not renew. Check the DNS validation CNAME still exists in the WBD
+zone (`aws acm describe-certificate --certificate-arn <alb_certificate_arn>
 --query 'Certificate.DomainValidationOptions'`) and ask WBD DNS to restore it. For an imported
 certificate, import the new one into the same ARN (`aws acm import-certificate --certificate-arn <arn> ...`).

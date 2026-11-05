@@ -31,10 +31,14 @@ log groups ──subscription filter──> Firehose mmm-<env>-splunk ──HTTP
 
 | Key | Log group | Why |
 |---|---|---|
-| `api`, `whatif`, `optimizer`, `migrate` | `/ecs/mmm-dev/<service>` | App logs with `run_id` |
+| `api`, `ui`, `migrate` | `/ecs/mmm-dev/<service>` | App logs with `run_id` |
 | `ecs-exec` | `/ecs/mmm-dev/exec-audit` | Audit: commands typed in ECS Exec |
-| `rds-postgres` | `/aws/rds/instance/mmm-dev-pg/postgresql` | Audit: pgaudit, connections, errors |
-| `waf` | `aws-waf-logs-mmm-dev` | Security. Only when the stack is in us-east-1, because a subscription must be in the log group's region. |
+| `aurora-postgres` | `/aws/rds/cluster/mmm-dev-aurora/postgresql` | Audit: pgaudit, connections, errors |
+| `waf` | `aws-waf-logs-mmm-dev` | Security: regional WAF on the ALB |
+| `sfn-optimization`, `sfn-model-refresh` | `/aws/states/mmm-dev-<name>` | Run orchestration (model refresh with the data platform) |
+| `publisher` | `/aws/lambda/mmm-dev-results-publisher` | Results written to Aurora per `run_id` |
+| `sagemaker-jobs`, `sagemaker-train` | `/aws/sagemaker/ProcessingJobs`, `/aws/sagemaker/TrainingJobs` | Optimizer / evaluation and training job logs |
+| `llm-*` | LLM gateway proxy and access logs | Only with GenAI |
 | `vpc-flow` | `/aws/vpc/mmm-dev/flow-logs` | Only with `ship_vpc_flow_logs = true` (high volume and Splunk licence cost) |
 
 ## What the WBD Splunk team provides and configures

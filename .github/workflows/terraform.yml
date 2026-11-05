@@ -181,18 +181,30 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.all) }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: hashicorp/setup-terraform@v3
+      - name: Role configured?
+        id: role
+        env:
+          ROLE: ${{ vars[matrix.role_var] }}
+        run: |
+          if [ -z "$ROLE" ]; then echo "::notice::${{ matrix.role_var }} not set - drift check skipped"; echo "ok=false" >> "$GITHUB_OUTPUT"
+          else echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.role.outputs.ok == 'true'
+        uses: actions/checkout@v5
+      - if: steps.role.outputs.ok == 'true'
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-      - uses: aws-actions/configure-aws-credentials@v5
+      - if: steps.role.outputs.ok == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars[matrix.role_var] }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: tf-drift-${{ github.run_id }}
 
       - name: drift check
+        if: steps.role.outputs.ok == 'true'
         working-directory: infra/environments/${{ matrix.env }}
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"

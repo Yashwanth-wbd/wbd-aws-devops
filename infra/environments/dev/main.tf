@@ -39,16 +39,9 @@ module "kms" {
 
   name_prefix = local.name_prefix
 
-  # Step 13: MWAA key + one S3 key per business unit (data isolation); Step 14: GenAI key
-  purposes              = concat(["rds", "s3", "logs", "secrets", "sqs", "ecr"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
-  logs_service_purposes = concat(["logs"], var.enable_data_platform ? ["mwaa"] : [], var.enable_genai ? ["genai"] : [])
-
-  # Step 8: CloudFront (OAC) decrypts frontend objects; Step 13: EventBridge dead letters; Step 14: Bedrock logging
-  additional_policy_documents = merge(
-    { s3 = data.aws_iam_policy_document.s3_key_cloudfront.json },
-    var.enable_data_platform ? { sqs = data.aws_iam_policy_document.sqs_key_eventbridge.json } : {},
-    var.enable_genai ? { genai = data.aws_iam_policy_document.genai_key_bedrock.json } : {},
-  )
+  # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (guardrail, LLM secrets)
+  purposes              = concat(["rds", "s3", "logs", "secrets", "ecr", "sagemaker"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
+  logs_service_purposes = ["logs"]
 }
 
 module "permission_boundary" {
@@ -73,7 +66,8 @@ module "iam_oidc" {
   plan_allow_pull_requests      = !local.is_prod
   ecr_push_allow_main_branch    = var.environment == "dev"
   ecr_read_trusted_environments = local.next_environment
-  enable_data_deploy            = var.enable_data_platform
+  deploy_lambda_functions       = [local.publisher_name]
+  enable_model_governance       = var.enable_data_platform
 
   state_bucket_name   = local.state_bucket_name
   state_kms_key_arn   = var.state_kms_key_arn
@@ -116,42 +110,38 @@ module "network" {
   resolver_forward_domains   = var.resolver_forward_domains
   resolver_target_ips        = var.resolver_target_ips
 
-  create_mwaa_security_group = var.enable_data_platform
+  app_port          = local.app_port
+  ui_port           = local.ui_port
+  alb_ingress_cidrs = var.alb_ingress_cidrs
 
-  # Step 14: GenAI gateway security group and the endpoint its Service Connect proxy needs
+  # Step 14: LLM gateway proxy security group and the private API Gateway / Bedrock endpoints
   create_genai_security_group    = var.enable_genai
   additional_interface_endpoints = local.genai_interface_endpoints
 }
 
 # ================================================================== Step 5 - Secrets and configuration
 locals {
-  # Secret values never come from variables: generated ones are random_password, the rest are
-  # filled out-of-band by DevOps (docs/05-secrets-and-config.md).
+  # Secret values never come from variables; they are filled out-of-band by DevOps
+  # (docs/05-secrets-and-config.md). The Aurora admin secret is managed by RDS itself.
   secrets = merge(
     {
-      "api/db"             = { description = "App DB connection {host, port, dbname, username, password} - filled after the first migration" }
-      "rds/proxy"          = { description = "App DB user {username, password} for RDS Proxy (never the admin user)" }
-      "rds/migrate"        = { description = "Migration DB user {username, password} for RDS Proxy (schema owner, used only by the migrate task)" }
-      "redis/token"        = { description = "ElastiCache auth token", generate = true, length = 64 }
-      "edge/origin-verify" = { description = "CloudFront -> ALB X-Origin-Verify header value", generate = true, length = 48 }
-      "databricks/sp"      = { description = "Databricks service-principal token from WBD Databricks admins" }
-      "splunk/hec"         = { description = "Splunk HEC token from the WBD Splunk team" }
+      "api/db"      = { description = "App DB connection {host, port, dbname, username, password} - filled after the first migration" }
+      "rds/proxy"   = { description = "App DB user {username, password} for RDS Proxy (never the admin user)" }
+      "rds/migrate" = { description = "Migration DB user {username, password} for RDS Proxy (schema owner, used only by the migrate task)" }
+      "splunk/hec"  = { description = "Splunk HEC token from the WBD Splunk team" }
     },
     { for v in var.third_party_vendors : "thirdparty/${v}" => { description = "${v} API credentials from WBD data owners" } },
-    # Step 13: Airflow connection read by the MWAA Secrets Manager backend (JSON connection, filled by DevOps)
-    var.enable_data_platform ? {
-      "airflow/connections/databricks_default" = { description = "Airflow connection to Databricks {conn_type, host, login (SP application ID), password (SP OAuth secret)}" }
-    } : {},
+    # Step 14: one API key per approved external LLM provider, read only by the LLM gateway proxy
+    var.enable_genai ? { for p in keys(var.llm_providers) : "llm/${p}" => { description = "${p} API key {\"api_key\": \"...\"} - only the LLM gateway proxy can read it" } } : {},
   )
 
   parameters = merge(
     {
-      "genai_enabled"            = { value = tostring(var.genai_enabled), description = "GenAI feature flag (Release 2)" }
-      "okta/issuer"              = { value = var.okta_issuer, description = "Okta authorization server issuer URL" }
-      "okta/client_id"           = { value = var.okta_spa_client_id, description = "Okta SPA client ID (public, PKCE)" }
-      "okta/audience"            = { value = var.okta_audience, description = "Expected access-token audience" }
-      "databricks/host"          = { value = var.databricks_host, description = "Databricks workspace URL" }
-      "databricks/sql_http_path" = { value = var.databricks_sql_http_path, description = "Databricks SQL warehouse HTTP path" }
+      "genai_enabled"        = { value = tostring(var.genai_enabled), description = "GenAI feature flag (Release 2)" }
+      "cognito/user_pool_id" = { value = module.cognito.user_pool_id, description = "Cognito user pool (WBD Okta federation) - ALB sign-in" }
+      "cognito/client_id"    = { value = module.cognito.client_id, description = "Cognito app client used by the ALB" }
+      "cognito/domain"       = { value = module.cognito.domain_prefix, description = "Cognito hosted domain prefix (logout URL)" }
+      "databricks/host"      = { value = var.databricks_host, description = "Databricks workspace URL" }
     },
     { for bu, q in var.genai_token_quotas : "genai/token_quota/${bu}" => { value = tostring(q), description = "Daily GenAI token quota for BU ${bu}" } },
   )
@@ -196,6 +186,7 @@ locals {
       enable_eventbridge      = true
       enabled                 = true
     }
+    # Run evidence: optimization inputs/outputs, solver logs (written by the SageMaker job)
     results = {
       glacier_transition_days = null
       expiration_days         = null
@@ -217,23 +208,24 @@ locals {
       enable_eventbridge      = false
       enabled                 = true
     }
-    frontend = {
+    # Approved response curves (curves/<bu>/), model artifacts (artifacts/) and evaluation reports (evaluation/)
+    models = {
       glacier_transition_days = null
       expiration_days         = null
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = true
     }
-    # Step 13: Great Expectations suites (suites/) and validation results (results/)
-    data-quality = {
-      glacier_transition_days = null
-      expiration_days         = 400
-      object_lock             = null
+    # Step 13: training snapshots - immutable, so every model version can be reproduced
+    training-data = {
+      glacier_transition_days = 180
+      expiration_days         = null
+      object_lock             = { mode = var.approved_worm_lock_mode, days = var.training_data_retention_days }
       enable_eventbridge      = false
       enabled                 = var.enable_data_platform
     }
-    # Step 13: Airflow DAGs (dags/) and requirements.txt, published only by data.yml
-    mwaa = {
+    # Step 13: Delta tables (bronze/silver/gold) managed by Unity Catalog
+    lakehouse = {
       glacier_transition_days = null
       expiration_days         = null
       object_lock             = null
@@ -243,10 +235,7 @@ locals {
   }
   data_buckets = { for k, v in local.all_data_buckets : k => v if v.enabled }
 
-  bucket_extra_policies = merge(
-    { frontend = data.aws_iam_policy_document.frontend_oac.json },
-    var.enable_data_platform ? { landing = data.aws_iam_policy_document.landing_bu_keys.json } : {},
-  )
+  bucket_extra_policies = var.enable_data_platform ? { landing = data.aws_iam_policy_document.landing_bu_keys.json } : {}
 }
 
 module "buckets" {
@@ -260,28 +249,29 @@ module "buckets" {
   object_lock             = each.value.object_lock
   glacier_transition_days = each.value.glacier_transition_days
   expiration_days         = each.value.expiration_days
-  noncurrent_version_days = each.key == "frontend" ? 30 : 90
+  noncurrent_version_days = 90
   enable_eventbridge      = each.value.enable_eventbridge
-  component               = each.key == "frontend" ? "frontend" : "data"
+  component               = "data"
   additional_policy_json  = lookup(local.bucket_extra_policies, each.key, "")
-  additional_kms_key_arns = each.key == "landing" ? values(local.bu_key_arns) : []
+  additional_kms_key_arns = contains(["landing", "lakehouse", "training-data"], each.key) ? values(local.bu_key_arns) : []
   tags                    = contains(local.backed_up_buckets, each.key) ? { backup = "true" } : {}
 }
 
-module "rds" {
-  source = "../../modules/rds"
+# Aurora PostgreSQL Serverless v2: scales with load, IAM auth through RDS Proxy.
+module "aurora" {
+  source = "../../modules/aurora"
 
   name_prefix             = local.name_prefix
   subnet_ids              = module.network.private_data_subnet_ids
   db_security_group_id    = module.network.security_group_ids["rds"]
   proxy_security_group_id = module.network.security_group_ids["rds_proxy"]
 
-  instance_class        = var.rds_instance_class
-  allocated_storage     = var.rds_allocated_storage
-  max_allocated_storage = var.rds_max_allocated_storage
+  engine_version = var.aurora_engine_version
+  min_acu        = var.aurora_min_acu
+  max_acu        = var.aurora_max_acu
 
-  # dev: single-AZ, 7-day PITR, can be deleted; staging 14 days; prod: Multi-AZ, 35 days, deletion protection
-  multi_az              = var.environment != "dev"
+  # dev: writer only, 7-day PITR, can be deleted; staging/prod: writer + reader in another AZ
+  instance_count        = var.environment == "dev" ? 1 : 2
   deletion_protection   = local.is_prod
   backup_retention_days = { dev = 7, staging = 14, prod = 35 }[var.environment]
   apply_immediately     = var.environment == "dev"
@@ -295,30 +285,5 @@ module "rds" {
   proxy_user_secret_arns = [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]]
 
   # Step 10: selected by the AWS Backup plan
-  instance_tags = { backup = "true" }
-}
-
-module "elasticache" {
-  source = "../../modules/elasticache"
-
-  name_prefix       = local.name_prefix
-  subnet_ids        = module.network.private_data_subnet_ids
-  security_group_id = module.network.security_group_ids["redis"]
-
-  node_type               = var.redis_node_type
-  num_cache_clusters      = local.redis_node_count
-  snapshot_retention_days = local.is_prod ? 7 : 1
-  apply_immediately       = var.environment == "dev"
-
-  auth_token         = module.secrets.generated_values["redis/token"]
-  kms_key_arn        = module.kms.key_arns["rds"]
-  logs_kms_key_arn   = module.kms.key_arns["logs"]
-  log_retention_days = var.log_retention_days
-}
-
-module "sqs" {
-  source = "../../modules/sqs"
-
-  name_prefix = local.name_prefix
-  kms_key_arn = module.kms.key_arns["sqs"]
+  cluster_tags = { backup = "true" }
 }

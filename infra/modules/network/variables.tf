@@ -52,12 +52,13 @@ variable "interface_endpoints" {
     "logs",
     "monitoring",
     "xray",
-    "sqs",
+    "states",
+    "sagemaker.api",
   ]
 }
 
 variable "additional_interface_endpoints" {
-  description = "Extra interface endpoint suffixes added to interface_endpoints (e.g. the ECS control-plane endpoints the GenAI gateway needs in Step 14)."
+  description = "Extra interface endpoint suffixes added to interface_endpoints (Release 2 adds execute-api and bedrock-runtime for the LLM gateway)."
   type        = list(string)
   default     = []
 }
@@ -69,14 +70,25 @@ variable "app_port" {
   default     = 8080
 }
 
-variable "create_mwaa_security_group" {
-  description = "Create the MWAA and data-trigger Lambda security groups (turned on with the data platform in Step 13)."
-  type        = bool
-  default     = false
+variable "ui_port" {
+  description = "Container port of the UI service (ALB -> UI)."
+  type        = number
+  default     = 8080
+}
+
+variable "alb_ingress_cidrs" {
+  description = "Source ranges allowed to reach the public ALB (0.0.0.0/0 = internet, filtered by the WAF; or the WBD egress ranges)."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = length(var.alb_ingress_cidrs) > 0 && alltrue([for c in var.alb_ingress_cidrs : can(cidrhost(c, 0))])
+    error_message = "alb_ingress_cidrs must be a non-empty list of IPv4 CIDRs."
+  }
 }
 
 variable "create_genai_security_group" {
-  description = "Create the GenAI gateway security group: app port from API tasks only, HTTPS out to VPC endpoints and S3 only (Release 2, Step 14)."
+  description = "Create the LLM gateway proxy security group: no inbound, HTTPS out (Release 2)."
   type        = bool
   default     = false
 }

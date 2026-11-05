@@ -41,7 +41,7 @@ group removes the access. No change is needed in this repository.
 | Permission set | dev | staging | prod | Purpose |
 |---|---|---|---|---|
 | `ReadOnly` | ✔ | ✔ | ✔ | Look at resources and logs |
-| `Developer` | ✔ | read-only | none | App developers: ECS, logs, SQS, S3 in dev |
+| `Developer` | ✔ | read-only | none | App developers: ECS, logs, S3, Step Functions in dev |
 | `DevOps` | ✔ | ✔ | read-only + time-limited elevation | Bootstrap, investigate, break/fix |
 | `SecurityAudit` | ✔ | ✔ | ✔ (read) | Security reviews |
 | `BreakGlass` | – | – | ✔ (alerts security when used) | Emergencies only |

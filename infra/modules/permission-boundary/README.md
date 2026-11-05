@@ -1,7 +1,7 @@
 # permission-boundary
 
 An IAM managed policy used as the **permissions boundary** on every role Terraform creates
-(pipeline roles, ECS task roles, RDS, Backup, Firehose, Lambda, MWAA roles…).
+(pipeline roles, ECS task roles, RDS Proxy, Backup, Firehose, Lambda, Step Functions, SageMaker roles…).
 
 **Status:** implemented in Step 3.
 
@@ -39,7 +39,7 @@ This is deliberate: the boundary is the last guard rail, so changing it needs a 
 | Name | Type | Description |
 |---|---|---|
 | `name_prefix` | string | e.g. `mmm-dev` → policy `mmm-dev-permission-boundary` |
-| `allowed_regions` | list(string) | Approved regions, plus `us-east-1` and the DR region |
+| `allowed_regions` | list(string) | The workload region and the DR region |
 | `tags` | map(string) | Extra tags |
 
 ## Outputs

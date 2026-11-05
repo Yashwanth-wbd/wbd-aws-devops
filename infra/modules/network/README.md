@@ -22,10 +22,10 @@ The VPC CIDR is split into eight equal blocks. For the dev placeholder `10.40.0.
 
 | Tier | AZ 1 | AZ 2 | AZ 3 (staging/prod) | Route to internet | Used by |
 |---|---|---|---|---|---|
-| private-app | `10.40.0.0/22` | `10.40.4.0/22` | `10.40.8.0/22` | NAT gateway | ECS tasks, MWAA |
+| private-app | `10.40.0.0/22` | `10.40.4.0/22` | `10.40.8.0/22` | NAT gateway | ECS tasks, SageMaker jobs, Lambda functions |
 | (spare) | `10.40.12.0/22` | | | – | 4th AZ / growth |
 | public | `10.40.16.0/24` | `10.40.17.0/24` | `10.40.18.0/24` | Internet gateway | ALB, NAT only |
-| private-data | `10.40.20.0/24` | `10.40.21.0/24` | `10.40.22.0/24` | **none** | RDS, RDS Proxy, ElastiCache |
+| private-data | `10.40.20.0/24` | `10.40.21.0/24` | `10.40.22.0/24` | **none** | Aurora, RDS Proxy |
 | private-endpoint | `10.40.24.0/24` | `10.40.25.0/24` | `10.40.26.0/24` | **none** | Interface endpoints, resolver, TGW attachment |
 | (spare) | `10.40.28.0/22` | | | – | growth |
 
@@ -52,9 +52,10 @@ If WBD sends all internet traffic through a central egress firewall, set
 - **Gateway endpoints (free):** S3 and DynamoDB, on the app and data route tables. ECR image
   layers are stored in S3, so image pulls do not go through NAT.
 - **Interface endpoints (`interface_endpoints`):** `ecr.api`, `ecr.dkr`, `sts`, `secretsmanager`,
-  `ssm`, `ssmmessages` (ECS Exec), `kms`, `logs`, `monitoring`, `xray`, `sqs`.
+  `ssm`, `ssmmessages` (ECS Exec), `kms`, `logs`, `monitoring`, `xray`, `states` (Step Functions),
+  `sagemaker.api`. With GenAI (`additional_interface_endpoints`): `execute-api`, `bedrock-runtime`.
   - They sit in the endpoint subnets with private DNS, so the AWS SDK uses them automatically.
-  - Cost is about USD 7.3 per endpoint per AZ per month, so around USD 160 a month in dev.
+  - Cost is about USD 7.3 per endpoint per AZ per month, so around USD 175 a month in dev (12 endpoints × 2 AZs).
 
 ## Security groups
 
@@ -63,21 +64,22 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | SG | Inbound | Outbound | Attached in |
 |---|---|---|---|
 | `endpoints` | 443 from the VPC CIDR | – | this module |
-| `alb` | 443 from the CloudFront origin-facing prefix list | app port → `api` | Step 7 (ALB) |
-| `api` | app port (`8080`) from `alb` | 443 → anywhere (AWS APIs, Okta), 6379 → `redis` | Step 7 (API service) |
-| `workers` | none | 443 → anywhere (AWS APIs, Databricks), 6379 → `redis` | Step 7 (what-if, optimizer) |
-| `data_clients` | none | 5432 → `rds_proxy`, 443 → `endpoints`, 443 → S3 prefix list | Step 7 (API, workers, **migration task**) |
-| `rds_proxy` | 5432 from `data_clients` | 5432 → `rds` | Step 6 |
-| `rds` | 5432 from `rds_proxy` | – | Step 6 |
-| `redis` | 6379 from `api`, `workers` | – | Step 6 |
-| `mwaa` (optional) | all from itself | all to itself, 443 → anywhere | Step 13 |
-| `data_trigger` (optional) | none | 443 → anywhere (MWAA API) | Step 13, data-trigger Lambda |
+| `alb` | 443 and 80 (redirect) from each `alb_ingress_cidrs` entry | app port → `api`, web port → `ui`, 443 → anywhere (Cognito token exchange) | ALB |
+| `api` | app port (`8080`) from `alb` | 443 → anywhere (AWS APIs, ALB signing keys) | API service |
+| `ui` | web port (`ui_port`, `8080`) from `alb` | 443 → `endpoints`, 443 → S3 prefix list | UI service |
+| `tasks` | none | 443 → anywhere | platform-check and DB bootstrap tasks |
+| `data_clients` | none | 5432 → `rds_proxy`, 443 → `endpoints`, 443 → S3 prefix list | API, publisher Lambda, **migration task** |
+| `rds_proxy` | 5432 from `data_clients` | 5432 → `rds` | Aurora |
+| `rds` | 5432 from `rds_proxy` | – | Aurora |
+| `sagemaker` | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | SageMaker jobs (no internet) |
+| `lambda` | none | 443 → `endpoints`, 443 → S3 prefix list | results-publisher Lambda |
+| `genai` (optional) | none | 443 → anywhere (approved LLM providers) | LLM gateway proxy Lambda |
 | `resolver` (optional) | – | 53 TCP/UDP → each WBD DNS IP | this module |
 
-- Only tasks that carry `data_clients` can reach the database, and only through RDS Proxy.
+- Only resources that carry `data_clients` can reach the database, and only through RDS Proxy.
 - The migration task gets `data_clients` alone. Its ID is the GitHub variable `DATA_CLIENTS_SG_ID`.
-- The CloudFront prefix list ID is looked up by name, so no placeholder is needed. It counts as
-  about 55 rules against the ALB SG quota, which is fine because that SG has one inbound rule.
+- `alb_ingress_cidrs` defaults to `0.0.0.0/0` (the WAF filters). Set it to the WBD corporate / VPN
+  ranges if the app must not be reachable from the internet.
 
 ## Flow logs
 
@@ -110,11 +112,12 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `availability_zone_ids` | list(string) | – | 2 (dev) or 3 (staging/prod) AZ IDs |
 | `enable_nat_gateway` | bool | `true` | false when WBD central egress is used |
 | `single_nat_gateway` | bool | `false` | true in dev |
-| `interface_endpoints` | list(string) | 11 services above | Interface endpoint suffixes |
+| `interface_endpoints` | list(string) | 12 services above | Interface endpoint suffixes |
 | `app_port` | number | `8080` | API container port |
-| `create_mwaa_security_group` | bool | `false` | Step 13: creates `mwaa` and `data_trigger` |
-| `create_genai_security_group` | bool | `false` | Step 14: creates `genai` (app port from `api` only; HTTPS to the endpoints SG and S3 prefix list only) and the `api` → `genai` egress rule |
-| `additional_interface_endpoints` | list(string) | `[]` | Extra endpoint suffixes (Step 14 adds `ecs-agent` for the Service Connect proxy of the GenAI gateway) |
+| `ui_port` | number | `8080` | UI container port |
+| `alb_ingress_cidrs` | list(string) | `["0.0.0.0/0"]` | Ranges allowed to reach the ALB |
+| `create_genai_security_group` | bool | `false` | Release 2: creates `genai` (no inbound, HTTPS out) |
+| `additional_interface_endpoints` | list(string) | `[]` | Extra endpoint suffixes (Release 2 adds `execute-api` and `bedrock-runtime`) |
 | `flow_logs_retention_days` | number | `365` | Flow log retention |
 | `logs_kms_key_arn` | string | – | `module.kms.key_arns["logs"]` |
 | `permissions_boundary_arn` | string | – | `module.permission_boundary.policy_arn` |

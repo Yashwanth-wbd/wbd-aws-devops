@@ -7,8 +7,8 @@
 | `prod/` | `wbd-mmm-prod` | `environments/prod/terraform.tfstate` | Step 12 (copy of dev) |
 
 The three stacks contain the **same `.tf` files**. Only `backend.tf`, `terraform.tfvars` and
-`README.md` differ. Differences between environments (AZ count, sizes, approvals, backups)
-come from tfvars values or from `local.is_prod` / `var.environment` checks in the code.
+`README.md` differ. Differences between environments (AZ count, Aurora ACU, ECS counts, approvals,
+backups) come from tfvars values or from `local.is_prod` / `var.environment` checks in the code.
 
 **Change code in `dev/` only**, then copy it to staging and prod:
 
@@ -20,19 +20,12 @@ come from tfvars values or from `local.is_prod` / `var.environment` checks in th
 The change then reaches each account through the pipeline: dev on merge, then staging and prod
 after their approvals.
 
-**Offline plan:** `tests/mock-plan.tftest.hcl` plans the whole stack against a mocked AWS
-provider (no credentials, nothing created). It runs twice: once with the tfvars and once with
-every optional feature switched on. CI runs it for all three stacks, and locally
-`.\scripts\mock-plan.ps1 -Environment dev,staging,prod` does the same.
+**Offline plan:** `tests/mock-plan.tftest.hcl` plans the whole stack against a mocked AWS provider.
+CI runs it for all three stacks; locally `.\scripts\mock-plan.ps1 -Environment dev,staging,prod`.
 
-| Stack | Expected plan on an empty account | With all optional features |
-|---|---|---|
-| dev | 292 to add | 384 |
-| staging | 309 (+3rd AZ, + backup vault deny policy) | 403 |
-| prod | 307 (no `ecr-read` role: nothing is promoted out of prod) | 403 |
-
-"All optional features" includes the Step 13 data platform (`enable_data_platform`, the
-Unity Catalog self-assume phase and Databricks PrivateLink): +58 resources in each stack.
+Resource counts on an empty account depend on optional flags – use the script output rather than
+fixed numbers. With every optional feature on (`enable_data_platform`, `enable_genai`, …) the plan
+is larger than the baseline Release 1 stack.
 
 ## Files in each stack
 
@@ -41,13 +34,15 @@ Unity Catalog self-assume phase and Databricks PrivateLink): +58 resources in ea
 | `provider.tf` | Terraform ≥ 1.10, AWS provider `~> 5.60`, `allowed_account_ids`, mandatory `default_tags` |
 | `backend.tf` | S3 backend with S3-native locking (values from the bootstrap output) |
 | `variables.tf` | All inputs, grouped by step |
-| `main.tf` | Locals (names, tags) and the modules of Steps 3–6 (foundation, network, secrets, platform) |
-| `ecs.tf` | Step 7: ECS cluster, ALB, task role policies, services and on-demand tasks |
-| `edge.tf` | Step 8: CloudFront, WAF, frontend bucket and S3 key grants for CloudFront, seed page |
-| `monitoring.tf` | Step 9: alert topic, alarms, event alerts, dashboard, logs data protection, Splunk shipping |
-| `backup.tf` | Step 10: AWS Backup vault, daily (+ monthly prod) plan, tag selection, vault lock and DR copy flags |
-| `cicd` … | CI/CD workflows live in `.github/workflows` (Step 11) |
-| `outputs.tf` | IDs and ARNs used by later steps and by GitHub Environment variables |
+| `main.tf` | Locals and Steps 3–6 (foundation, network, secrets, ECR, buckets, Aurora) |
+| `ecs.tf` | Step 7: ECS cluster, services `api` / `ui`, migrate and platform-check tasks |
+| `optimization.tf` | Step 7b: optimization state machine, SageMaker Processing role, publisher Lambda, image SSM params |
+| `frontdoor.tf` | Step 8: Cognito, ALB, regional WAF, optional Route 53 alias |
+| `monitoring.tf` | Step 9: alert topic, alarms, event alerts, dashboard, Splunk shipping |
+| `backup.tf` | Step 10: AWS Backup vault, plan, tag selection |
+| `data.tf` | Step 13: model refresh state machine, Databricks access (when `enable_data_platform`) |
+| `genai.tf` | Step 14: guardrails + LLM gateway (when `enable_genai`) |
+| `outputs.tf` | IDs and ARNs for GitHub Environment variables and validation |
 | `terraform.tfvars` | Values for this account; placeholders marked `# add actual value` |
 
 ## Who runs Terraform
@@ -55,5 +50,5 @@ Unity Catalog self-assume phase and Databricks PrivateLink): +58 resources in ea
 | Phase | How |
 |---|---|
 | Until the pipeline exists (Steps 3–10, dev) | DevOps engineer, SSO `DevOps` profile, from a laptop |
-| After Step 11 | Only GitHub Actions (`terraform.yml`): plan on PR, apply after merge with approvals, nightly drift check |
+| After Step 11 | GitHub Actions (`terraform.yml`): plan on PR, apply after merge, nightly drift |
 | Changing the permission boundary | DevOps engineer with SSO (the pipeline role is not allowed to) |

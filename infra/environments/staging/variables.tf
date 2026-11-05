@@ -25,7 +25,7 @@ variable "aws_region" {
 }
 
 variable "allowed_regions" {
-  description = "Regions the permission boundary allows: primary, us-east-1 (CloudFront/WAF/ACM) and the DR region if approved."
+  description = "Regions the permission boundary allows: the primary region and the DR region if approved."
   type        = list(string)
 }
 
@@ -50,7 +50,7 @@ variable "state_kms_key_arn" {
 
 # ------------------------------------------------------------------ GitHub OIDC
 variable "github_org" {
-  description = "GitHub organisation."
+  description = "GitHub organisation (or user) that owns the repository."
   type        = string
 }
 
@@ -161,7 +161,7 @@ variable "third_party_vendors" {
 }
 
 variable "generated_secret_rotation_id" {
-  description = "Change (e.g. to a date) to regenerate the Redis token and origin-verify value."
+  description = "Change (e.g. to a date) to regenerate secrets the secrets module generates (none by default)."
   type        = string
   default     = "initial"
 }
@@ -172,28 +172,8 @@ variable "genai_enabled" {
   default     = false
 }
 
-variable "okta_issuer" {
-  description = "Okta issuer URL (https://<org>.okta.com/oauth2/<auth-server-id>)."
-  type        = string
-}
-
-variable "okta_spa_client_id" {
-  description = "Okta SPA client ID for this environment (public value)."
-  type        = string
-}
-
-variable "okta_audience" {
-  description = "API audience in the Okta access token."
-  type        = string
-}
-
 variable "databricks_host" {
   description = "Databricks workspace URL."
-  type        = string
-}
-
-variable "databricks_sql_http_path" {
-  description = "Databricks SQL warehouse HTTP path."
   type        = string
 }
 
@@ -207,23 +187,23 @@ variable "genai_token_quotas" {
 variable "ecr_repositories" {
   description = "ECR repositories in this account."
   type        = list(string)
-  default     = ["mmm/api", "mmm/optimizer-worker", "mmm/genai-gateway"]
+  default     = ["mmm/api", "mmm/ui", "mmm/sagemaker-optimizer", "mmm/sagemaker-training"]
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention for service logs (RDS, ElastiCache; ECS from Step 7)."
+  description = "CloudWatch log retention for service logs (Aurora, ECS, Lambda, Step Functions, SageMaker, WAF)."
   type        = number
   default     = 30
 }
 
 variable "log_bucket_retention_days" {
-  description = "Days ALB / CloudFront / S3 access logs are kept in the log bucket."
+  description = "Days ALB / S3 access logs are kept in the log bucket."
   type        = number
   default     = 90
 }
 
 variable "approved_worm_lock_mode" {
-  description = "Object Lock mode of the approved-worm bucket (GOVERNANCE in dev/staging, COMPLIANCE in prod)."
+  description = "Object Lock mode of the approved-worm and training-data buckets (GOVERNANCE in dev/staging, COMPLIANCE in prod)."
   type        = string
 }
 
@@ -232,34 +212,29 @@ variable "approved_worm_retention_days" {
   type        = number
 }
 
-variable "rds_instance_class" {
-  description = "RDS PostgreSQL instance class."
-  type        = string
-}
-
-variable "rds_allocated_storage" {
-  description = "Initial RDS storage (GiB)."
+variable "training_data_retention_days" {
+  description = "Object Lock default retention of training snapshots (model reproducibility)."
   type        = number
-  default     = 50
+  default     = 365
 }
 
-variable "rds_max_allocated_storage" {
-  description = "RDS storage autoscaling ceiling (GiB)."
+variable "aurora_engine_version" {
+  description = "Aurora PostgreSQL engine version."
+  type        = string
+  default     = "16.6"
+}
+
+variable "aurora_min_acu" {
+  description = "Aurora Serverless v2 minimum capacity (ACU)."
   type        = number
-  default     = 200
 }
 
-variable "redis_node_type" {
-  description = "ElastiCache node type."
-  type        = string
+variable "aurora_max_acu" {
+  description = "Aurora Serverless v2 maximum capacity (ACU)."
+  type        = number
 }
 
-# ------------------------------------------------------------------ ECS (Step 7)
-variable "alb_certificate_arn" {
-  description = "ACM certificate (this region) for the ALB origin hostname; CloudFront validates it."
-  type        = string
-}
-
+# ------------------------------------------------------------------ ECS and optimization (Step 7)
 variable "seed_image" {
   description = "Placeholder image of the Terraform-created task definitions until deploy.yml ships the real images."
   type        = string
@@ -267,13 +242,7 @@ variable "seed_image" {
 }
 
 variable "enable_application_signals" {
-  description = "Add the CloudWatch agent sidecar + ADOT auto-instrumentation (Application Signals) to the services."
-  type        = bool
-  default     = false
-}
-
-variable "databricks_token_available" {
-  description = "Set true once mmm/<env>/databricks/sp holds a value; then workers get DATABRICKS_TOKEN injected."
+  description = "Add the CloudWatch agent sidecar + ADOT auto-instrumentation (Application Signals) to the API service."
   type        = bool
   default     = false
 }
@@ -285,31 +254,61 @@ variable "enable_db_bootstrap" {
 }
 
 variable "enable_platform_check_task" {
-  description = "Create the one-off platform-check task definition used to validate Steps 4-7."
+  description = "Create the one-off platform-check task definition used to validate Steps 4-8."
   type        = bool
   default     = true
 }
 
-# ------------------------------------------------------------------ Step 8 - Edge
-variable "cloudfront_aliases" {
-  description = "App domain names served by CloudFront (first one = APP_URL). WBD DNS adds CNAMEs to the distribution domain."
+variable "optimizer_instance_type" {
+  description = "SageMaker Processing instance of one optimization run (also used for model evaluation)."
+  type        = string
+  default     = "ml.m5.xlarge"
+}
+
+variable "optimizer_max_runtime_seconds" {
+  description = "Hard stop of one optimization run."
+  type        = number
+  default     = 3600
+}
+
+# ------------------------------------------------------------------ Step 8 - Front door and sign-in
+variable "app_domain_name" {
+  description = "App host name (e.g. mmm-dev.<wbd-domain>); on alb_certificate_arn, CNAME / alias to the ALB."
+  type        = string
+}
+
+variable "alb_certificate_arn" {
+  description = "ACM certificate (this region) for app_domain_name."
+  type        = string
+}
+
+variable "alb_ingress_cidrs" {
+  description = "Source ranges allowed to reach the ALB: 0.0.0.0/0 (internet, filtered by the WAF and Cognito) or the WBD egress ranges."
   type        = list(string)
+  default     = ["0.0.0.0/0"]
 }
 
-variable "cloudfront_certificate_arn" {
-  description = "ACM certificate in us-east-1 covering every name in cloudfront_aliases."
+variable "route53_zone_id" {
+  description = "Route 53 hosted zone of app_domain_name in this account. null = WBD DNS adds the CNAME (output dns_records_for_wbd)."
+  type        = string
+  default     = null
+}
+
+variable "okta_saml_metadata_url" {
+  description = "Metadata URL of the WBD Okta SAML app of this environment (public URL, no secret)."
   type        = string
 }
 
-variable "alb_origin_domain_name" {
-  description = "Origin host name on alb_certificate_arn (CNAME to alb_dns_name). CloudFront connects to the ALB with this name."
+variable "cognito_domain_prefix" {
+  description = "Cognito hosted domain prefix. null = wbd-mmm-<env_short>."
   type        = string
+  default     = null
 }
 
-variable "cloudfront_price_class" {
-  description = "CloudFront price class (PriceClass_100 = North America and Europe edges)."
-  type        = string
-  default     = "PriceClass_100"
+variable "session_hours" {
+  description = "How long a planner stays signed in (ALB session cookie and Cognito refresh token)."
+  type        = number
+  default     = 12
 }
 
 variable "geo_allow_countries" {
@@ -322,6 +321,12 @@ variable "waf_rate_limit" {
   description = "WAF: requests per 5 minutes per IP before blocking."
   type        = number
   default     = 2000
+}
+
+variable "waf_count_only" {
+  description = "Common-rule-set rules switched to count (e.g. SizeRestrictions_BODY for large plan uploads)."
+  type        = list(string)
+  default     = []
 }
 
 # ------------------------------------------------------------------ Step 9 - Monitoring and logging
@@ -373,15 +378,15 @@ variable "enable_vault_lock" {
   default     = false
 }
 
-# ------------------------------------------------------------------ Step 13 - Data-team platform
+# ------------------------------------------------------------------ Step 13 - Data-team platform and model refresh
 variable "enable_data_platform" {
-  description = "MWAA, data trigger, Databricks access, per-BU keys, data-quality and MWAA buckets. MWAA takes 20-30 min to create."
+  description = "Per-BU keys, lakehouse and training-data buckets, Databricks access, model-refresh state machine, schedules, SageMaker training and Model Registry."
   type        = bool
   default     = false
 }
 
 variable "business_units" {
-  description = "Business units: one S3 key each, landing prefixes <bu>/, one model each (lowercase, hyphens)."
+  description = "Business units: one S3 key, landing prefix <bu>/, model package group and refresh schedule each (lowercase, hyphens)."
   type        = list(string)
   default     = ["usnetworks", "streaming", "theatrical"]
 
@@ -414,50 +419,72 @@ variable "databricks_privatelink_service_name" {
   default     = null
 }
 
-variable "databricks_catalog" {
-  description = "Unity Catalog catalog of this environment (models: <catalog>.models.mmm_<bu>). null = mmm_<env_short>."
-  type        = string
-  default     = null
-}
-
-variable "databricks_eval_client_id" {
-  description = "Databricks service principal (application ID) used by model-governance.yml to evaluate candidates (GitHub OIDC federation, no secret)."
+variable "databricks_sp_client_id" {
+  description = "Application ID of the Databricks service principal the model-refresh state machine uses (OAuth M2M; its secret is set on the EventBridge connection out-of-band)."
   type        = string
 }
 
-variable "databricks_promote_client_id" {
-  description = "Databricks service principal that may move the production alias; its federation policy trusts only the <env>-model-promotion GitHub Environment."
-  type        = string
+variable "databricks_refresh_job_id" {
+  description = "ID of the Databricks Lakeflow job that builds the training snapshot (deployed by databricks.yml)."
+  type        = number
 }
 
-# ------------------------------------------------------------------ Step 14 - Release 2 GenAI (Bedrock)
-variable "enable_genai" {
-  description = "Create the Release 2 GenAI stack: Bedrock PrivateLink endpoint, guardrail, invocation logging, genai-gateway service, alarms and budget."
+variable "training_instance_type" {
+  description = "SageMaker training instance."
+  type        = string
+  default     = "ml.m5.2xlarge"
+}
+
+variable "training_max_runtime_seconds" {
+  description = "Hard stop of one training job."
+  type        = number
+  default     = 4 * 3600
+}
+
+variable "model_refresh_schedule" {
+  description = "EventBridge Scheduler expression of the scheduled refresh (one schedule per business unit)."
+  type        = string
+  default     = "cron(0 6 ? * MON *)"
+}
+
+variable "model_refresh_timezone" {
+  description = "Time zone of model_refresh_schedule."
+  type        = string
+  default     = "America/New_York"
+}
+
+variable "enable_model_refresh_schedule" {
+  description = "Schedules ENABLED (true) or DISABLED (false; on-demand refresh only)."
   type        = bool
   default     = false
 }
 
-variable "genai_approved_model_ids" {
-  description = "Bedrock model IDs WBD approved; the first one is the gateway default (SSM genai/model_id). Nothing else can be invoked."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for id in var.genai_approved_model_ids : can(regex("^[a-z0-9][a-z0-9.:-]+$", id))])
-    error_message = "genai_approved_model_ids must be Bedrock model IDs such as anthropic.claude-3-5-sonnet-20240620-v1:0."
-  }
+# ------------------------------------------------------------------ Step 14 - Release 2 GenAI (LLM gateway)
+variable "enable_genai" {
+  description = "Create the Release 2 GenAI stack: Bedrock guardrail, private API Gateway + proxy Lambda to the approved LLM providers, llm/<provider> secrets."
+  type        = bool
+  default     = false
 }
 
-variable "genai_monthly_budget_usd" {
-  description = "Monthly Bedrock cost budget (alerts at 50/80/100 % actual, 100 % forecast)."
+variable "llm_providers" {
+  description = "Approved external LLM providers: name => { base_url, auth = bearer | x-api-key | x-goog-api-key }. One secret llm/<name> each."
+  type = map(object({
+    base_url = string
+    auth     = string
+  }))
+  default = {}
+}
+
+variable "genai_reserved_concurrency" {
+  description = "Concurrency cap of the LLM proxy Lambda."
   type        = number
-  default     = 500
+  default     = 20
 }
 
-variable "genai_budget_service_names" {
-  description = "Cost Explorer service names counted by the GenAI budget (Amazon Bedrock plus the Marketplace names of third-party models)."
-  type        = list(string)
-  default     = ["Amazon Bedrock"]
+variable "manage_apigw_account_logging_role" {
+  description = "Set the account-level API Gateway CloudWatch role (false if WBD already manages it)."
+  type        = bool
+  default     = true
 }
 
 variable "genai_guardrail_version_label" {
@@ -476,10 +503,4 @@ variable "genai_relevance_threshold" {
   description = "Contextual relevance threshold (0-0.99): answers that do not address the question are blocked."
   type        = number
   default     = 0.75
-}
-
-variable "enable_bedrock_invocation_logging" {
-  description = "Configure Bedrock model invocation logging in this account and region (false if WBD already manages it centrally)."
-  type        = bool
-  default     = true
 }

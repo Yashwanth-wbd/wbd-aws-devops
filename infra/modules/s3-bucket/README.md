@@ -1,7 +1,8 @@
 # s3-bucket
 
 One hardened, reusable S3 bucket. The environment stack calls it once per purpose: `landing`,
-`results`, `approved-worm`, `exports` and `frontend`. Step 13 adds `mwaa` and `data-quality`.
+`results`, `approved-worm`, `exports` and `models`. The data platform adds `training-data` and
+`lakehouse`.
 
 **Status:** implemented in Step 6.
 
@@ -21,11 +22,11 @@ One hardened, reusable S3 bucket. The environment stack calls it once per purpos
 
 | Feature | Input | Used by |
 |---|---|---|
-| Object Lock (WORM) | `object_lock = { mode, days }` | `approved-worm`: GOVERNANCE in dev/staging, COMPLIANCE in prod, 2555 days (7 years). It can only be turned on when the bucket is **created**. |
-| Glacier transition | `glacier_transition_days` | `landing`: 365 days; objects are kept, never expired |
+| Object Lock (WORM) | `object_lock = { mode, days }` | `approved-worm`: GOVERNANCE in dev/staging, COMPLIANCE in prod, 2555 days (7 years); `training-data` (training snapshots, `training_data_retention_days`). It can only be turned on when the bucket is **created**. |
+| Glacier transition | `glacier_transition_days` | `landing`: 365 days; `training-data`: 180 days; objects are kept, never expired |
 | Expiry | `expiration_days` | `exports`: 30 days |
-| EventBridge events | `enable_eventbridge` | `landing`: the data trigger in Step 13 |
-| Extra policy | `additional_policy_json` | `frontend`: CloudFront OAC read (Step 8) |
+| EventBridge events | `enable_eventbridge` | `landing`: object events on the default bus (no rule consumes them yet; ready for a data-arrival trigger) |
+| Extra policy | `additional_policy_json` | Optional, e.g. a cross-account read |
 | Cross-region replication | `replication = { destination_bucket_arn, destination_kms_key_arn, permissions_boundary_arn }` | Not used for now: Step 12 uses the AWS Backup cross-region copy instead (docs/08 section 2). Turn it on for `results` / `approved-worm` only if WBD needs RPO in minutes |
 
 Replication creates the IAM role `<bucket>-replication`. The role has the permission boundary

@@ -7,11 +7,13 @@
     dev      no reviewers; deployments from main only
     staging  required reviewers (EY delivery lead); main (Terraform) and v* tags (releases)
     prod     required reviewers (WBD approvers), prevent self-review; main (Terraform) and v* tags
-    (staging and prod also allow data-v* tags: data.yml)
 
   With -ModelApproverTeams/-ModelApproverUsers it also creates <env>-model-promotion (Step 13):
   required reviewers (WBD model approvers), prevent self-review, main only. model-governance.yml
-  moves the "production" model alias only from a job in that environment.
+  approves a model package (gha-model-approve role) only from a job in that environment.
+
+  -DatabricksClientId sets DATABRICKS_CLIENT_ID (the Databricks deploy service principal that
+  databricks.yml federates to with GitHub OIDC) on the Environment.
 
   Variables come from `terraform output -json github_environment_variables` (Environment level) and
   `github_repository_variables` (repository level, used by PR plans and the drift check), so the
@@ -20,18 +22,18 @@
   Needs: gh (logged in as a repo admin), terraform, AWS credentials for that account.
 
 .EXAMPLE
-  .\scripts\setup-github.ps1 -Repo wbd-org/wbd-mmm-platform -Environment dev
+  .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment dev
 .EXAMPLE
-  .\scripts\setup-github.ps1 -Repo wbd-org/wbd-mmm-platform -Environment staging -ReviewerTeams ey-delivery-leads `
+  .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment staging -ReviewerTeams ey-delivery-leads `
     -SourceEcrReadRoleArn arn:aws:iam::111111111111:role/mmm-dev-gha-ecr-read -SourceEcrRegistry 111111111111.dkr.ecr.us-east-1.amazonaws.com
 .EXAMPLE
-  .\scripts\setup-github.ps1 -Repo wbd-org/wbd-mmm-platform -Environment prod -ReviewerTeams wbd-release-approvers `
+  .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment prod -ReviewerTeams wbd-release-approvers `
     -ModelApproverTeams wbd-model-approvers -SkipVariables
 #>
 [CmdletBinding()]
 param(
   # add actual value
-  [string]$Repo = 'wbd-org/wbd-mmm-platform',
+  [string]$Repo = 'Yashwanth-wbd/wbd-aws-devops',
   [Parameter(Mandatory)] [ValidateSet('dev', 'staging', 'prod')] [string]$Environment,
   [string]$TerraformDir,
   [string[]]$ReviewerTeams = @(),
@@ -40,6 +42,7 @@ param(
   [string]$SourceEcrRegistry,
   [string[]]$ModelApproverTeams = @(),
   [string[]]$ModelApproverUsers = @(),
+  [string]$DatabricksClientId,
   [switch]$SkipVariables
 )
 
@@ -96,7 +99,7 @@ Invoke-Gh @('api', '-X', 'PUT', "repos/$Repo/environments/$Environment") $envBod
 Write-Host "Environment ${Environment}: reviewers=$($reviewers.Count), prevent_self_review=$($Environment -eq 'prod')"
 
 $policies = @(@{ name = 'main'; type = 'branch' })
-if ($Environment -ne 'dev') { $policies += @{ name = 'v*'; type = 'tag' }, @{ name = 'data-v*'; type = 'tag' } }
+if ($Environment -ne 'dev') { $policies += @{ name = 'v*'; type = 'tag' } }
 Add-RefPolicies $Environment $policies
 
 # ------------------------------------------------------------------ Step 13: model promotion approval
@@ -135,6 +138,10 @@ foreach ($p in $envVars.PSObject.Properties) {
 foreach ($p in $repoVars.PSObject.Properties) {
   Invoke-Gh @('variable', 'set', $p.Name, '--repo', $Repo, '--body', [string]$p.Value) | Out-Null
   Write-Host "  repo $($p.Name) = $($p.Value)"
+}
+if ($DatabricksClientId) {
+  Invoke-Gh @('variable', 'set', 'DATABRICKS_CLIENT_ID', '--repo', $Repo, '--env', $Environment, '--body', $DatabricksClientId) | Out-Null
+  Write-Host "  env  DATABRICKS_CLIENT_ID = $DatabricksClientId"
 }
 
 # Promotion source (previous environment's registry) - staging and prod only

@@ -1,24 +1,25 @@
 # Runbook: roll back
 
-Decide **what** is bad first: app image, frontend, database schema/data, infrastructure, data
-pipeline (DAGs), model, or GenAI. Practise each in staging (Release 1 gate R9).
+Decide **what** is bad first: app image (`api` / `ui`), SageMaker optimizer/training image pointers,
+results publisher Lambda, database schema/data, infrastructure, model refresh pipeline, model
+governance, or GenAI. Practise each in staging (Release 1 gate R9).
 
 | What | Fastest safe rollback | Time |
 |---|---|---|
-| App (api / workers / genai-gateway) | Redeploy the previous version with `deploy.yml` dispatch, migrations off | 5–10 min |
+| App (`api`, `ui`) | Redeploy the previous version with `deploy.yml` dispatch, migrations off | 5–10 min |
 | App, pipeline unavailable | `aws ecs update-service --task-definition <previous revision>` ([break-glass.md](break-glass.md) in prod) | 3–5 min |
-| Frontend | `deploy-frontend.sh switch` to the previous release folder | 1 min |
+| SageMaker optimizer / training image | `deploy.yml` dispatch with previous tag, or restore previous SSM values | 2–5 min |
+| Results publisher | `scripts/lambda-release.sh switch mmm-<env>-results-publisher <version>` (version from release record) | 1–2 min |
 | Infrastructure | Revert the PR, merge, approve the apply | 15–30 min |
-| Database data | Point-in-time restore ([db-restore.md](db-restore.md)) | 30–60 min |
-| DAGs | Re-tag the previous `data-vX.Y.Z` ([docs/10 §6](../10-data-platform-and-model-governance.md#6-releasing-dags-datayml)) | 10 min |
-| Model | Move the `production` alias back ([model-rollback.md](model-rollback.md)) | 5 min + approval |
+| Database data | Aurora point-in-time restore ([db-restore.md](db-restore.md)) | 30–60 min |
+| Model curves (governance) | `model-governance.yml` `rollback` action ([model-rollback.md](model-rollback.md)) | 5 min + approval |
 | GenAI | Flag off ([genai.md](genai.md)) | 5 min |
 
-## App
+## App (ECS)
 
 ```bash
 # previous good version from the last release record, or:
-aws ecs describe-services --cluster $P-ecs --services $P-api --query 'services[0].deployments[].taskDefinition'
+aws ecs describe-services --cluster $P-ecs --services $P-api $P-ui --query 'services[].deployments[].taskDefinition'
 
 # prod: run on the previous release tag (the workflow refuses other refs for prod)
 gh workflow run deploy.yml --ref v1.3.2 -f environment=prod -f run_migrations=false -f components=all
@@ -31,27 +32,40 @@ Without the pipeline (prod needs `BreakGlass` or `mmm-prd-devops`):
 ```bash
 aws ecs list-task-definitions --family-prefix $P-api --sort DESC --max-items 5
 aws ecs update-service --cluster $P-ecs --service $P-api --task-definition $P-api:<previous revision>
-aws ecs wait services-stable --cluster $P-ecs --services $P-api
+aws ecs update-service --cluster $P-ecs --service $P-ui --task-definition $P-ui:<previous revision>
+aws ecs wait services-stable --cluster $P-ecs --services $P-api $P-ui
 ```
 
-Repeat for `whatif-worker` / `optimizer-worker` / `genai-gateway` if they changed. Afterwards
-redeploy the same version through the pipeline so the release record is complete.
+Afterwards redeploy the same version through the pipeline so the release record is complete.
 
 **Schema:** migrations are expand-then-contract, so the previous app version works on the new
-schema. If a migration itself destroyed data, restore ([db-restore.md](db-restore.md)); the
-prod deploy made snapshot `mmm-prd-predeploy-<version>-<run>` right before it.
+schema. If a migration itself destroyed data, restore ([db-restore.md](db-restore.md)); the prod
+deploy made cluster snapshot `mmm-prd-predeploy-<version>-<run>` right before it.
 
-## Frontend
+## SageMaker images (SSM)
+
+The release record lists previous SSM values for `/mmm/<env_short>/images/sagemaker-optimizer` and
+`sagemaker-training`. Either dispatch `deploy.yml` with the previous image tag, or (emergency):
 
 ```bash
-bash scripts/deploy-frontend.sh switch <FRONTEND_KVS_ARN> v1.3.2   # GitHub variable FRONTEND_KVS_ARN
+aws ssm put-parameter --name /mmm/$E/images/sagemaker-optimizer --value '<previous digest URI>' --overwrite
+```
+
+New optimization runs pick up the pointer immediately; in-flight Step Functions executions keep
+the image they resolved at start.
+
+## Results publisher (Lambda)
+
+```bash
+# version from the release record, or:
+scripts/lambda-release.sh current mmm-$E-results-publisher   # shows live alias target
+scripts/lambda-release.sh switch mmm-$E-results-publisher <previous-version>
 ```
 
 ## Infrastructure
 
-`git revert <merge commit>` → PR → plan shows the reverse change → merge → approvals. For a
-resource Terraform cannot recreate quickly (RDS, buckets) read the plan carefully: never accept a
-replace of `$P-pg` or a data bucket – stop and escalate.
+`git revert <merge commit>` → PR → plan shows the reverse change → merge → approvals. For Aurora
+or buckets, read the plan carefully: never accept an unintended cluster replace – stop and escalate.
 
 ## Verify
 

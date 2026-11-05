@@ -13,7 +13,7 @@
 | Checkov | latest | 3.4.3 | `checkov --version` | Terraform security scan (also runs in CI) |
 | Trivy | latest | 0.76.1 | `trivy --version` | Image and IaC vulnerability scan (also runs in CI) |
 | Python | 3.12 | 3.12.10 | `python --version` | Checkov, model-governance script |
-| Node.js | 22 | 22.23.4 | `node --version` | Optional: test the frontend build locally |
+| Node.js | 22 | 22.23.4 | `node --version` | Optional: run `ui-ci.yml` checks locally (`apps/ui`) |
 | Docker | latest | **not installed** | `docker version` | Optional: build images locally |
 
 ## Installing
@@ -56,8 +56,8 @@ $ca = "C:\certs\wbd-root-ca.pem"
 |---|---|---|
 | AWS SSO for dev, staging, prod | WBD Cloud Platform team | Bootstrap and validation |
 | GitHub org: create repo, Environments, variables | WBD GitHub admins | Pipelines |
-| Okta apps per environment | WBD Identity team | Planner login |
-| Databricks workspace + service principal | WBD Databricks admins | Data platform (Step 13) |
+| Okta SAML apps per environment | WBD Identity team | Planner login (ALB → Cognito → Okta) |
+| Databricks workspace + service principals | WBD Databricks admins | Data platform (Step 13) and bundle deploy |
 | Splunk HEC endpoint + token | WBD Splunk team | Log shipping (Step 9) |
 | CAB process + named approvers | WBD change management | Prod releases |
 

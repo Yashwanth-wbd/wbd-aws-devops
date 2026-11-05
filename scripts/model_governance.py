@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Model governance for the MMM models in the MLflow (Unity Catalog) registry.
+"""Model governance for the MMM models in the SageMaker Model Registry.
 
 Used by .github/workflows/model-governance.yml. Thresholds: data/model-thresholds.yaml.
+The model-refresh state machine registers every retrained model as PendingManualApproval in the
+model package group <prefix>-<business unit>, with ModelMetrics pointing at evaluation.json.
 
   check-thresholds  validate the thresholds file (CI, offline)
   evaluate-file     evaluate a metrics JSON file against the thresholds (offline, for testing)
-  evaluate          evaluate every version that has the "candidate" alias and no governance tag:
-                    tag it passed / failed with the checked metrics; failed -> candidate alias removed
-  promote           move the "production" alias to a passed version (after the approval gate)
-  rollback          move "production" back to the version it replaced
+  evaluate          evaluate every PendingManualApproval version without a governance tag:
+                    tag it passed / failed with the checked metrics; failed -> Rejected (never approvable)
+  promote           approve a passed version (after the approval gate) and publish its response
+                    curves to s3://<models bucket>/curves/<bu>/, which the API reads
+  rollback          re-publish the previously approved version and reject the current one
 
-Databricks auth: databricks-sdk unified auth (DATABRICKS_HOST + DATABRICKS_CLIENT_ID +
-DATABRICKS_AUTH_TYPE=github-oidc in GitHub Actions; no secret). The short-lived token is handed
-to MLflow as DATABRICKS_TOKEN for this process only.
+AWS auth: the GitHub OIDC role of the job (gha-model-eval may only reject; gha-model-approve may approve).
 """
 
 from __future__ import annotations
@@ -23,12 +24,14 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import yaml
 
 STATUS_TAG = "governance_status"
 CHECKS_TAG = "governance_checks"
-PREVIOUS_TAG = "previous_production_version"
+PREVIOUS_TAG = "previous_approved_version"
+ENV_SHORT = {"dev": "dev", "staging": "stg", "prod": "prd"}
 
 
 # ------------------------------------------------------------------ thresholds (offline)
@@ -36,7 +39,7 @@ def load_thresholds(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
     errors = []
-    for key in ("model_name", "candidate_alias", "production_alias", "business_units"):
+    for key in ("model_package_group", "curves_prefix", "business_units"):
         if key not in cfg:
             errors.append(f"missing top-level key {key!r}")
     for bu, spec in (cfg.get("business_units") or {}).items():
@@ -60,7 +63,7 @@ def evaluate_metrics(metrics: dict, rules: dict) -> list[dict]:
     results = []
     for name, rule in sorted(rules.items()):
         value = metrics.get(name)
-        ok = isinstance(value, (int, float)) and math.isfinite(value)
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         if ok and "min" in rule:
             ok = value >= rule["min"]
         if ok and "max" in rule:
@@ -77,30 +80,86 @@ def summary(results: list[dict]) -> str:
     return "; ".join(parts)
 
 
-# ------------------------------------------------------------------ MLflow (Unity Catalog registry)
-def mlflow_client():
-    from databricks.sdk.core import Config  # noqa: PLC0415
-    from mlflow import MlflowClient  # noqa: PLC0415
+# ------------------------------------------------------------------ SageMaker Model Registry
+def clients():
+    import boto3  # noqa: PLC0415
 
-    cfg = Config()
-    os.environ["DATABRICKS_HOST"] = cfg.host
-    os.environ["DATABRICKS_TOKEN"] = cfg.authenticate()["Authorization"].removeprefix("Bearer ")
-    os.environ.pop("DATABRICKS_AUTH_TYPE", None)
-    os.environ.pop("DATABRICKS_CLIENT_ID", None)
-    return MlflowClient(tracking_uri="databricks", registry_uri="databricks-uc")
+    return boto3.client("sagemaker"), boto3.client("s3")
 
 
-def alias_version(client, name: str, alias: str):
-    from mlflow.exceptions import MlflowException  # noqa: PLC0415
+def group_name(cfg: dict, environment: str, bu: str) -> str:
+    return cfg["model_package_group"].format(prefix=f"mmm-{ENV_SHORT[environment]}", business_unit=bu)
 
+
+def package_arn(sm, group: str, version: str) -> str:
+    for page in sm.get_paginator("list_model_packages").paginate(ModelPackageGroupName=group):
+        for p in page["ModelPackageSummaryList"]:
+            if str(p["ModelPackageVersion"]) == str(version):
+                return p["ModelPackageArn"]
+    raise SystemExit(f"{group}: version {version} not found")
+
+
+def packages(sm, group: str, status: str) -> list[dict]:
+    """Versions with the given approval status, newest first."""
+    out = []
+    pages = sm.get_paginator("list_model_packages").paginate(
+        ModelPackageGroupName=group, ModelApprovalStatus=status, SortBy="CreationTime", SortOrder="Descending"
+    )
+    for page in pages:
+        out.extend(page["ModelPackageSummaryList"])
+    return out
+
+
+def tags(sm, arn: str) -> dict:
+    return {t["Key"]: t["Value"] for t in sm.list_tags(ResourceArn=arn).get("Tags", [])}
+
+
+def tag(sm, arn: str, **values: str) -> None:
+    sm.add_tags(ResourceArn=arn, Tags=[{"Key": k, "Value": str(v)[:256]} for k, v in values.items()])
+
+
+def split_s3(uri: str) -> tuple[str, str]:
+    u = urlparse(uri)
+    return u.netloc, u.path.lstrip("/")
+
+
+def evaluation_uri(sm, arn: str) -> str:
+    pkg = sm.describe_model_package(ModelPackageName=arn)
     try:
-        return client.get_model_version_by_alias(name, alias)
-    except MlflowException:
-        return None
+        return pkg["ModelMetrics"]["ModelQuality"]["Statistics"]["S3Uri"]
+    except KeyError:
+        return ""
 
 
-def model_name(cfg: dict, catalog: str, bu: str) -> str:
-    return cfg["model_name"].format(catalog=catalog, business_unit=bu)
+def read_metrics(s3, uri: str) -> dict:
+    if not uri:
+        return {}
+    bucket, key = split_s3(uri)
+    return json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+
+
+def publish_curves(s3, cfg: dict, bu: str, eval_uri: str, models_bucket: str, arn: str) -> int:
+    """Replace curves/<bu>/ with <evaluation prefix>/curves/ of the approved version."""
+    src_bucket, eval_key = split_s3(eval_uri)
+    src_prefix = eval_key.rsplit("/", 1)[0] + "/curves/"
+    dst_prefix = cfg["curves_prefix"].format(business_unit=bu)
+    src = [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=src_bucket, Prefix=src_prefix) for o in page.get("Contents", [])]
+    if not src:
+        raise SystemExit(f"no response curves under s3://{src_bucket}/{src_prefix}")
+    old = [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=models_bucket, Prefix=dst_prefix) for o in page.get("Contents", [])]
+    wanted = set()
+    for key in src:
+        dst = dst_prefix + key[len(src_prefix):]
+        wanted.add(dst)
+        s3.copy_object(Bucket=models_bucket, Key=dst, CopySource={"Bucket": src_bucket, "Key": key}, ServerSideEncryption="aws:kms")
+    marker = dst_prefix + "_model_package.json"
+    wanted.add(marker)
+    s3.put_object(Bucket=models_bucket, Key=marker, ServerSideEncryption="aws:kms",
+                  Body=json.dumps({"model_package_arn": arn, "published_at": datetime.now(timezone.utc).isoformat()}).encode())
+    for key in old:
+        if key not in wanted:
+            s3.delete_object(Bucket=models_bucket, Key=key)
+    return len(src)
 
 
 def write_output(key: str, value) -> None:
@@ -117,43 +176,42 @@ def write_summary(lines: list[str]) -> None:
             fh.write("\n".join(lines) + "\n")
 
 
+# ------------------------------------------------------------------ commands
 def cmd_evaluate(args) -> int:
     cfg = load_thresholds(args.thresholds)
-    client = mlflow_client()
+    sm, s3 = clients()
     bus = [args.business_unit] if args.business_unit != "all" else list(cfg["business_units"])
     report, passed = [], []
 
     for bu in bus:
-        name = model_name(cfg, args.catalog, bu)
+        group = group_name(cfg, args.environment, bu)
         if args.version:
-            mv = client.get_model_version(name, args.version)
+            candidates = [{"ModelPackageArn": package_arn(sm, group, args.version), "ModelPackageVersion": args.version}]
         else:
-            mv = alias_version(client, name, cfg["candidate_alias"])
-        if mv is None:
-            report.append({"business_unit": bu, "model": name, "status": "no-candidate"})
-            continue
-        if mv.tags.get(STATUS_TAG) and not args.version:
-            report.append({"business_unit": bu, "model": name, "version": mv.version, "status": f"already-{mv.tags[STATUS_TAG]}"})
-            continue
-
-        metrics = client.get_run(mv.run_id).data.metrics if mv.run_id else {}
-        results = evaluate_metrics(metrics, cfg["business_units"][bu]["metrics"])
-        ok = all(r["passed"] for r in results)
-        status = "passed" if ok else "failed"
-        client.set_model_version_tag(name, mv.version, STATUS_TAG, status)
-        client.set_model_version_tag(name, mv.version, CHECKS_TAG, summary(results)[:5000])
-        client.set_model_version_tag(name, mv.version, "governance_evaluated_at", datetime.now(timezone.utc).isoformat())
-        client.set_model_version_tag(name, mv.version, "governance_run", args.run_url or "")
-        if ok:
-            passed.append({"business_unit": bu, "version": str(mv.version)})
-        else:
-            # Failed candidates stay in the registry (with their metrics and tags) but lose the alias.
-            client.delete_registered_model_alias(name, cfg["candidate_alias"])
-            print(f"::warning::{name} v{mv.version} FAILED governance: {summary(results)}")
-        report.append({"business_unit": bu, "model": name, "version": mv.version, "run_id": mv.run_id, "status": status, "checks": results})
+            candidates = packages(sm, group, "PendingManualApproval")
+        if not candidates:
+            report.append({"business_unit": bu, "group": group, "status": "no-candidate"})
+        for c in candidates:
+            arn, version = c["ModelPackageArn"], str(c["ModelPackageVersion"])
+            existing = tags(sm, arn).get(STATUS_TAG)
+            if existing and not args.version:
+                report.append({"business_unit": bu, "group": group, "version": version, "status": f"already-{existing}"})
+                continue
+            results = evaluate_metrics(read_metrics(s3, evaluation_uri(sm, arn)), cfg["business_units"][bu]["metrics"])
+            ok = all(r["passed"] for r in results)
+            status = "passed" if ok else "failed"
+            tag(sm, arn, **{STATUS_TAG: status, CHECKS_TAG: summary(results), "governance_evaluated_at": datetime.now(timezone.utc).isoformat()})
+            if ok:
+                passed.append({"business_unit": bu, "version": version})
+            else:
+                # Failed versions stay in the registry with their metrics but can never be approved.
+                sm.update_model_package(ModelPackageArn=arn, ModelApprovalStatus="Rejected",
+                                        ApprovalDescription=f"Failed thresholds: {summary(results)}"[:1024])
+                print(f"::warning::{group} v{version} FAILED governance: {summary(results)}")
+            report.append({"business_unit": bu, "group": group, "version": version, "status": status, "checks": results})
 
     with open(args.report, "w", encoding="utf-8") as fh:
-        json.dump({"environment": args.environment, "catalog": args.catalog, "results": report}, fh, indent=2, default=str)
+        json.dump({"environment": args.environment, "run": args.run_url, "results": report}, fh, indent=2, default=str)
     write_output("passed", passed)
     lines = [f"### Model evaluation - {args.environment}", "", "| Business unit | Version | Result | Checks |", "|---|---|---|---|"]
     lines += [f"| {r['business_unit']} | {r.get('version', '-')} | {r['status']} | {summary(r.get('checks', [])) or '-'} |" for r in report]
@@ -164,45 +222,48 @@ def cmd_evaluate(args) -> int:
 
 def cmd_promote(args) -> int:
     cfg = load_thresholds(args.thresholds)
-    client = mlflow_client()
-    name = model_name(cfg, args.catalog, args.business_unit)
-    mv = client.get_model_version(name, args.version)
-    if mv.tags.get(STATUS_TAG) != "passed":
-        print(f"::error::{name} v{args.version} has {STATUS_TAG}={mv.tags.get(STATUS_TAG)!r}; only passed versions can be promoted")
+    sm, s3 = clients()
+    group = group_name(cfg, args.environment, args.business_unit)
+    arn = package_arn(sm, group, args.version)
+    status = tags(sm, arn).get(STATUS_TAG)
+    if status != "passed":
+        print(f"::error::{group} v{args.version} has {STATUS_TAG}={status!r}; only passed versions can be approved")
         return 1
-    current = alias_version(client, name, cfg["production_alias"])
-    if current is not None and str(current.version) == str(args.version):
-        print(f"{name} v{args.version} is already {cfg['production_alias']}")
+    approved = packages(sm, group, "Approved")
+    current = approved[0] if approved else None
+    if current is not None and str(current["ModelPackageVersion"]) == str(args.version):
+        print(f"{group} v{args.version} is already the approved version")
         return 0
-    if current is not None:
-        client.set_model_version_tag(name, mv.version, PREVIOUS_TAG, str(current.version))
-    client.set_registered_model_alias(name, cfg["production_alias"], mv.version)
-    client.set_model_version_tag(name, mv.version, "promoted_at", datetime.now(timezone.utc).isoformat())
-    client.set_model_version_tag(name, mv.version, "promoted_by", args.approved_by)
-    client.set_model_version_tag(name, mv.version, "promotion_run", args.run_url or "")
-    if alias_version(client, name, cfg["candidate_alias"]) is not None:
-        client.delete_registered_model_alias(name, cfg["candidate_alias"])
-    write_summary([f"### Promoted {name} v{mv.version} to `{cfg['production_alias']}`",
-                   f"previous: {getattr(current, 'version', 'none')} - approved by: {args.approved_by}"])
-    print(f"{name}: {cfg['production_alias']} -> v{mv.version} (was {getattr(current, 'version', 'none')})")
+    count = publish_curves(s3, cfg, args.business_unit, evaluation_uri(sm, arn), args.models_bucket, arn)
+    sm.update_model_package(ModelPackageArn=arn, ModelApprovalStatus="Approved",
+                            ApprovalDescription=f"Approved by {args.approved_by} - {args.run_url}"[:1024])
+    previous = str(current["ModelPackageVersion"]) if current else "none"
+    tag(sm, arn, **{PREVIOUS_TAG: previous, "approved_at": datetime.now(timezone.utc).isoformat(), "approved_by": args.approved_by})
+    write_summary([f"### Approved {group} v{args.version}", f"curves published: {count} files - previous: {previous} - approved by: {args.approved_by}"])
+    print(f"{group}: approved v{args.version} (was {previous}); {count} curve files published")
     return 0
 
 
 def cmd_rollback(args) -> int:
     cfg = load_thresholds(args.thresholds)
-    client = mlflow_client()
-    name = model_name(cfg, args.catalog, args.business_unit)
-    current = alias_version(client, name, cfg["production_alias"])
-    previous = args.version or (current.tags.get(PREVIOUS_TAG) if current else None)
-    if not previous:
-        print(f"::error::{name}: no {PREVIOUS_TAG} tag on the production version; pass --version")
+    sm, s3 = clients()
+    group = group_name(cfg, args.environment, args.business_unit)
+    approved = packages(sm, group, "Approved")
+    if not approved:
+        print(f"::error::{group}: no approved version")
         return 1
-    client.set_registered_model_alias(name, cfg["production_alias"], previous)
-    if current is not None:
-        client.set_model_version_tag(name, current.version, STATUS_TAG, "rolled-back")
-    client.set_model_version_tag(name, previous, "rolled_back_to_at", datetime.now(timezone.utc).isoformat())
-    write_summary([f"### Rolled back {name}: `{cfg['production_alias']}` -> v{previous} (was v{getattr(current, 'version', '?')})"])
-    print(f"{name}: {cfg['production_alias']} -> v{previous}")
+    current = approved[0]
+    target = args.version or tags(sm, current["ModelPackageArn"]).get(PREVIOUS_TAG)
+    if not target or target == "none":
+        print(f"::error::{group}: no {PREVIOUS_TAG} tag on v{current['ModelPackageVersion']}; pass --version")
+        return 1
+    arn = package_arn(sm, group, target)
+    publish_curves(s3, cfg, args.business_unit, evaluation_uri(sm, arn), args.models_bucket, arn)
+    sm.update_model_package(ModelPackageArn=current["ModelPackageArn"], ModelApprovalStatus="Rejected",
+                            ApprovalDescription=f"Rolled back to v{target} - {args.run_url}"[:1024])
+    tag(sm, current["ModelPackageArn"], **{STATUS_TAG: "rolled-back"})
+    write_summary([f"### Rolled back {group}: v{current['ModelPackageVersion']} -> v{target}"])
+    print(f"{group}: rolled back v{current['ModelPackageVersion']} -> v{target}")
     return 0
 
 
@@ -235,13 +296,14 @@ def main(argv=None) -> int:
 
     for name, func in (("evaluate", cmd_evaluate), ("promote", cmd_promote), ("rollback", cmd_rollback)):
         s = sub.add_parser(name)
-        s.add_argument("--environment", required=True)
-        s.add_argument("--catalog", required=True)
+        s.add_argument("--environment", required=True, choices=sorted(ENV_SHORT))
         s.add_argument("--business-unit", default="all" if name == "evaluate" else None, required=name != "evaluate")
         s.add_argument("--version", default=None)
         s.add_argument("--run-url", default="")
         if name == "evaluate":
             s.add_argument("--report", default="model-evaluation.json")
+        else:
+            s.add_argument("--models-bucket", required=True)
         if name == "promote":
             s.add_argument("--approved-by", required=True)
         s.set_defaults(func=func)

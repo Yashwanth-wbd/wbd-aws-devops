@@ -1,15 +1,16 @@
+# SageMaker Processing image of the full optimization (state machine "optimization").
 name: optimizer-ci
 
 on:
   pull_request:
     paths:
-      - apps/optimizer-worker/**
+      - apps/sagemaker-optimizer/**
       - .github/workflows/optimizer-ci.yml
       - .github/workflows/_python-service-ci.yml
   push:
     branches: [main]
     paths:
-      - apps/optimizer-worker/**
+      - apps/sagemaker-optimizer/**
       - .github/workflows/optimizer-ci.yml
       - .github/workflows/_python-service-ci.yml
   workflow_dispatch:
@@ -26,5 +27,5 @@ jobs:
   ci:
     uses: ./.github/workflows/_python-service-ci.yml
     with:
-      app_dir: apps/optimizer-worker
-      repository: mmm/optimizer-worker
+      app_dir: apps/sagemaker-optimizer
+      repository: mmm/sagemaker-optimizer

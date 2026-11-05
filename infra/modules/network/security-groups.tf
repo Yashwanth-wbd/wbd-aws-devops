@@ -1,56 +1,61 @@
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
-}
-
 locals {
   security_groups = merge(
     {
       endpoints    = "Interface VPC endpoints - HTTPS from inside the VPC"
-      alb          = "ALB - HTTPS from CloudFront origin-facing IPs only"
+      alb          = "Public ALB - HTTPS (and HTTP for the redirect) from the allowed ranges; WAF in front"
       api          = "API tasks - app port from the ALB only"
-      workers      = "What-if and optimizer worker tasks - no inbound"
-      data_clients = "Attach to any task that uses the database - PostgreSQL to RDS Proxy"
+      ui           = "UI tasks - web port from the ALB only"
+      tasks        = "One-off ECS tasks (platform check, DB bootstrap) - no inbound, HTTPS out"
+      data_clients = "Attach to anything that uses the database - PostgreSQL to RDS Proxy"
       rds_proxy    = "RDS Proxy - PostgreSQL from data clients only"
-      rds          = "RDS PostgreSQL - from RDS Proxy only"
-      redis        = "ElastiCache - from API and worker tasks only"
+      rds          = "Aurora PostgreSQL - from RDS Proxy only"
+      sagemaker    = "SageMaker jobs - traffic between job instances, HTTPS to VPC endpoints and S3 only"
+      lambda       = "VPC Lambda functions (results publisher) - no inbound, HTTPS to VPC endpoints and S3"
     },
-    var.create_mwaa_security_group ? {
-      mwaa         = "MWAA environment - self-referencing as required by MWAA"
-      data_trigger = "Data-trigger Lambda - no inbound, HTTPS out (MWAA API)"
-    } : {},
     var.enable_resolver_forwarding ? { resolver = "Route 53 Resolver outbound endpoint - DNS to WBD servers" } : {},
-    var.create_genai_security_group ? { genai = "GenAI gateway tasks - app port from API tasks only, HTTPS to VPC endpoints and S3 only" } : {},
+    var.create_genai_security_group ? { genai = "LLM gateway proxy Lambda - no inbound, HTTPS out to the approved LLM providers and VPC endpoints" } : {},
   )
 
-  # Every rule has all fields so the map has one object type; unused fields are null.
-  ingress_rules = {
-    endpoints_https_from_vpc  = { sg = "endpoints", description = "HTTPS from the VPC", protocol = "tcp", port = 443, cidr = var.vpc_cidr, prefix_list = null, source_sg = null, enabled = true }
-    alb_https_from_cloudfront = { sg = "alb", description = "HTTPS from CloudFront origin-facing prefix list", protocol = "tcp", port = 443, cidr = null, prefix_list = data.aws_ec2_managed_prefix_list.cloudfront.id, source_sg = null, enabled = true }
-    api_from_alb              = { sg = "api", description = "App port from the ALB", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "alb", enabled = true }
-    rds_proxy_from_clients    = { sg = "rds_proxy", description = "PostgreSQL from data clients", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "data_clients", enabled = true }
-    rds_from_proxy            = { sg = "rds", description = "PostgreSQL from RDS Proxy", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds_proxy", enabled = true }
-    redis_from_api            = { sg = "redis", description = "Redis TLS from API tasks", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "api", enabled = true }
-    redis_from_workers        = { sg = "redis", description = "Redis TLS from worker tasks", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "workers", enabled = true }
-    mwaa_from_self            = { sg = "mwaa", description = "All traffic between MWAA components", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "mwaa", enabled = var.create_mwaa_security_group }
-    genai_from_api            = { sg = "genai", description = "App port from API tasks (Service Connect)", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "api", enabled = var.create_genai_security_group }
+  # One rule per allowed CIDR and port; 80 only redirects to 443 at the ALB.
+  alb_ingress_rules = {
+    for p in setproduct(var.alb_ingress_cidrs, [443, 80]) :
+    "alb_${p[1]}_from_${replace(replace(p[0], ".", "_"), "/", "_")}" => {
+      sg = "alb", description = "${p[1] == 443 ? "HTTPS" : "HTTP (redirect)"} from ${p[0]}", protocol = "tcp", port = p[1],
+    cidr = p[0], prefix_list = null, source_sg = null, enabled = true }
   }
+
+  # Every rule has all fields so the map has one object type; unused fields are null.
+  static_ingress_rules = {
+    endpoints_https_from_vpc = { sg = "endpoints", description = "HTTPS from the VPC", protocol = "tcp", port = 443, cidr = var.vpc_cidr, prefix_list = null, source_sg = null, enabled = true }
+    api_from_alb             = { sg = "api", description = "App port from the ALB", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "alb", enabled = true }
+    ui_from_alb              = { sg = "ui", description = "Web port from the ALB", protocol = "tcp", port = var.ui_port, cidr = null, prefix_list = null, source_sg = "alb", enabled = true }
+    rds_proxy_from_clients   = { sg = "rds_proxy", description = "PostgreSQL from data clients", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "data_clients", enabled = true }
+    rds_from_proxy           = { sg = "rds", description = "PostgreSQL from RDS Proxy", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds_proxy", enabled = true }
+    sagemaker_from_self      = { sg = "sagemaker", description = "Between instances of one job (distributed training)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "sagemaker", enabled = true }
+  }
+
+  ingress_rules = merge(local.static_ingress_rules, local.alb_ingress_rules)
+
+  s3_prefix_list = aws_vpc_endpoint.gateway["s3"].prefix_list_id
 
   static_egress_rules = {
     alb_to_api                = { sg = "alb", description = "App port to API tasks", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "api", enabled = true }
-    api_https_out             = { sg = "api", description = "HTTPS to AWS endpoints, S3 and Okta", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
-    api_to_redis              = { sg = "api", description = "Redis TLS", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "redis", enabled = true }
-    workers_https_out         = { sg = "workers", description = "HTTPS to AWS endpoints, S3 and Databricks", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
-    workers_to_redis          = { sg = "workers", description = "Redis TLS", protocol = "tcp", port = 6379, cidr = null, prefix_list = null, source_sg = "redis", enabled = true }
+    alb_to_ui                 = { sg = "alb", description = "Web port to UI tasks", protocol = "tcp", port = var.ui_port, cidr = null, prefix_list = null, source_sg = "ui", enabled = true }
+    alb_https_out             = { sg = "alb", description = "HTTPS to Cognito (authenticate-cognito token exchange)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
+    api_https_out             = { sg = "api", description = "HTTPS to AWS endpoints, S3 and the ALB token-signing keys", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
+    ui_to_endpoints           = { sg = "ui", description = "HTTPS to interface endpoints (ECR, logs)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
+    ui_to_s3                  = { sg = "ui", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
+    tasks_https_out           = { sg = "tasks", description = "HTTPS to AWS endpoints, S3 and package indexes (bootstrap)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
     data_clients_to_proxy     = { sg = "data_clients", description = "PostgreSQL to RDS Proxy", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds_proxy", enabled = true }
     data_clients_to_endpoints = { sg = "data_clients", description = "HTTPS to interface endpoints (ECR, logs, secrets)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
-    data_clients_to_s3        = { sg = "data_clients", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = aws_vpc_endpoint.gateway["s3"].prefix_list_id, source_sg = null, enabled = true }
-    rds_proxy_to_rds          = { sg = "rds_proxy", description = "PostgreSQL to RDS", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds", enabled = true }
-    mwaa_to_self              = { sg = "mwaa", description = "All traffic between MWAA components", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "mwaa", enabled = var.create_mwaa_security_group }
-    mwaa_https_out            = { sg = "mwaa", description = "HTTPS to AWS endpoints, S3, PyPI and Databricks", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_mwaa_security_group }
-    data_trigger_https_out    = { sg = "data_trigger", description = "HTTPS to the MWAA API and AWS endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_mwaa_security_group }
-    api_to_genai              = { sg = "api", description = "App port to the GenAI gateway (Service Connect)", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "genai", enabled = var.create_genai_security_group }
-    genai_to_endpoints        = { sg = "genai", description = "HTTPS to interface endpoints (Bedrock runtime, ECR, logs, SSM, ECS)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = var.create_genai_security_group }
-    genai_to_s3               = { sg = "genai", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = aws_vpc_endpoint.gateway["s3"].prefix_list_id, source_sg = null, enabled = var.create_genai_security_group }
+    data_clients_to_s3        = { sg = "data_clients", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
+    rds_proxy_to_rds          = { sg = "rds_proxy", description = "PostgreSQL to Aurora", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds", enabled = true }
+    sagemaker_to_self         = { sg = "sagemaker", description = "Between instances of one job (distributed training)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "sagemaker", enabled = true }
+    sagemaker_to_endpoints    = { sg = "sagemaker", description = "HTTPS to interface endpoints (ECR, logs, STS, KMS, SageMaker API)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
+    sagemaker_to_s3           = { sg = "sagemaker", description = "HTTPS to S3 gateway endpoint (data, models, outputs)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
+    lambda_to_endpoints       = { sg = "lambda", description = "HTTPS to interface endpoints (logs, STS, KMS)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
+    lambda_to_s3              = { sg = "lambda", description = "HTTPS to S3 gateway endpoint (run evidence)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
+    genai_https_out           = { sg = "genai", description = "HTTPS to the approved LLM providers and VPC endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_genai_security_group }
   }
 
   resolver_egress_rules = {
@@ -65,7 +70,7 @@ locals {
 }
 
 resource "aws_security_group" "this" {
-  #checkov:skip=CKV2_AWS_5:Attached by the ALB, ECS, RDS, ElastiCache and MWAA modules in later steps.
+  #checkov:skip=CKV2_AWS_5:Attached by the ALB, ECS, Aurora, SageMaker and Lambda resources of the environment stack.
   for_each = local.security_groups
 
   name        = "${var.name_prefix}-${replace(each.key, "_", "-")}-sg"
@@ -76,6 +81,7 @@ resource "aws_security_group" "this" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "this" {
+  #checkov:skip=CKV_AWS_260:Port 80 on the public ALB only answers with a redirect to HTTPS; the WAF filters both.
   for_each = local.enabled_ingress_rules
 
   security_group_id            = aws_security_group.this[each.value.sg].id

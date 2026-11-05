@@ -15,26 +15,35 @@ locals {
   state_bucket   = "arn:${local.partition}:s3:::${var.state_bucket_name}"
   secrets_prefix = "arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:mmm/${var.env_short}/*"
 
-  env_subject = "${local.repo}:environment:${var.environment}"
+  env_subject  = "${local.repo}:environment:${var.environment}"
+  main_subject = "${local.repo}:ref:refs/heads/main"
+
+  model_package_groups = "arn:${local.partition}:sagemaker:${local.region}:${local.account_id}:model-package-group/${var.name_prefix}-*"
+  model_packages       = "arn:${local.partition}:sagemaker:${local.region}:${local.account_id}:model-package/${var.name_prefix}-*/*"
+  models_bucket        = "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-models-*"
 
   subjects = {
     plan = concat(
       [local.env_subject],
       var.plan_allow_pull_requests ? ["${local.repo}:pull_request"] : [],
-      var.plan_allow_main_branch ? ["${local.repo}:ref:refs/heads/main"] : [],
+      var.plan_allow_main_branch ? [local.main_subject] : [],
     )
-    apply    = [local.env_subject]
-    deploy   = [local.env_subject]
-    ecr_push = concat([local.env_subject], var.ecr_push_allow_main_branch ? ["${local.repo}:ref:refs/heads/main"] : [])
-    ecr_read = [for e in var.ecr_read_trusted_environments : "${local.repo}:environment:${e}"]
+    apply         = [local.env_subject]
+    deploy        = [local.env_subject]
+    ecr_push      = concat([local.env_subject], var.ecr_push_allow_main_branch ? [local.main_subject] : [])
+    ecr_read      = [for e in var.ecr_read_trusted_environments : "${local.repo}:environment:${e}"]
+    model_eval    = [local.main_subject]
+    model_approve = ["${local.repo}:environment:${var.environment}-model-promotion"]
   }
 
   roles = {
-    plan     = { name = "${var.name_prefix}-gha-plan", create = true }
-    apply    = { name = "${var.name_prefix}-gha-apply", create = true }
-    deploy   = { name = "${var.name_prefix}-gha-deploy", create = true }
-    ecr_push = { name = "${var.name_prefix}-gha-ecr-push", create = true }
-    ecr_read = { name = "${var.name_prefix}-gha-ecr-read", create = length(var.ecr_read_trusted_environments) > 0 }
+    plan          = { name = "${var.name_prefix}-gha-plan", create = true }
+    apply         = { name = "${var.name_prefix}-gha-apply", create = true }
+    deploy        = { name = "${var.name_prefix}-gha-deploy", create = true }
+    ecr_push      = { name = "${var.name_prefix}-gha-ecr-push", create = true }
+    ecr_read      = { name = "${var.name_prefix}-gha-ecr-read", create = length(var.ecr_read_trusted_environments) > 0 }
+    model_eval    = { name = "${var.name_prefix}-gha-model-eval", create = var.enable_model_governance }
+    model_approve = { name = "${var.name_prefix}-gha-model-approve", create = var.enable_model_governance }
   }
   created_roles = { for k, r in local.roles : k => r if r.create }
 }
@@ -135,7 +144,7 @@ resource "aws_iam_role_policy_attachment" "apply_admin" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AdministratorAccess"
 }
 
-# ------------------------------------------------------------------ gha-deploy: ECS deploy + frontend only
+# ------------------------------------------------------------------ gha-deploy: ECS, SageMaker image pointers, Lambda alias
 data "aws_iam_policy_document" "deploy" {
   #checkov:skip=CKV_AWS_356:RegisterTaskDefinition and the Describe/List calls do not support resource-level permissions.
   #checkov:skip=CKV_AWS_111:RegisterTaskDefinition does not support resource-level permissions.
@@ -207,16 +216,16 @@ data "aws_iam_policy_document" "deploy" {
 
   statement {
     sid     = "PreMigrationSnapshot"
-    actions = ["rds:CreateDBSnapshot", "rds:AddTagsToResource"]
+    actions = ["rds:CreateDBClusterSnapshot", "rds:AddTagsToResource"]
     resources = [
-      "arn:${local.partition}:rds:${local.region}:${local.account_id}:db:${var.name_prefix}-pg",
-      "arn:${local.partition}:rds:${local.region}:${local.account_id}:snapshot:${var.name_prefix}-*",
+      "arn:${local.partition}:rds:${local.region}:${local.account_id}:cluster:${var.name_prefix}-aurora",
+      "arn:${local.partition}:rds:${local.region}:${local.account_id}:cluster-snapshot:${var.name_prefix}-*",
     ]
   }
 
   statement {
     sid       = "DescribeDatabase"
-    actions   = ["rds:DescribeDBSnapshots", "rds:DescribeDBInstances"]
+    actions   = ["rds:DescribeDBClusterSnapshots", "rds:DescribeDBClusters"]
     resources = ["*"]
   }
 
@@ -226,77 +235,27 @@ data "aws_iam_policy_document" "deploy" {
     resources = [local.ecr_repo_arns]
   }
 
+  # SageMaker jobs have no long-running service: a release is the image URI in these parameters,
+  # which the state machines read at the start of every execution.
   statement {
-    sid     = "FrontendUpload"
-    actions = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
-    resources = [
-      "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-frontend-*",
-      "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-frontend-*/*",
-    ]
+    sid       = "SageMakerImagePointers"
+    actions   = ["ssm:GetParameter", "ssm:PutParameter", "ssm:GetParameterHistory"]
+    resources = ["arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter/mmm/${var.env_short}/images/*"]
   }
 
-  statement {
-    sid       = "FrontendKms"
-    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
-    resources = [var.s3_kms_key_arn]
-  }
-
-  statement {
-    sid       = "FrontendCloudFront"
-    actions   = ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation", "cloudfront:GetDistribution"]
-    resources = ["arn:${local.partition}:cloudfront::${local.account_id}:distribution/*"]
-  }
-
-  # The frontend release switch: key current_release in the edge key value store.
-  statement {
-    sid       = "FrontendReleasePointer"
-    actions   = ["cloudfront-keyvaluestore:DescribeKeyValueStore", "cloudfront-keyvaluestore:GetKey", "cloudfront-keyvaluestore:PutKey"]
-    resources = ["arn:${local.partition}:cloudfront::${local.account_id}:key-value-store/*"]
-  }
-
-  # Public Okta settings written into the frontend's config.json.
-  statement {
-    sid       = "FrontendConfig"
-    actions   = ["ssm:GetParameter", "ssm:GetParameters"]
-    resources = ["arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter/mmm/${var.env_short}/okta/*"]
-  }
-
-  # data.yml (Step 13): DAGs + requirements.txt to the MWAA bucket, quality suites, MWAA update.
+  # Lambda release: new code -> new version -> alias "live" moves (rollback = alias back).
   dynamic "statement" {
-    for_each = var.enable_data_deploy ? [1] : []
+    for_each = length(var.deploy_lambda_functions) > 0 ? [1] : []
     content {
-      sid     = "DataUpload"
-      actions = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
-      resources = [
-        "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-mwaa-*",
-        "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-mwaa-*/*",
-        "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-data-quality-*",
-        "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-data-quality-*/*",
+      sid = "LambdaRelease"
+      actions = [
+        "lambda:UpdateFunctionCode", "lambda:PublishVersion", "lambda:GetFunction", "lambda:GetFunctionConfiguration",
+        "lambda:GetAlias", "lambda:UpdateAlias", "lambda:ListVersionsByFunction",
       ]
-    }
-  }
-
-  dynamic "statement" {
-    for_each = var.enable_data_deploy ? [1] : []
-    content {
-      sid       = "MwaaRequirements"
-      actions   = ["airflow:GetEnvironment", "airflow:UpdateEnvironment"]
-      resources = ["arn:${local.partition}:airflow:${local.region}:${local.account_id}:environment/${var.name_prefix}-airflow"]
-    }
-  }
-
-  dynamic "statement" {
-    for_each = var.enable_data_deploy ? [1] : []
-    content {
-      sid       = "MwaaPassExecutionRole"
-      actions   = ["iam:PassRole"]
-      resources = ["arn:${local.partition}:iam::${local.account_id}:role/${var.name_prefix}-mwaa-exec"]
-
-      condition {
-        test     = "StringEquals"
-        variable = "iam:PassedToService"
-        values   = ["airflow.amazonaws.com"]
-      }
+      resources = flatten([for f in var.deploy_lambda_functions : [
+        "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${var.name_prefix}-${f}",
+        "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${var.name_prefix}-${f}:*",
+      ]])
     }
   }
 }
@@ -369,4 +328,72 @@ resource "aws_iam_role_policy" "ecr_read" {
   name   = "ecr-read"
   role   = aws_iam_role.this["ecr_read"].id
   policy = data.aws_iam_policy_document.ecr_read.json
+}
+
+# ------------------------------------------------------------------ gha-model-eval / gha-model-approve (SageMaker Model Registry)
+# eval (main branch, scheduled): reads candidates and their evaluation report, may only REJECT.
+# approve (environment <env>-model-promotion, WBD approver): may approve or reject.
+data "aws_iam_policy_document" "model_governance" {
+  for_each = var.enable_model_governance ? { model_eval = ["Rejected"], model_approve = ["Approved", "Rejected"] } : {}
+
+  #checkov:skip=CKV_AWS_356:ListModelPackageGroups does not support resource-level permissions.
+  statement {
+    sid       = "ListGroups"
+    actions   = ["sagemaker:ListModelPackageGroups"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "ReadRegistry"
+    actions   = ["sagemaker:ListModelPackages", "sagemaker:DescribeModelPackageGroup", "sagemaker:DescribeModelPackage", "sagemaker:ListTags"]
+    resources = [local.model_package_groups, local.model_packages]
+  }
+
+  statement {
+    sid       = "SetApprovalStatus"
+    actions   = ["sagemaker:UpdateModelPackage"]
+    resources = [local.model_packages]
+
+    condition {
+      test     = "StringEquals"
+      variable = "sagemaker:ModelApprovalStatus"
+      values   = each.value
+    }
+  }
+
+  statement {
+    sid       = "TagDecision"
+    actions   = ["sagemaker:AddTags"]
+    resources = [local.model_packages]
+  }
+
+  statement {
+    sid       = "ReadEvaluationReports"
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = [local.models_bucket, "${local.models_bucket}/evaluation/*"]
+  }
+
+  # approve only: an approval publishes the version's response curves to curves/<bu>/ (read by the API).
+  dynamic "statement" {
+    for_each = each.key == "model_approve" ? [1] : []
+    content {
+      sid       = "PublishApprovedCurves"
+      actions   = ["s3:PutObject", "s3:DeleteObject"]
+      resources = ["${local.models_bucket}/curves/*"]
+    }
+  }
+
+  statement {
+    sid       = "ModelsKms"
+    actions   = each.key == "model_approve" ? ["kms:Decrypt", "kms:GenerateDataKey"] : ["kms:Decrypt"]
+    resources = [var.s3_kms_key_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "model_governance" {
+  for_each = data.aws_iam_policy_document.model_governance
+
+  name   = "model-governance"
+  role   = aws_iam_role.this[each.key].id
+  policy = each.value.json
 }

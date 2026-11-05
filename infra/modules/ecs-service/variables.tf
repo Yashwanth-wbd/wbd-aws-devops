@@ -171,23 +171,19 @@ variable "exec_kms_key_arn" {
 variable "autoscaling" {
   description = <<-EOT
     null = no autoscaling.
-    { type = "cpu", min, max, cpu_target = 60 }
-    { type = "sqs", min, max, queue_name, scale_out_threshold = 1 }  - step scaling on queue backlog;
-      scale-in to min only when the queue is empty and nothing is in flight.
+    { type = "cpu", min, max, cpu_target = 60 }  - target tracking on average CPU.
   EOT
   type = object({
-    type                = string
-    min                 = number
-    max                 = number
-    cpu_target          = optional(number, 60)
-    queue_name          = optional(string)
-    scale_out_threshold = optional(number, 1)
+    type       = string
+    min        = number
+    max        = number
+    cpu_target = optional(number, 60)
   })
   default = null
 
   validation {
-    condition     = var.autoscaling == null || try(contains(["cpu", "sqs"], var.autoscaling.type) && var.autoscaling.min <= var.autoscaling.max, false)
-    error_message = "autoscaling.type must be cpu or sqs, and min <= max."
+    condition     = var.autoscaling == null || try(var.autoscaling.type == "cpu" && var.autoscaling.min <= var.autoscaling.max, false)
+    error_message = "autoscaling.type must be cpu, and min <= max."
   }
 }
 

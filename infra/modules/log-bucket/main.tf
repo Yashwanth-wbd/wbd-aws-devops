@@ -10,9 +10,8 @@ locals {
 
   # Prefixes used by the log producers
   prefixes = {
-    alb        = "alb"
-    cloudfront = "cloudfront"
-    s3_access  = "s3-access"
+    alb       = "alb"
+    s3_access = "s3-access"
   }
 }
 
@@ -27,13 +26,11 @@ resource "aws_s3_bucket" "this" {
   tags = merge(local.tags, { Name = var.bucket_name })
 }
 
-# CloudFront standard logging writes with ACLs, so ACLs must stay enabled (BucketOwnerPreferred).
 resource "aws_s3_bucket_ownership_controls" "this" {
-  #checkov:skip=CKV2_AWS_65:CloudFront standard logging requires ACLs on the target bucket.
   bucket = aws_s3_bucket.this.id
 
   rule {
-    object_ownership = "BucketOwnerPreferred"
+    object_ownership = "BucketOwnerEnforced"
   }
 }
 

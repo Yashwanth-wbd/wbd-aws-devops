@@ -1,21 +1,26 @@
-# Deploys application images to ECS (and, for releases, the frontend).
+# Deploys the application components.
 #
-#   api-ci / optimizer-ci / genai-ci on main -> dev      image sha-<7char> (only the component that was built)
-#   git tag vX.Y.Z-rcN                       -> staging  image copied from dev ECR,     tagged vX.Y.Z-rcN
-#   git tag vX.Y.Z                           -> prod     image copied from staging ECR, tagged vX.Y.Z (needs the rc on the same commit)
-#   manual dispatch                          -> redeploy an image already in that environment's ECR (rollback)
+#   api-ci / ui-ci / optimizer-ci / training-ci / publisher-ci on main -> dev   (only the component that was built)
+#   git tag vX.Y.Z-rcN -> staging  images copied from dev ECR,     tagged vX.Y.Z-rcN
+#   git tag vX.Y.Z     -> prod     images copied from staging ECR, tagged vX.Y.Z (needs the rc on the same commit)
+#   manual dispatch    -> redeploy an image already in that environment's ECR (rollback)
 #
-# genai-gateway (Release 2) is part of a deploy only where the Environment variable GENAI_ENABLED is
-# "true" (set from Terraform enable_genai); turn it on in staging before prod so the rc image exists.
+# Component        what a release changes                                    rollback
+#   api, ui        new ECS task definition revision (api: migration first)    previous revision
+#   optimizer      SSM /mmm/<env>/images/sagemaker-optimizer = image digest   previous value
+#   training       SSM /mmm/<env>/images/sagemaker-training (data platform)   previous value
+#   publisher      Lambda code -> new version -> alias "live"                  alias to previous version
+# The state machines read the image parameters at the start of every execution, so running jobs
+# are never changed. A component whose app folder is not in the commit is skipped.
 #
-# One job per run does everything after the approval gate: promote image -> (prod) RDS snapshot ->
-# migration task -> new task definitions -> wait for stable -> smoke test -> frontend -> release record.
-# Any failure rolls the services (and frontend) back to the revisions that were running before.
+# One job per run does everything after the approval gate: promote images -> (prod) Aurora snapshot ->
+# migration -> ECS -> smoke test -> SageMaker image pointers -> publisher -> release record.
+# Any failure rolls every changed component back.
 name: deploy
 
 on:
   workflow_run:
-    workflows: [api-ci, optimizer-ci, genai-ci]
+    workflows: [api-ci, ui-ci, optimizer-ci, training-ci, publisher-ci]
     types: [completed]
     branches: [main]
   push:
@@ -34,7 +39,7 @@ on:
       components:
         description: What to deploy
         type: choice
-        options: [all, api, workers, genai]
+        options: [all, api, ui, optimizer, training, publisher]
         default: all
       run_migrations:
         description: Run DB migrations first (switch off when rolling back to an older version)
@@ -57,7 +62,6 @@ jobs:
       commit: ${{ steps.r.outputs.commit }}
       components: ${{ steps.r.outputs.components }}
       promote: ${{ steps.r.outputs.promote }}
-      frontend: ${{ steps.r.outputs.frontend }}
       migrations: ${{ steps.r.outputs.migrations }}
     steps:
       - id: r
@@ -74,17 +78,14 @@ jobs:
         run: |
           rc='^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
           rel='^v[0-9]+\.[0-9]+\.[0-9]+$'
-          promote=false frontend=false
+          promote=false migrations=false
           case "$EVENT" in
             workflow_run)
               environment=dev commit="$RUN_SHA" version="sha-${RUN_SHA::7}"
-              case "$RUN_NAME" in
-                api-ci)   components=api     migrations=true ;;
-                genai-ci) components=genai   migrations=false ;;
-                *)        components=workers migrations=false ;;
-              esac ;;
+              components="${RUN_NAME%-ci}"
+              [ "$components" = api ] && migrations=true ;;
             push)
-              commit="$GITHUB_SHA" version="$REF_NAME" components=all migrations=true promote=true frontend=true
+              commit="$GITHUB_SHA" version="$REF_NAME" components=all migrations=true promote=true
               if   [[ "$REF_NAME" =~ $rc  ]]; then environment=staging
               elif [[ "$REF_NAME" =~ $rel ]]; then environment=prod
               else echo "::error::$REF_NAME is not vX.Y.Z-rcN or vX.Y.Z"; exit 1; fi ;;
@@ -98,22 +99,14 @@ jobs:
                 echo "::error::prod only deploys release tags: run this workflow on a vX.Y.Z tag"; exit 1
               fi ;;
           esac
-          [ "$components" = all ] && components="api workers genai"
+          [ "$components" = all ] && components="api ui optimizer training publisher"
           {
             echo "environment=$environment"; echo "version=$version"; echo "commit=$commit"
-            echo "components=$components"; echo "promote=$promote"; echo "frontend=$frontend"; echo "migrations=$migrations"
+            echo "components=$components"; echo "promote=$promote"; echo "migrations=$migrations"
           } | tee -a "$GITHUB_OUTPUT"
 
-  frontend:
-    needs: resolve
-    if: needs.resolve.outputs.frontend == 'true'
-    uses: ./.github/workflows/frontend-ci.yml
-    with:
-      ref: ${{ needs.resolve.outputs.commit }}
-
   deploy:
-    needs: [resolve, frontend]
-    if: always() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.frontend.result)
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment:
@@ -136,6 +129,8 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare
+        env:
+          REFRESH_SM: ${{ vars.MODEL_REFRESH_STATE_MACHINE_ARN }}
         run: |
           echo "STATE=$RUNNER_TEMP/deploy-state" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/deploy-state"
@@ -143,19 +138,15 @@ jobs:
           echo "PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "SSM_PREFIX=/mmm/${prefix#mmm-}" >> "$GITHUB_ENV"
           [ -d "ecs/$ENVIRONMENT" ] || { echo "::error::ecs/$ENVIRONMENT templates missing"; exit 1; }
-
-      - name: GenAI switch (Release 2)
-        env:
-          GENAI_ENABLED: ${{ vars.GENAI_ENABLED }}
-        run: |
           components=""
           for c in $COMPONENTS; do
-            if [ "$c" = genai ] && [ "$GENAI_ENABLED" != true ]; then
-              echo "::notice::genai-gateway skipped: GENAI_ENABLED is not true in $ENVIRONMENT"; continue
-            fi
+            read -r _ _ dir _ < <(scripts/deploy-components.sh "$c")
+            if [ ! -d "$dir" ]; then echo "::notice::$c skipped: $dir is not in this commit"; continue; fi
+            if [ "$c" = training ] && [ -z "$REFRESH_SM" ]; then echo "::notice::training skipped: data platform is off in $ENVIRONMENT"; continue; fi
             components="${components:+$components }$c"
           done
           echo "COMPONENTS=$components" >> "$GITHUB_ENV"
+          echo "IMAGE_COMPONENTS=$(for c in $components; do [ "$(scripts/deploy-components.sh "$c" | cut -f1)" != lambda ] && printf '%s ' "$c"; done)" >> "$GITHUB_ENV"
           echo "Deploying: ${components:-nothing}"
 
       - name: Change ticket on the release tag (prod)
@@ -171,6 +162,10 @@ jobs:
           echo "CHANGE_TICKET=$ticket" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------------- promotion (release tags)
+      - name: Install skopeo
+        if: needs.resolve.outputs.promote == 'true'
+        run: command -v skopeo > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
       - name: Source registry login (previous environment)
         if: needs.resolve.outputs.promote == 'true'
         uses: aws-actions/configure-aws-credentials@v5
@@ -190,12 +185,8 @@ jobs:
             rc=$(scripts/promote-images.sh find-rc "$VERSION" "$COMMIT")
           fi
           : > "$STATE/sources.tsv"
-          for c in $COMPONENTS; do
-            case "$c" in
-              api)     repo=mmm/api;              dir=apps/api ;;
-              workers) repo=mmm/optimizer-worker; dir=apps/optimizer-worker ;;
-              genai)   repo=mmm/genai-gateway;    dir=apps/genai-gateway ;;
-            esac
+          for c in $IMAGE_COMPONENTS; do
+            read -r _ repo dir _ < <(scripts/deploy-components.sh "$c")
             if [ "$ENVIRONMENT" = prod ]; then src="$rc"; else src=$(scripts/promote-images.sh find-build "$repo" "$dir" "$COMMIT"); fi
             printf '%s\t%s\n' "$repo" "$src" >> "$STATE/sources.tsv"
           done
@@ -226,34 +217,38 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: deploy-${{ github.run_id }}
 
-      - name: Check images and remember running revisions
+      - name: Check images and remember what is running
+        env:
+          PUBLISHER: ${{ vars.PUBLISHER_FUNCTION }}
         run: |
-          : > "$STATE/services.tsv"
+          : > "$STATE/services.tsv"; : > "$STATE/pointers.tsv"; : > "$STATE/digests.tsv"
           for c in $COMPONENTS; do
-            case "$c" in
-              api)     repo=mmm/api;              services="api" ;;
-              workers) repo=mmm/optimizer-worker; services="whatif-worker optimizer-worker" ;;
-              genai)   repo=mmm/genai-gateway;    services="genai-gateway" ;;
-            esac
+            read -r kind repo _ target < <(scripts/deploy-components.sh "$c")
+            if [ "$kind" = lambda ]; then
+              printf '%s\t%s\n' "$PUBLISHER" "$(scripts/lambda-release.sh current "$PUBLISHER")" > "$STATE/lambda.tsv"
+              continue
+            fi
             digest=$(scripts/ecs-deploy.sh digest "$repo" "$VERSION") || { echo "::error::$repo:$VERSION not in $REGISTRY"; exit 1; }
             printf '%s\t%s\n' "$repo" "$digest" >> "$STATE/digests.tsv"
-            for s in $services; do
-              printf '%s\t%s\t%s\n' "$s" "$repo" "$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$s")" >> "$STATE/services.tsv"
-            done
+            case "$kind" in
+              ecs)       printf '%s\t%s\t%s\n' "$target" "$repo" "$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$target")" >> "$STATE/services.tsv" ;;
+              sagemaker) printf '%s\t%s\t%s\n' "$SSM_PREFIX/images/$target" "$REGISTRY/$repo@$digest" \
+                           "$(aws ssm get-parameter --name "$SSM_PREFIX/images/$target" --query Parameter.Value --output text)" >> "$STATE/pointers.tsv" ;;
+            esac
           done
-          column -t "$STATE/services.tsv"
+          column -t "$STATE/services.tsv" "$STATE/pointers.tsv" || true
 
-      - name: RDS snapshot before migration (prod)
-        if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(needs.resolve.outputs.components, 'api')
+      - name: Aurora snapshot before migration (prod)
+        if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(env.COMPONENTS, 'api')
         run: |
           id="$PREFIX-predeploy-${VERSION//./-}-${GITHUB_RUN_ID}"
-          aws rds create-db-snapshot --db-instance-identifier "$PREFIX-pg" --db-snapshot-identifier "$id" \
+          aws rds create-db-cluster-snapshot --db-cluster-identifier "$PREFIX-aurora" --db-cluster-snapshot-identifier "$id" \
             --tags "Key=release,Value=$VERSION" "Key=github_run,Value=$GITHUB_RUN_ID" > /dev/null
-          aws rds wait db-snapshot-available --db-snapshot-identifier "$id"
+          aws rds wait db-cluster-snapshot-available --db-cluster-snapshot-identifier "$id"
           echo "SNAPSHOT=$id" >> "$GITHUB_ENV"
 
       - name: Database migration
-        if: needs.resolve.outputs.migrations == 'true' && contains(needs.resolve.outputs.components, 'api')
+        if: needs.resolve.outputs.migrations == 'true' && contains(env.COMPONENTS, 'api')
         env:
           SUBNETS: ${{ vars.APP_SUBNET_IDS }}
           SG: ${{ vars.DATA_CLIENTS_SG_ID }}
@@ -261,7 +256,7 @@ jobs:
           td=$(scripts/ecs-deploy.sh render "ecs/$ENVIRONMENT/migrate.json" "$REGISTRY/mmm/api:$VERSION" "$VERSION")
           scripts/run-migration.sh "$CLUSTER" "$td" "$SUBNETS" "$SG"
 
-      - name: Deploy services
+      - name: Deploy ECS services
         id: services
         run: |
           echo "started=true" >> "$GITHUB_OUTPUT"
@@ -272,49 +267,50 @@ jobs:
           done 3< "$STATE/services.tsv"
 
       - name: Smoke test
-        if: contains(needs.resolve.outputs.components, 'api')
+        if: contains(env.COMPONENTS, 'api') || contains(env.COMPONENTS, 'ui')
         env:
           BASE_URL: ${{ vars.SMOKE_BASE_URL || vars.APP_URL }}
-          EXPECT: ${{ vars.SMOKE_CHECK_VERSION == 'true' && needs.resolve.outputs.version || '' }}
+          EXPECT: ${{ vars.SMOKE_CHECK_VERSION == 'true' && contains(needs.resolve.outputs.components, 'api') && needs.resolve.outputs.version || '' }}
+          SMOKE_CHECK_LOGIN: ${{ vars.SMOKE_CHECK_LOGIN || 'true' }}
         run: scripts/smoke.sh "$BASE_URL" "$EXPECT"
 
-      # ---------------------------------------------------------------- frontend (release tags)
-      - if: needs.resolve.outputs.frontend == 'true' && needs.frontend.outputs.built == 'true'
-        uses: actions/download-artifact@v5
-        with:
-          name: frontend-dist
-          path: ${{ runner.temp }}/dist
-
-      - name: Publish frontend
-        id: frontend
-        if: needs.resolve.outputs.frontend == 'true' && needs.frontend.outputs.built == 'true'
-        env:
-          BUCKET: ${{ vars.FRONTEND_BUCKET }}
-          KVS: ${{ vars.FRONTEND_KVS_ARN }}
-          BASE_URL: ${{ vars.SMOKE_BASE_URL || vars.APP_URL }}
+      - name: SageMaker image pointers
         run: |
-          previous=$(scripts/deploy-frontend.sh "${RUNNER_TEMP}/dist" "$BUCKET" "$VERSION" "$KVS" "$SSM_PREFIX")
-          echo "previous=$previous" >> "$GITHUB_OUTPUT"
-          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$BASE_URL/" || echo 000)
-          [ "$code" = "200" ] || { echo "::error::frontend $BASE_URL/ returned $code"; exit 1; }
+          while IFS=$'\t' read -r param image _ <&3; do
+            aws ssm put-parameter --name "$param" --type String --overwrite --value "$image" > /dev/null
+            echo "$param -> $image"
+          done 3< "$STATE/pointers.tsv"
+
+      - name: Results publisher
+        if: contains(env.COMPONENTS, 'publisher')
+        env:
+          PUBLISHER: ${{ vars.PUBLISHER_FUNCTION }}
+        run: |
+          read -r _ _ dir _ < <(scripts/deploy-components.sh publisher)
+          sha=$(scripts/lambda-release.sh build "$dir" "$RUNNER_TEMP/publisher.zip")
+          echo "PUBLISHER_SHA256=$sha" >> "$GITHUB_ENV"
+          new=$(scripts/lambda-release.sh publish "$PUBLISHER" "$RUNNER_TEMP/publisher.zip" "$VERSION")
+          printf '\t%s\n' "$new" >> "$STATE/lambda.tsv"
 
       # ---------------------------------------------------------------- rollback
       - name: Roll back
         if: failure() && steps.services.outputs.started == 'true'
-        env:
-          KVS: ${{ vars.FRONTEND_KVS_ARN }}
-          PREVIOUS_FRONTEND: ${{ steps.frontend.outputs.previous }}
         run: |
-          if [ -n "$PREVIOUS_FRONTEND" ] && [ "$PREVIOUS_FRONTEND" != none ]; then
-            scripts/deploy-frontend.sh switch "$KVS" "$PREVIOUS_FRONTEND" || true
-          fi
-          [ -f "$STATE/deployed.tsv" ] || exit 0
           rc=0
-          while IFS=$'\t' read -r s previous _ <&3; do
-            now=$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$s")
-            [ "$now" = "$previous" ] && { echo "$s already on $previous"; continue; }
-            scripts/ecs-deploy.sh update "$CLUSTER" "$PREFIX-$s" "$previous" || rc=1
-          done 3< "$STATE/deployed.tsv"
+          if [ -f "$STATE/deployed.tsv" ]; then
+            while IFS=$'\t' read -r s previous _ <&3; do
+              now=$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$s")
+              [ "$now" = "$previous" ] && { echo "$s already on $previous"; continue; }
+              scripts/ecs-deploy.sh update "$CLUSTER" "$PREFIX-$s" "$previous" || rc=1
+            done 3< "$STATE/deployed.tsv"
+          fi
+          while IFS=$'\t' read -r param _ previous <&3; do
+            aws ssm put-parameter --name "$param" --type String --overwrite --value "$previous" > /dev/null && echo "$param -> $previous" || rc=1
+          done 3< "$STATE/pointers.tsv"
+          if [ -f "$STATE/lambda.tsv" ]; then
+            read -r fn previous < <(head -n 1 "$STATE/lambda.tsv" | tr -d '\n')
+            scripts/lambda-release.sh switch "$fn" "$previous" || rc=1
+          fi
           echo "::warning::Rolled back to the previous revisions. Migrations are not reverted (expand-then-contract)."
           exit $rc
 
@@ -331,12 +327,17 @@ jobs:
           jq -n --arg env "$ENVIRONMENT" --arg version "$VERSION" --arg commit "$COMMIT" --arg outcome "$OUTCOME" \
             --arg actor "$GITHUB_TRIGGERING_ACTOR" --arg approvers "${approvers:-none}" \
             --arg ticket "${CHANGE_TICKET:-}" --arg snapshot "${SNAPSHOT:-}" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg publisher_sha "${PUBLISHER_SHA256:-}" \
             --rawfile digests <(cat "$STATE/digests.tsv" 2>/dev/null || true) \
-            --rawfile deployed <(cat "$STATE/deployed.tsv" 2>/dev/null || true) '
+            --rawfile deployed <(cat "$STATE/deployed.tsv" 2>/dev/null || true) \
+            --rawfile pointers <(cat "$STATE/pointers.tsv" 2>/dev/null || true) \
+            --rawfile lambda <(tr -d '\n' < "$STATE/lambda.tsv" 2>/dev/null || true) '
             { environment: $env, version: $version, commit: $commit, outcome: $outcome,
-              triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, rds_snapshot: $snapshot, run: $run,
+              triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, aurora_snapshot: $snapshot, run: $run,
               images:   [$digests  | split("\n")[] | select(length > 0) | split("\t") | { repository: .[0], digest: .[1] }],
-              services: [$deployed | split("\n")[] | select(length > 0) | split("\t") | { service: .[0], previous: .[1], deployed: .[2] }] }
+              services: [$deployed | split("\n")[] | select(length > 0) | split("\t") | { service: .[0], previous: .[1], deployed: .[2] }],
+              sagemaker_images: [$pointers | split("\n")[] | select(length > 0) | split("\t") | { parameter: .[0], deployed: .[1], previous: .[2] }],
+              publisher: (if ($lambda | length) > 0 then ($lambda | split("\t") | { function: .[0], previous: .[1], deployed: (.[2] // null), code_sha256: $publisher_sha }) else null end) }
           ' | tee "$STATE/release-record.json"
           {
             echo "### Deploy \`$VERSION\` to $ENVIRONMENT: $OUTCOME"

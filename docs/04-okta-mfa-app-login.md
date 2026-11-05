@@ -1,66 +1,68 @@
-# 04 – Planner login: Okta, MFA and step-up MFA
+# 04 – Planner login: Okta SAML, Cognito, ALB and MFA
 
-Planners log in to the web app with their WBD Okta account. The app keeps **no local
-accounts**. Okta proves who the user is and which business unit and role they have; the API
-checks every request; PostgreSQL row-level security stops one business unit from reading
-another's data.
+Planners open the app in a browser at `https://<app_domain_name>`. There are **no local
+accounts**. WBD Okta (with MFA) is the identity source; **Amazon Cognito** federates to Okta
+over SAML; the **Application Load Balancer** signs users in with `authenticate-cognito` and
+passes identity to the **API** on `/api/*`. PostgreSQL row-level security still isolates
+business units ([06-authorization-model.md](06-authorization-model.md)).
 
-## 1. Flow (Authorization Code + PKCE)
+## 1. Flow
 
 ```mermaid
 sequenceDiagram
-  participant B as Browser (React SPA)
-  participant O as Okta authorization server
-  participant CF as CloudFront + WAF
+  participant B as Browser
+  participant W as Regional WAF + ALB
+  participant C as Cognito hosted UI
+  participant O as WBD Okta (SAML IdP)
+  participant UI as mmm-ui (ECS)
   participant API as mmm-api (ECS)
-  participant DB as PostgreSQL (RLS)
-  B->>O: /authorize (client_id, PKCE challenge, scope openid profile mmm.api)
-  O->>B: login page: password + MFA
-  O-->>B: authorization code
-  B->>O: /token (code + PKCE verifier)
-  O-->>B: ID token + access token (JWT with bu + role claims)
-  B->>CF: GET /api/scenarios  Authorization: Bearer <access token>
-  CF->>API: forwarded (+ X-Origin-Verify header)
-  API->>O: fetch JWKS (cached) and verify signature, iss, aud, exp
-  API->>API: authorize: role allows action? BU allowed?
-  API->>DB: SET LOCAL app.current_bu = 'streaming'; SELECT ...
-  DB-->>API: only rows for that BU
+  participant DB as Aurora (RLS)
+  B->>W: GET / (no session cookie)
+  W->>C: authenticate-cognito redirect
+  C->>O: SAML authn request
+  O->>B: password + MFA
+  O-->>C: SAML assertion (groups attribute)
+  C-->>B: Set-Cookie mmm-session; redirect to app
+  B->>W: GET / (with mmm-session)
+  W->>UI: forward (authenticated)
+  B->>W: GET /api/scenarios (with mmm-session)
+  W->>API: forward + x-amzn-oidc-data JWT
+  API->>API: verify JWT signer = ALB_ARN; map groups → BU + role
+  API->>DB: SET LOCAL app.current_bu; SELECT ...
 ```
 
-**PKCE** (Proof Key for Code Exchange) lets a browser app use the secure code flow without a
-client secret. The SPA has **no client secret**, so nothing about Okta login needs to be
-stored as a secret.
+| Path | ALB behaviour |
+|---|---|
+| `/*` (default) | `authenticate-cognito` with redirect to sign-in if unauthenticated → **ui** target group |
+| `/api/health` | No sign-in (priority 10) → **api** (smoke test, health checks) |
+| `/api/*` | `authenticate-cognito` with **deny** if unauthenticated (401, no redirect) → **api** |
 
-## 2. What WBD's Okta team creates (one app per environment)
+Session cookie name: **`mmm-session`**. Lifetime: `session_hours` from tfvars (default 12 h),
+converted to seconds on the listener.
 
-| Setting | dev | staging | prod |
-|---|---|---|---|
-| App type | OIDC – Single-Page Application | same | same |
-| Grant type | Authorization Code + PKCE (+ refresh token, rotating) | same | same |
-| Sign-in redirect URI | `https://<dev-domain>/login/callback` | `https://<stg-domain>/login/callback` | `https://<prod-domain>/login/callback` |
-| Sign-out redirect URI | `https://<dev-domain>/` | `https://<stg-domain>/` | `https://<prod-domain>/` |
-| Trusted origin (CORS) | `https://<dev-domain>` | `https://<stg-domain>` | `https://<prod-domain>` |
-| Authorization server | custom, e.g. `mmm` | same | same |
-| Audience | `api://mmm-dev` | `api://mmm-stg` | `api://mmm-prd` |
-| Access token lifetime | 60 min | 60 min | 60 min |
-| Authentication policy | password + MFA always | same | same |
+## 2. What WBD enters in Okta (one SAML app per environment)
 
-The audience must differ per environment. If all three apps share one authorization server and
-one audience, a dev token is also valid in prod.
-
-The exact values for an environment come from Terraform after Step 8:
+After Terraform apply for that environment, run:
 
 ```powershell
-terraform output okta_app_settings     # redirect URIs and trusted origin, built from cloudfront_aliases
+terraform output okta_app_settings
+terraform output front_door
 ```
 
-The domains are WBD DNS names (`cloudfront_aliases`). Route 53 stays out of scope for now: WBD
-DNS creates the CNAMEs listed in `terraform output dns_records_for_wbd`.
+Use `okta_app_settings` when configuring the Okta **SAML 2.0** application:
 
-### Groups and claims
+| Okta field | Value (from Terraform) |
+|---|---|
+| Single sign-on URL (ACS) | `single_sign_on_url` → `https://<cognito-domain>.auth.<region>.amazoncognito.com/saml2/idpresponse` |
+| Audience URI (SP Entity ID) | `audience_uri` → `urn:amazon:cognito:sp:<user-pool-id>` |
+| Name ID format | `Persistent` (`name_id_format`) |
+| Attribute statements | Release `email` and `name` (names in `attributes`) |
+| Group attribute | SAML attribute **`groups`** (must match `group_attribute` in output; default name `groups`) |
 
-Okta groups carry the business unit and the app role. The authorization server adds two
-custom claims to the access token.
+Assign users through Okta groups. On each sign-in, Cognito maps the SAML **`groups`**
+attribute to **`custom:groups`** on the user profile (`infra/modules/cognito/main.tf`).
+
+Recommended group naming (WBD to confirm):
 
 ```text
 # add actual value
@@ -69,77 +71,87 @@ mmm-bu-usnetworks   mmm-bu-streaming   mmm-bu-theatrical   mmm-bu-all
 mmm-role-viewer     mmm-role-planner   mmm-role-approver   mmm-role-analyst   mmm-role-admin
 ```
 
-| Claim | Okta expression (example) | Example value |
-|---|---|---|
-| `bu` | groups starting with `mmm-bu-`, prefix removed | `["streaming"]` |
-| `mmm_roles` | groups starting with `mmm-role-`, prefix removed | `["planner"]` |
-| `amr` | standard | `["pwd","mfa"]` |
-| `auth_time` | standard | `1793712000` |
+The API (application team) maps `custom:groups` to business unit and role claims—same
+semantics as in [06-authorization-model.md](06-authorization-model.md). **Giving a planner
+access:** add them to one `mmm-bu-*` and one `mmm-role-*` group in Okta. Nothing changes in
+AWS or in this repository.
 
-**Giving a planner access:** WBD adds the user to one `mmm-bu-*` group and one
-`mmm-role-*` group in Okta. Nothing changes in AWS or in this repository.
+Also provide the **SAML metadata URL** for that app to EY so it can be set in tfvars:
 
-## 3. MFA and step-up MFA
+```hcl
+okta_saml_metadata_url = "https://wbd.okta.com/app/exk…/sso/saml/metadata"  # add actual value
+```
 
-- **Normal login:** the Okta authentication policy for the app always requires MFA.
-- **Step-up for sensitive actions** (approve a scenario, override a recommendation, change
-  constraints in a shared scenario): the API checks that the token is recent.
-  1. The API requires `auth_time` within the last 15 minutes and `mfa` in `amr`.
-  2. If not, it returns `401` with
-     `WWW-Authenticate: Bearer error="insufficient_user_authentication", max_age=900`.
-  3. The SPA re-authenticates with `max_age=900` (and `acr_values` if WBD's Okta tier
-     supports it), and Okta prompts for MFA again.
-  4. The API retries with the new token, and the action is written to the audit log with
-     the user, time and MFA evidence.
+## 3. MFA
 
-WBD's Okta team must confirm which `acr_values` their Okta tier supports.
+MFA is **enforced in Okta** (authentication policy on the SAML app / federation policy).
+Cognito MFA is off (`mfa_configuration = OFF`); users never get a Cognito-local password.
 
-## 4. Where the Okta settings are stored
+For sensitive actions (approve a scenario, override a recommendation), the API may require
+evidence of a recent authentication. That logic reads claims inside **`x-amzn-oidc-data`**
+(not a browser-held Okta access token). The backend team defines the exact rules; Okta must
+still require MFA at login.
 
-None of these values are secrets. They live in **SSM Parameter Store** (Step 5) and are
-read by the API at startup and by the frontend at build time:
+## 4. Sign-out
+
+Terraform output `front_door.logout_url` (same as `module.cognito.logout_url`) is the URL the
+UI should redirect to after clearing the ALB session cookie. It targets the Cognito hosted
+domain logout endpoint with `client_id` and `logout_uri=https://<app_domain_name>/`.
+
+## 5. How the API reads the signed-in user
+
+For every authenticated request to `/api/*`, the ALB adds:
+
+| Header | Purpose |
+|---|---|
+| `x-amzn-oidc-data` | JWT with user claims (including `custom:groups`) |
+| `x-amzn-oidc-identity` | Opaque subject identifier |
+
+The API task receives **`ALB_ARN`** in its environment (the load balancer ARN). It must:
+
+1. Fetch the ALB public key for the region (documented by AWS for `x-amzn-oidc-data`).
+2. Verify the JWT signature and expiry.
+3. Confirm the JWT **`signer`** claim equals **`ALB_ARN`** (prevents token replay from another ALB).
+4. Map `custom:groups` to BU and role; enforce authorization and RLS.
+
+Unauthenticated calls to `/api/*` never reach the task: the ALB returns **401**.
+
+## 6. Non-secret settings (SSM)
+
+Cognito identifiers are **not secrets**. Terraform writes them to Parameter Store (Step 5):
 
 | Parameter | Example | Read by |
 |---|---|---|
-| `/mmm/<env>/okta/issuer` | `https://wbd.okta.com/oauth2/aus0000000000000000` | API (token validation), frontend build |
-| `/mmm/<env>/okta/client_id` | `0oa00000000000000000` | Frontend build |
-| `/mmm/<env>/okta/audience` | `api://mmm-dev` | API |
+| `/mmm/<env>/cognito/user_pool_id` | `us-east-1_abc123` | API (optional diagnostics) |
+| `/mmm/<env>/cognito/client_id` | ALB app client ID | API |
+| `/mmm/<env>/cognito/domain` | `wbd-mmm-dev` | API / UI (logout URL construction) |
 
-If the backend ever calls the Okta management API (for example to list group members), that
-API token is a real secret and goes in **Secrets Manager** as `mmm/<env>/okta/api-token`.
+There are **no** `/mmm/<env>/okta/*` parameters in v2.
 
-## 5. What the API must check on every request (for the backend team)
-
-1. Signature against Okta JWKS (`<issuer>/v1/keys`, cached, refreshed on unknown `kid`).
-2. `iss` = issuer parameter, `aud` = audience parameter, `exp` / `nbf` valid,
-   algorithm `RS256` only.
-3. Role allows the action (see [06-authorization-model.md](06-authorization-model.md)).
-4. Requested business unit is in the `bu` claim (or `all`).
-5. Open the database transaction with `SET LOCAL app.current_bu` so row-level security
-   applies.
-6. Step-up check for sensitive actions.
-
-## 6. Infrastructure pieces that protect login (Step 8)
+## 7. Infrastructure controls (Step 8)
 
 | Control | Where |
 |---|---|
-| Only CloudFront can reach the ALB | ALB security group allows only the CloudFront origin-facing prefix list, and the listener requires the `X-Origin-Verify` header |
-| Rate limiting, OWASP rules, bad inputs, SQL injection, IP reputation | WAF on CloudFront (`mmm-<env>-cdn`) |
-| HTTPS only, TLS 1.2+ | CloudFront viewer policy and ALB listener policy |
-| Security headers (HSTS, CSP allowing the Okta domain, X-Frame-Options) | CloudFront response headers policy |
-| Tokens never logged | WAF logs redact the `Authorization` and `Cookie` headers; CloudFront logs exclude cookies |
+| TLS 1.2+ on the public listener | ALB HTTPS listener policy |
+| Ingress restriction | ALB security group: 443/80 from `alb_ingress_cidrs` |
+| WAF (IP reputation, OWASP, rate limit, optional geo allow list) | Regional WAF on the ALB (`waf-regional` module) |
+| HTTP → HTTPS | ALB port 80 redirect |
+| Access logs | ALB → S3 log bucket prefix `alb/` |
 
-The default Content-Security-Policy allows the Okta origin (taken from `okta_issuer`) in
-`connect-src`, `frame-src` (silent token renewal) and `form-action`. If the SPA uses another
-Okta host, for example a custom Okta domain, set `content_security_policy` in the edge module.
+## 8. Testing
 
-## 7. Validation (Step 8)
+**Infrastructure (DevOps), after Step 8 apply:**
 
-Infrastructure (DevOps): see "Validate Step 8" in `infra/environments/dev/README.md`.
+1. `terraform output dns_records_for_wbd` — if `route53_zone_id` is null, ask WBD DNS to create the CNAME to `front_door.alb_dns_name`.
+2. Until DNS exists, use `https://<alb_dns_name>/api/health` — expect **200**.
+3. `curl -I https://<app-url>/` without cookies — expect **302** toward Cognito / Okta (same check as `scripts/smoke.sh`).
+4. `curl -I https://<app-url>/api/scenarios` without cookies — expect **401** (not a redirect).
 
-Application (once the app is deployed, Step 11), with the app and Okta teams:
+**With Okta configured:**
 
-- Login with Okta + MFA works in each environment.
-- A request without a token, or with a token for another environment's audience, gets `401`.
-- A `streaming` user cannot read `theatrical` scenarios (API returns nothing, RLS proves it).
-- An override without recent MFA gets `401 insufficient_user_authentication`.
+1. Browser login with MFA reaches the UI.
+2. Authenticated API calls succeed; `/api/health` stays open without a session.
+3. A user in `mmm-bu-streaming` cannot read another BU's data (API + RLS).
+
+See also "Validate Step 8" in `infra/environments/dev/README.md` and post-deploy
+`scripts/smoke.sh` in [09-cicd-pipelines.md](09-cicd-pipelines.md).

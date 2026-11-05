@@ -9,7 +9,7 @@ output "bucket_arn" {
 }
 
 output "bucket_regional_domain_name" {
-  description = "Regional domain name (CloudFront origin in Step 8)."
+  description = "Regional domain name."
   value       = aws_s3_bucket.this.bucket_regional_domain_name
 }
 

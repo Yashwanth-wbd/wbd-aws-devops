@@ -94,7 +94,7 @@ resource "aws_vpc_endpoint" "workspace" {
   }
 }
 
-# The workspace host name resolves to the endpoint inside the VPC (ECS workers, MWAA).
+# The workspace host name resolves to the endpoint inside the VPC (tasks in the VPC).
 resource "aws_route53_zone" "workspace" {
   #checkov:skip=CKV2_AWS_38:DNSSEC signing applies to public zones; this zone is private.
   #checkov:skip=CKV2_AWS_39:Query logging for this one-record private zone is not required by WBD (VPC flow logs cover it).

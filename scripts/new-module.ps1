@@ -7,7 +7,7 @@
   outputs.tf and README.md. Existing modules are never overwritten.
 
 .EXAMPLE
-  .\scripts\new-module.ps1 -Name sqs -Step 6 -Purpose "FIFO job queue + DLQ" -Resources "SQS FIFO queue","SQS DLQ"
+  .\scripts\new-module.ps1 -Name step-functions -Step 6 -Purpose "Standard state machine" -Resources "State machine","Log group"
   .\scripts\new-module.ps1 -Name edge -Step 8 -Purpose "..." -Resources "..." -ProviderAliases us_east_1
   .\scripts\new-module.ps1 -Name secrets -Step 5 -Purpose "..." -Resources "..." -ExtraProviders random
 #>

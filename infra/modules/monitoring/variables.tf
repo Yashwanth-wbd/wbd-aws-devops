@@ -20,29 +20,31 @@ variable "alb_arn_suffix" {
   type        = string
 }
 
-variable "api_target_group_arn_suffix" {
-  description = "API target group ARN suffix (targetgroup/<name>/<id>)."
+variable "target_group_arn_suffixes" {
+  description = "Target group ARN suffix per service (alb module target_group_arn_suffixes; must contain api)."
+  type        = map(string)
+
+  validation {
+    condition     = contains(keys(var.target_group_arn_suffixes), "api")
+    error_message = "target_group_arn_suffixes must contain the api target group."
+  }
+}
+
+variable "aurora_cluster_id" {
+  description = "Aurora cluster identifier."
   type        = string
 }
 
-variable "queue_name" {
-  description = "Job queue name."
-  type        = string
+variable "state_machine_arns" {
+  description = "Step Functions state machines shown on the dashboard (name => ARN). Each has its own failure alarm."
+  type        = map(string)
+  default     = {}
 }
 
-variable "dlq_name" {
-  description = "Dead-letter queue name."
-  type        = string
-}
-
-variable "rds_instance_id" {
-  description = "RDS instance identifier."
-  type        = string
-}
-
-variable "redis_node_ids" {
-  description = "ElastiCache node IDs (<replication-group>-001, -002, ...)."
+variable "lambda_function_names" {
+  description = "Lambda functions shown on the dashboard. Each has its own errors alarm."
   type        = list(string)
+  default     = []
 }
 
 variable "ecs_cluster_name" {
@@ -62,13 +64,7 @@ variable "certificate_arns" {
 }
 
 variable "waf_web_acl_name" {
-  description = "CloudFront WAF web ACL name (dashboard; metrics are in us-east-1)."
-  type        = string
-  default     = null
-}
-
-variable "cloudfront_distribution_id" {
-  description = "CloudFront distribution ID (dashboard; metrics are in us-east-1)."
+  description = "Regional WAF web ACL name on the ALB (dashboard)."
   type        = string
   default     = null
 }
@@ -86,28 +82,16 @@ variable "api_5xx_min_requests" {
   default     = 20
 }
 
-variable "queue_oldest_age_seconds" {
-  description = "Oldest job waiting longer than this raises the alarm."
-  type        = number
-  default     = 300
-}
-
-variable "rds_cpu_percent" {
-  description = "RDS CPU threshold."
+variable "aurora_cpu_percent" {
+  description = "Aurora CPU threshold."
   type        = number
   default     = 80
 }
 
-variable "rds_free_storage_gib" {
-  description = "RDS free storage threshold (GiB)."
+variable "aurora_acu_percent" {
+  description = "Aurora Serverless ACU utilization (% of max ACU) threshold."
   type        = number
-  default     = 10
-}
-
-variable "redis_percent" {
-  description = "ElastiCache engine CPU and memory threshold."
-  type        = number
-  default     = 80
+  default     = 90
 }
 
 variable "whatif_p95_ms" {

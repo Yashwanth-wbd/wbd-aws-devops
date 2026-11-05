@@ -21,7 +21,7 @@ variable "self_assume_enabled" {
 }
 
 variable "bucket_arns" {
-  description = "Buckets Unity Catalog reads and writes (landing, results, data-quality)."
+  description = "Buckets Unity Catalog reads and writes (landing, lakehouse, training-data)."
   type        = list(string)
 }
 

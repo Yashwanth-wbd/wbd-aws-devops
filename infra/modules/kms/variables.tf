@@ -6,7 +6,7 @@ variable "name_prefix" {
 variable "purposes" {
   description = "One customer-managed key is created per purpose; the alias is alias/<name_prefix>-<purpose>."
   type        = list(string)
-  default     = ["rds", "s3", "logs", "secrets", "sqs", "ecr"]
+  default     = ["rds", "s3", "logs", "secrets", "ecr", "sagemaker"]
 
   validation {
     condition     = alltrue([for p in var.purposes : can(regex("^[a-z0-9-]+$", p))])
@@ -15,7 +15,7 @@ variable "purposes" {
 }
 
 variable "logs_service_purposes" {
-  description = "Purposes whose key policy also lets CloudWatch Logs in this account use the key (logs; mwaa, whose log groups MWAA creates with its own key)."
+  description = "Purposes whose key policy also lets CloudWatch Logs in this account use the key (normally only logs)."
   type        = list(string)
   default     = ["logs"]
 }
@@ -32,7 +32,7 @@ variable "deletion_window_in_days" {
 }
 
 variable "additional_policy_documents" {
-  description = "Extra key-policy JSON per purpose (e.g. CloudFront or SNS service access added in later steps)."
+  description = "Extra key-policy JSON per purpose (e.g. Bedrock guardrail or Databricks access added in later steps)."
   type        = map(string)
   default     = {}
 }

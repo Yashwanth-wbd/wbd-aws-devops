@@ -97,7 +97,7 @@ variable "secrets_kms_key_arn" {
 }
 
 variable "s3_kms_key_arn" {
-  description = "KMS key for S3 data and frontend buckets (kms module output)."
+  description = "KMS key for the S3 buckets (models bucket evaluation reports; kms module output)."
   type        = string
 }
 
@@ -106,8 +106,14 @@ variable "ecr_kms_key_arn" {
   type        = string
 }
 
-variable "enable_data_deploy" {
-  description = "Let the deploy role publish DAGs to the MWAA bucket and update MWAA requirements (data platform, Step 13)."
+variable "deploy_lambda_functions" {
+  description = "Lambda functions (name without the <name_prefix>- prefix) the deploy role may release: new version + alias live."
+  type        = list(string)
+  default     = ["results-publisher"]
+}
+
+variable "enable_model_governance" {
+  description = "Create gha-model-eval (main branch) and gha-model-approve (environment <env>-model-promotion) for the SageMaker Model Registry (data platform)."
   type        = bool
   default     = false
 }

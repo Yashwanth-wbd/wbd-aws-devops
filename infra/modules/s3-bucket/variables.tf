@@ -70,7 +70,7 @@ variable "enable_eventbridge" {
 }
 
 variable "additional_policy_json" {
-  description = "Extra bucket-policy JSON merged in (e.g. CloudFront OAC read in Step 8)."
+  description = "Extra bucket-policy JSON merged in (e.g. cross-account read for Databricks)."
   type        = string
   default     = ""
 }

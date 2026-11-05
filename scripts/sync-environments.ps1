@@ -64,6 +64,10 @@ foreach ($t in $Targets) {
     if ($Check) { Write-Host "DIFFERS  ecs\$t\$($j.Name)" -ForegroundColor Red; $diffs++ }
     else { [IO.File]::WriteAllText($dst, $want, (New-Object Text.UTF8Encoding $false)); Write-Host "written  ecs\$t\$($j.Name)" }
   }
+  Get-ChildItem $ecsDst -Filter *.json | Where-Object { -not (Test-Path (Join-Path $ecsSrc $_.Name)) } | ForEach-Object {
+    if ($Check) { Write-Host "EXTRA    ecs\$t\$($_.Name)" -ForegroundColor Red; $diffs++ }
+    else { Remove-Item $_.FullName; Write-Host "removed  ecs\$t\$($_.Name)" }
+  }
 
   # shared files removed from dev must disappear from the copies too
   Get-ChildItem $dir -File -Filter *.tf | Where-Object { $perEnv -notcontains $_.Name -and -not (Test-Path (Join-Path $source $_.Name)) } | ForEach-Object {

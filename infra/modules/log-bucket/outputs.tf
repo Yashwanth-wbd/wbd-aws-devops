@@ -9,11 +9,11 @@ output "bucket_arn" {
 }
 
 output "bucket_domain_name" {
-  description = "Bucket domain name (CloudFront logging config needs this form)."
+  description = "Bucket domain name."
   value       = aws_s3_bucket.this.bucket_domain_name
 }
 
 output "prefixes" {
-  description = "Prefix per log producer: alb, cloudfront, s3_access."
+  description = "Prefix per log producer: alb, s3_access."
   value       = local.prefixes
 }

@@ -1,4 +1,7 @@
 # ================================================================== Step 7 - ECS compute
+# Two long-running services behind the ALB: ui (web app) and api (REST + interactive what-if on
+# the approved response curves). Full optimization runs are not done in ECS: the API starts the
+# optimization state machine (optimization.tf), which runs a SageMaker Processing job.
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -6,64 +9,44 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
   app_port   = 8080
+  ui_port    = 8080
 
   ecs_sizing = {
-    dev     = { api_min = 1, api_max = 2, whatif_min = 1, whatif_max = 2, optimizer_max = 3 }
-    staging = { api_min = 2, api_max = 4, whatif_min = 1, whatif_max = 4, optimizer_max = 5 }
-    prod    = { api_min = 3, api_max = 10, whatif_min = 2, whatif_max = 6, optimizer_max = 10 }
+    dev     = { api_min = 1, api_max = 2, ui_min = 1, ui_max = 2 }
+    staging = { api_min = 2, api_max = 4, ui_min = 2, ui_max = 3 }
+    prod    = { api_min = 3, api_max = 10, ui_min = 2, ui_max = 6 }
   }[var.environment]
 
   # rds-db:connect resource for a DB user through RDS Proxy (IAM auth)
-  proxy_dbuser_arn = "arn:${local.partition}:rds-db:${var.aws_region}:${local.account_id}:dbuser:${module.rds.proxy_resource_id}"
+  proxy_dbuser_arn = "arn:${local.partition}:rds-db:${var.aws_region}:${local.account_id}:dbuser:${module.aurora.proxy_resource_id}"
   ssm_path_arn     = "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}/*"
-  ecs_task_arns    = "arn:${local.partition}:ecs:${var.aws_region}:${local.account_id}:task/${local.name_prefix}-ecs/*"
+
+  # Built from the name, so modules that trust the API role do not depend on the service module.
+  api_task_role_arn = "arn:${local.partition}:iam::${local.account_id}:role/${local.name_prefix}-task-api"
 
   bucket_arns = { for k, b in module.buckets : k => b.bucket_arn }
 
-  # Non-secret settings every service gets (task-definition environment)
+  # Non-secret settings every service that uses the database gets (task-definition environment)
   common_env = {
-    APP_ENV            = var.environment
-    AWS_REGION         = var.aws_region
-    DB_HOST            = module.rds.proxy_endpoint
-    DB_PORT            = "5432"
-    DB_NAME            = module.rds.db_name
-    REDIS_HOST         = module.elasticache.primary_endpoint
-    REDIS_PORT         = "6379"
-    OPTIMIZE_QUEUE_URL = module.sqs.queue_url
-    RESULTS_BUCKET     = module.buckets["results"].bucket_name
-    SSM_PREFIX         = "/mmm/${local.env_short}"
+    APP_ENV        = var.environment
+    AWS_REGION     = var.aws_region
+    DB_HOST        = module.aurora.proxy_endpoint
+    DB_PORT        = "5432"
+    DB_NAME        = module.aurora.db_name
+    RESULTS_BUCKET = module.buckets["results"].bucket_name
+    SSM_PREFIX     = "/mmm/${local.env_short}"
   }
 
   # Injected at task start by the execution role (ARNs only in the task definition)
   api_secrets = {
-    REDIS_AUTH_TOKEN = module.secrets.secret_arns["redis/token"]
-    GENAI_ENABLED    = module.secrets.parameter_arns["genai_enabled"]
-    OKTA_ISSUER      = module.secrets.parameter_arns["okta/issuer"]
-    OKTA_AUDIENCE    = module.secrets.parameter_arns["okta/audience"]
+    GENAI_ENABLED        = module.secrets.parameter_arns["genai_enabled"]
+    COGNITO_USER_POOL_ID = module.secrets.parameter_arns["cognito/user_pool_id"]
+    COGNITO_CLIENT_ID    = module.secrets.parameter_arns["cognito/client_id"]
   }
-
-  # Step 13: workers load the model version the "production" alias points to (MLflow, Unity Catalog).
-  # Model name: <MODEL_CATALOG>.models.mmm_<business unit>. A promotion moves the alias; no redeploy.
-  mlflow_env = {
-    MLFLOW_TRACKING_URI = "databricks"
-    MLFLOW_REGISTRY_URI = "databricks-uc"
-    MODEL_CATALOG       = local.model_catalog
-    MODEL_ALIAS         = "production"
-  }
-
-  # An empty secret makes the task fail to start, so the Databricks token is added only once it is filled.
-  worker_secrets = merge(
-    {
-      REDIS_AUTH_TOKEN         = module.secrets.secret_arns["redis/token"]
-      DATABRICKS_HOST          = module.secrets.parameter_arns["databricks/host"]
-      DATABRICKS_SQL_HTTP_PATH = module.secrets.parameter_arns["databricks/sql_http_path"]
-    },
-    var.databricks_token_available ? { DATABRICKS_TOKEN = module.secrets.secret_arns["databricks/sp"] } : {},
-  )
 
   # Seed revisions: placeholders so Terraform can create the services before the first real
   # image exists. deploy.yml (Step 11) registers the real task definitions.
-  seed_api_command = ["python", "-c", <<-EOT
+  seed_http_command = ["python", "-c", <<-EOT
     import http.server as s
     class H(s.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -71,7 +54,6 @@ locals {
     s.HTTPServer(("", ${local.app_port}), H).serve_forever()
   EOT
   ]
-  seed_worker_command  = ["python", "-c", "import time; print('seed worker - waiting for first deploy'); time.sleep(10**9)"]
   seed_migrate_command = ["python", "-c", "print('seed migrate task - replaced by deploy.yml')"]
 }
 
@@ -85,26 +67,6 @@ module "ecs_cluster" {
   secrets_kms_key_arn      = module.kms.key_arns["secrets"]
   ecr_kms_key_arn          = module.kms.key_arns["ecr"]
   parameter_path_arn       = local.ssm_path_arn
-  secret_arns = [
-    module.secrets.secret_arns["redis/token"],
-    module.secrets.secret_arns["databricks/sp"],
-  ]
-}
-
-# ------------------------------------------------------------------ ALB
-module "alb" {
-  source = "../../modules/alb"
-
-  name_prefix         = local.name_prefix
-  vpc_id              = module.network.vpc_id
-  public_subnet_ids   = module.network.public_subnet_ids
-  security_group_id   = module.network.security_group_ids["alb"]
-  certificate_arn     = var.alb_certificate_arn
-  origin_verify_value = module.secrets.generated_values["edge/origin-verify"]
-  app_port            = local.app_port
-  access_log_bucket   = module.log_bucket.bucket_name
-  access_log_prefix   = module.log_bucket.prefixes.alb
-  deletion_protection = local.is_prod
 }
 
 # ------------------------------------------------------------------ Task role policies (least privilege per service)
@@ -115,22 +77,36 @@ data "aws_iam_policy_document" "task_api" {
     resources = ["${local.proxy_dbuser_arn}/mmm_app"]
   }
 
+  # What-if runs in the API on the approved response curves.
   statement {
-    sid       = "SendJobs"
-    actions   = ["sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
-    resources = [module.sqs.queue_arn]
+    sid       = "ReadApprovedCurves"
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = [local.bucket_arns["models"], "${local.bucket_arns["models"]}/curves/*"]
+  }
+
+  # Full optimization: start / watch / cancel a run; progress comes from the execution status.
+  statement {
+    sid       = "StartOptimization"
+    actions   = ["states:StartExecution"]
+    resources = [module.optimization_sfn.state_machine_arn]
   }
 
   statement {
-    sid       = "QueueKey"
-    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
-    resources = [module.kms.key_arns["sqs"]]
+    sid       = "WatchOptimization"
+    actions   = ["states:DescribeExecution", "states:StopExecution", "states:GetExecutionHistory"]
+    resources = ["arn:${local.partition}:states:${var.aws_region}:${local.account_id}:execution:${module.optimization_sfn.state_machine_name}:*"]
   }
 
   statement {
     sid       = "ReadResults"
     actions   = ["s3:GetObject", "s3:ListBucket"]
     resources = [local.bucket_arns["results"], "${local.bucket_arns["results"]}/*"]
+  }
+
+  statement {
+    sid       = "WriteRunInputs"
+    actions   = ["s3:PutObject"]
+    resources = ["${local.bucket_arns["results"]}/runs/*/input/*"]
   }
 
   statement {
@@ -166,50 +142,24 @@ data "aws_iam_policy_document" "task_api" {
     actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
     resources = [local.ssm_path_arn, "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}"]
   }
+
+  # Step 14: the LLM gateway is a private API Gateway with IAM auth.
+  dynamic "statement" {
+    for_each = var.enable_genai ? [1] : []
+    content {
+      sid       = "InvokeLlmGateway"
+      actions   = ["execute-api:Invoke"]
+      resources = [module.llm_gateway[0].execution_arn]
+    }
+  }
 }
 
-data "aws_iam_policy_document" "task_worker" {
+# The UI container only serves static files; it calls no AWS API.
+data "aws_iam_policy_document" "task_ui" {
   statement {
-    sid       = "DbConnectAsAppUser"
-    actions   = ["rds-db:connect"]
-    resources = ["${local.proxy_dbuser_arn}/mmm_app"]
-  }
-
-  statement {
-    sid       = "ConsumeJobs"
-    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
-    resources = [module.sqs.queue_arn]
-  }
-
-  statement {
-    sid       = "QueueKey"
-    actions   = ["kms:Decrypt"]
-    resources = [module.kms.key_arns["sqs"]]
-  }
-
-  statement {
-    sid       = "WriteResults"
-    actions   = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
-    resources = [local.bucket_arns["results"], "${local.bucket_arns["results"]}/*"]
-  }
-
-  statement {
-    sid       = "BucketKey"
-    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
-    resources = [module.kms.key_arns["s3"]]
-  }
-
-  # Worker marks itself protected while a job runs, so scale-in never stops a running job.
-  statement {
-    sid       = "TaskScaleInProtection"
-    actions   = ["ecs:UpdateTaskProtection", "ecs:GetTaskProtection"]
-    resources = [local.ecs_task_arns]
-  }
-
-  statement {
-    sid       = "ReadConfig"
-    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
-    resources = [local.ssm_path_arn, "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}"]
+    sid       = "ReadOwnConfig"
+    actions   = ["ssm:GetParameter"]
+    resources = [module.secrets.parameter_arns["genai_enabled"]]
   }
 }
 
@@ -242,18 +192,6 @@ data "aws_iam_policy_document" "task_migrate" {
 
 data "aws_iam_policy_document" "task_platform_check" {
   statement {
-    sid       = "QueueRoundTrip"
-    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = [module.sqs.queue_arn]
-  }
-
-  statement {
-    sid       = "QueueKey"
-    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
-    resources = [module.kms.key_arns["sqs"]]
-  }
-
-  statement {
     sid       = "S3RoundTrip"
     actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
     resources = ["${local.bucket_arns["results"]}/platform-check/*"]
@@ -263,6 +201,18 @@ data "aws_iam_policy_document" "task_platform_check" {
     sid       = "BucketKey"
     actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
     resources = [module.kms.key_arns["s3"]]
+  }
+
+  statement {
+    sid       = "DescribeOptimization"
+    actions   = ["states:DescribeStateMachine"]
+    resources = [module.optimization_sfn.state_machine_arn]
+  }
+
+  statement {
+    sid       = "ReadImagePointers"
+    actions   = ["ssm:GetParameter"]
+    resources = [for p in aws_ssm_parameter.sagemaker_image : p.arn]
   }
 }
 
@@ -281,89 +231,64 @@ module "svc_api" {
   task_role_policy_json    = data.aws_iam_policy_document.task_api.json
 
   image          = var.seed_image
-  command        = local.seed_api_command
-  cpu            = 512
-  memory         = 1024
+  command        = local.seed_http_command
+  cpu            = 1024
+  memory         = 2048
   container_port = local.app_port
   environment = merge(local.common_env, {
-    EXPORTS_BUCKET  = module.buckets["exports"].bucket_name
-    APPROVED_BUCKET = module.buckets["approved-worm"].bucket_name
-    DB_USER         = "mmm_app"
-  }, var.enable_genai ? { GENAI_GATEWAY_URL = local.genai_gateway_url } : {})
+    MODELS_BUCKET                  = module.buckets["models"].bucket_name
+    EXPORTS_BUCKET                 = module.buckets["exports"].bucket_name
+    APPROVED_BUCKET                = module.buckets["approved-worm"].bucket_name
+    DB_USER                        = "mmm_app"
+    OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
+    # The API verifies the x-amzn-oidc-data header: signer must be this ALB
+    ALB_ARN = module.alb.alb_arn
+  }, var.enable_genai ? { LLM_GATEWAY_URL = module.llm_gateway[0].invoke_url } : {})
   secrets            = local.api_secrets
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]
 
-  desired_count                 = local.ecs_sizing.api_min
-  target_group_arn              = module.alb.target_group_arn
-  service_connect_namespace_arn = module.ecs_cluster.service_connect_namespace_arn
-  exec_audit_log_group_arn      = module.ecs_cluster.exec_audit_log_group_arn
-  exec_kms_key_arn              = module.ecs_cluster.exec_kms_key_arn
-  enable_application_signals    = var.enable_application_signals
+  desired_count              = local.ecs_sizing.api_min
+  target_group_arn           = module.alb.target_group_arns["api"]
+  exec_audit_log_group_arn   = module.ecs_cluster.exec_audit_log_group_arn
+  exec_kms_key_arn           = module.ecs_cluster.exec_kms_key_arn
+  enable_application_signals = var.enable_application_signals
 
   autoscaling = { type = "cpu", min = local.ecs_sizing.api_min, max = local.ecs_sizing.api_max, cpu_target = 60 }
 }
 
-# What-if: always on (min 1-2) so interactive simulations answer in seconds.
-module "svc_whatif" {
+module "svc_ui" {
   source = "../../modules/ecs-service"
 
   name_prefix              = local.name_prefix
-  service_name             = "whatif-worker"
-  task_role_suffix         = "whatif"
+  service_name             = "ui"
+  task_role_suffix         = "ui"
   cluster_name             = module.ecs_cluster.cluster_name
   execution_role_arn       = module.ecs_cluster.execution_role_arn
   subnet_ids               = module.network.private_app_subnet_ids
-  security_group_ids       = [module.network.security_group_ids["workers"], module.network.security_group_ids["data_clients"]]
+  security_group_ids       = [module.network.security_group_ids["ui"]]
   permissions_boundary_arn = module.permission_boundary.policy_arn
-  task_role_policy_json    = data.aws_iam_policy_document.task_worker.json
+  task_role_policy_json    = data.aws_iam_policy_document.task_ui.json
 
-  image              = var.seed_image
-  command            = local.seed_worker_command
-  cpu                = 1024
-  memory             = 2048
-  environment        = merge(local.common_env, local.mlflow_env, { JOB_TYPE = "whatif", DB_USER = "mmm_app" })
-  secrets            = local.worker_secrets
+  image          = var.seed_image
+  command        = local.seed_http_command
+  cpu            = 256
+  memory         = 512
+  container_port = local.ui_port
+  environment = {
+    APP_ENV       = var.environment
+    API_BASE_PATH = "/api"
+    LOGOUT_URL    = module.cognito.logout_url
+  }
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]
 
-  desired_count              = local.ecs_sizing.whatif_min
-  exec_audit_log_group_arn   = module.ecs_cluster.exec_audit_log_group_arn
-  exec_kms_key_arn           = module.ecs_cluster.exec_kms_key_arn
-  enable_application_signals = var.enable_application_signals
+  desired_count            = local.ecs_sizing.ui_min
+  target_group_arn         = module.alb.target_group_arns["ui"]
+  exec_audit_log_group_arn = module.ecs_cluster.exec_audit_log_group_arn
+  exec_kms_key_arn         = module.ecs_cluster.exec_kms_key_arn
 
-  autoscaling = { type = "sqs", min = local.ecs_sizing.whatif_min, max = local.ecs_sizing.whatif_max, queue_name = module.sqs.queue_name }
-}
-
-# Optimizer: scales 0 -> N on queue backlog, back to 0 when the queue is empty.
-module "svc_optimizer" {
-  source = "../../modules/ecs-service"
-
-  name_prefix              = local.name_prefix
-  service_name             = "optimizer-worker"
-  task_role_suffix         = "optimizer"
-  cluster_name             = module.ecs_cluster.cluster_name
-  execution_role_arn       = module.ecs_cluster.execution_role_arn
-  subnet_ids               = module.network.private_app_subnet_ids
-  security_group_ids       = [module.network.security_group_ids["workers"], module.network.security_group_ids["data_clients"]]
-  permissions_boundary_arn = module.permission_boundary.policy_arn
-  task_role_policy_json    = data.aws_iam_policy_document.task_worker.json
-
-  image              = var.seed_image
-  command            = local.seed_worker_command
-  cpu                = 2048
-  memory             = 4096
-  environment        = merge(local.common_env, local.mlflow_env, { JOB_TYPE = "optimize", DB_USER = "mmm_app" })
-  secrets            = local.worker_secrets
-  log_retention_days = var.log_retention_days
-  logs_kms_key_arn   = module.kms.key_arns["logs"]
-
-  desired_count              = 0
-  exec_audit_log_group_arn   = module.ecs_cluster.exec_audit_log_group_arn
-  exec_kms_key_arn           = module.ecs_cluster.exec_kms_key_arn
-  enable_application_signals = var.enable_application_signals
-
-  autoscaling = { type = "sqs", min = 0, max = local.ecs_sizing.optimizer_max, queue_name = module.sqs.queue_name }
+  autoscaling = { type = "cpu", min = local.ecs_sizing.ui_min, max = local.ecs_sizing.ui_max, cpu_target = 60 }
 }
 
 # Migrate: task definition only; deploy.yml runs it as a one-off task before each deploy.
@@ -400,7 +325,7 @@ module "task_migrate" {
   exec_kms_key_arn         = module.ecs_cluster.exec_kms_key_arn
 }
 
-# Platform check: one-off task that proves the network paths and IAM of Steps 4-7 (run by DevOps).
+# Platform check: one-off task that proves the network paths and IAM of Steps 4-8 (run by DevOps).
 module "task_platform_check" {
   source = "../../modules/ecs-service"
   count  = var.enable_platform_check_task ? 1 : 0
@@ -411,7 +336,7 @@ module "task_platform_check" {
   cluster_name             = module.ecs_cluster.cluster_name
   execution_role_arn       = module.ecs_cluster.execution_role_arn
   subnet_ids               = module.network.private_app_subnet_ids
-  security_group_ids       = [module.network.security_group_ids["workers"], module.network.security_group_ids["data_clients"]]
+  security_group_ids       = [module.network.security_group_ids["tasks"], module.network.security_group_ids["data_clients"]]
   permissions_boundary_arn = module.permission_boundary.policy_arn
   task_role_policy_json    = data.aws_iam_policy_document.task_platform_check.json
 
@@ -421,8 +346,12 @@ module "task_platform_check" {
   command     = [file("${path.module}/../../../scripts/platform-check.sh")]
   cpu         = 256
   memory      = 512
-  environment = merge(local.common_env, { HOME = "/tmp" })
-  secrets     = { REDIS_AUTH_TOKEN = module.secrets.secret_arns["redis/token"] }
+  environment = merge(local.common_env, {
+    HOME                           = "/tmp"
+    OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
+    IMAGE_PARAMETER_NAMES          = join(",", [for p in aws_ssm_parameter.sagemaker_image : p.name])
+    APP_URL                        = local.app_url
+  })
 
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]

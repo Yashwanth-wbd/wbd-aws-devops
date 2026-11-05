@@ -1,15 +1,16 @@
-# Model governance: a retrained model reaches the "production" alias only after it passes the
-# thresholds in data/model-thresholds.yaml AND a WBD approver approves it.
+# Model governance: a retrained model becomes the approved version (its response curves are what
+# the API serves) only after it passes data/model-thresholds.yaml AND a WBD approver approves it.
 #
-#   schedule (hourly) / dispatch evaluate -> evaluate every new "candidate" version (eval service principal)
-#                                            pass -> tagged passed, a promote run is started per model
-#                                            fail -> tagged failed, candidate alias removed, warning; never promoted
-#   dispatch promote  -> job waits in environment <env>-model-promotion (WBD approver) -> alias "production" moves
-#   dispatch rollback -> same approval -> "production" goes back to the previous version
+#   schedule (hourly) / dispatch evaluate -> evaluate every new PendingManualApproval version (gha-model-eval role)
+#                                            pass -> tagged passed, a promote run is started per version
+#                                            fail -> tagged failed and Rejected, warning; never approvable
+#   dispatch promote  -> job waits in environment <env>-model-promotion (WBD approver) -> version Approved,
+#                        curves copied to s3://<models bucket>/curves/<bu>/ (gha-model-approve role)
+#   dispatch rollback -> same approval -> previous approved version re-published, current one Rejected
 #
-# Auth: Databricks workload identity federation with GitHub OIDC - no Databricks secrets in GitHub.
-# Repository variables (per env, upper case): DATABRICKS_HOST_<ENV>, DATABRICKS_EVAL_CLIENT_ID_<ENV>,
-# DATABRICKS_PROMOTE_CLIENT_ID_<ENV>, MODEL_CATALOG_<ENV>. Envs without DATABRICKS_HOST_<ENV> are skipped.
+# Auth: GitHub OIDC to AWS - no secrets. Repository variables (per env, upper case, from the Terraform output
+# github_repository_variables): MODEL_EVAL_ROLE_ARN_<ENV>, MODEL_APPROVE_ROLE_ARN_<ENV>, MODELS_BUCKET_<ENV>.
+# Envs without MODEL_EVAL_ROLE_ARN_<ENV> (data platform off) are skipped.
 name: model-governance
 
 on:
@@ -30,7 +31,7 @@ on:
         default: all
         required: true
       version:
-        description: "Model version (promote: required; rollback: optional, default previous_production_version)"
+        description: "Model package version (promote: required; rollback: optional, default previous_approved_version)"
         default: ""
 
 permissions:
@@ -48,12 +49,12 @@ jobs:
           EVENT: ${{ github.event_name }}
           ACTION: ${{ inputs.action }}
           IN_ENV: ${{ inputs.environment }}
-          HOSTS: ${{ toJSON(vars) }}
+          VARS: ${{ toJSON(vars) }}
         run: |
           if [ "$EVENT" = schedule ]; then wanted='["dev","staging","prod"]'
           elif [ "$ACTION" = evaluate ]; then wanted="[\"$IN_ENV\"]"
           else wanted='[]'; fi
-          envs=$(jq -c --argjson w "$wanted" '. as $v | [$w[] | select(($v["DATABRICKS_HOST_" + ascii_upcase] // "") != "")]' <<< "$HOSTS")
+          envs=$(jq -c --argjson w "$wanted" '. as $v | [$w[] | select(($v["MODEL_EVAL_ROLE_ARN_" + ascii_upcase] // "") != "")]' <<< "$VARS")
           echo "environments=$envs" | tee -a "$GITHUB_OUTPUT"
 
   evaluate:
@@ -71,10 +72,6 @@ jobs:
         environment: ${{ fromJSON(needs.targets.outputs.environments) }}
     env:
       ENVIRONMENT: ${{ matrix.environment }}
-      DATABRICKS_AUTH_TYPE: github-oidc
-      DATABRICKS_HOST: ${{ vars[format('DATABRICKS_HOST_{0}', matrix.environment)] }}
-      DATABRICKS_CLIENT_ID: ${{ vars[format('DATABRICKS_EVAL_CLIENT_ID_{0}', matrix.environment)] }}
-      CATALOG: ${{ vars[format('MODEL_CATALOG_{0}', matrix.environment)] }}
       BUSINESS_UNIT: ${{ inputs.business_unit || 'all' }}
       VERSION: ${{ inputs.action == 'evaluate' && inputs.version || '' }}
     steps:
@@ -84,10 +81,16 @@ jobs:
           python-version: "3.11"
       - run: pip install --quiet -r scripts/requirements-model-governance.txt
 
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars[format('MODEL_EVAL_ROLE_ARN_{0}', matrix.environment)] }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: model-eval-${{ github.run_id }}
+
       - name: Evaluate candidates
         id: eval
         run: |
-          args=(--environment "$ENVIRONMENT" --catalog "$CATALOG" --business-unit "$BUSINESS_UNIT" --report model-evaluation.json
+          args=(--environment "$ENVIRONMENT" --business-unit "$BUSINESS_UNIT" --report model-evaluation.json
                 --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
           [ -n "$VERSION" ] && args+=(--version "$VERSION")
           python scripts/model_governance.py evaluate "${args[@]}"
@@ -127,16 +130,15 @@ jobs:
     env:
       ENVIRONMENT: ${{ inputs.environment }}
       ACTION: ${{ inputs.action }}
-      DATABRICKS_AUTH_TYPE: github-oidc
-      DATABRICKS_HOST: ${{ vars[format('DATABRICKS_HOST_{0}', inputs.environment)] }}
-      DATABRICKS_CLIENT_ID: ${{ vars[format('DATABRICKS_PROMOTE_CLIENT_ID_{0}', inputs.environment)] }}
-      CATALOG: ${{ vars[format('MODEL_CATALOG_{0}', inputs.environment)] }}
+      ROLE_ARN: ${{ vars[format('MODEL_APPROVE_ROLE_ARN_{0}', inputs.environment)] }}
+      MODELS_BUCKET: ${{ vars[format('MODELS_BUCKET_{0}', inputs.environment)] }}
       BUSINESS_UNIT: ${{ inputs.business_unit }}
       VERSION: ${{ inputs.version }}
     steps:
       - name: Check inputs
         run: |
-          [ -n "$DATABRICKS_HOST" ] || { echo "::error::repository variable DATABRICKS_HOST_${ENVIRONMENT^^} is not set"; exit 1; }
+          [ -n "$ROLE_ARN" ] || { echo "::error::repository variable MODEL_APPROVE_ROLE_ARN_${ENVIRONMENT^^} is not set"; exit 1; }
+          [ -n "$MODELS_BUCKET" ] || { echo "::error::repository variable MODELS_BUCKET_${ENVIRONMENT^^} is not set"; exit 1; }
           [ "$BUSINESS_UNIT" != all ] || { echo "::error::$ACTION needs one business_unit"; exit 1; }
           [ "$ACTION" != promote ] || [ -n "$VERSION" ] || { echo "::error::promote needs a version"; exit 1; }
 
@@ -146,7 +148,13 @@ jobs:
           python-version: "3.11"
       - run: pip install --quiet -r scripts/requirements-model-governance.txt
 
-      - name: Move the production alias
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: model-approve-${{ github.run_id }}
+
+      - name: Approve or roll back
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -154,10 +162,10 @@ jobs:
           if [ "$ACTION" = promote ]; then
             approvers=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
               --jq '[.[] | select(.state == "approved") | .user.login] | join(",")' 2>/dev/null || echo "")
-            python scripts/model_governance.py promote --environment "$ENVIRONMENT" --catalog "$CATALOG" \
+            python scripts/model_governance.py promote --environment "$ENVIRONMENT" --models-bucket "$MODELS_BUCKET" \
               --business-unit "$BUSINESS_UNIT" --version "$VERSION" --run-url "$run_url" --approved-by "${approvers:-unknown}"
           else
-            args=(--environment "$ENVIRONMENT" --catalog "$CATALOG" --business-unit "$BUSINESS_UNIT" --run-url "$run_url")
+            args=(--environment "$ENVIRONMENT" --models-bucket "$MODELS_BUCKET" --business-unit "$BUSINESS_UNIT" --run-url "$run_url")
             [ -n "$VERSION" ] && args+=(--version "$VERSION")
             python scripts/model_governance.py rollback "${args[@]}"
           fi

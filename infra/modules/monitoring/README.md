@@ -12,7 +12,7 @@ Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in 
 | SNS topic | `<prefix>-alerts` | KMS-encrypted, TLS only. Only this account's alarms and EventBridge rules may publish. Email subscriptions come from `alert_emails`. |
 | Metric alarms | `<prefix>-<name>` | See below. Each sends ALARM **and** OK to the topic. |
 | EventBridge rules | `<prefix>-<name>` | ECS deployment failed, ECS service error, GuardDuty high. The message is a readable sentence (input transformer). |
-| Dashboard | `<prefix>-platform` | The alarm list, then API, ECS, queue, job duration, RDS, Redis, WAF and CloudFront. |
+| Dashboard | `<prefix>-platform` | The alarm list, then API, ECS, what-if duration, Aurora CPU / connections / ACU, Step Functions executions, Lambda, regional WAF. |
 | Logs data protection policy | `<prefix>-data-protection` | Account level. It masks AWS secret keys, private keys and card numbers in **every** log group. |
 
 ## Alarms
@@ -20,13 +20,12 @@ Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in 
 | Alarm | Fires when | First thing to check |
 |---|---|---|
 | `api-5xx-rate` | Target + ALB 5xx > 2 % of requests in 3 of 5 minutes (only at ≥ 20 requests / min) | API logs, the last deploy |
-| `api-no-healthy-targets` | No healthy API task for 2 minutes | ECS service events, the `/api/health` response |
-| `queue-oldest-job` | Oldest job waits > 5 minutes | Worker running count, worker logs |
-| `dlq-not-empty` | Any job in the DLQ (failed 3 times) | Worker logs for that job, then redrive (see the `sqs` README) |
-| `rds-cpu` | RDS CPU > 80 % for 15 minutes | Performance Insights, top SQL |
-| `rds-free-storage` | Free storage < 5 GiB in dev, 20 GiB in staging and prod | Storage autoscaling maximum |
-| `redis-cpu-<node>`, `redis-memory-<node>` | Engine CPU or memory > 80 % | Key sizes and TTLs, node type |
-| `whatif-p95` | What-if p95 > 10 s in 3 of 5 minutes | What-if worker logs and CPU |
+| `ui-no-healthy-targets`, `api-no-healthy-targets` | No healthy task in that target group for 2 minutes | ECS service events, the health check response |
+| `aurora-cpu` | Aurora CPU > 80 % for 15 minutes | Performance Insights, top SQL |
+| `aurora-acu-max` | ACU utilization > 90 % of `max_acu` | Performance Insights; raise `aurora_max_acu` |
+| `whatif-p95` | What-if p95 > 10 s in 3 of 5 minutes | API logs and CPU (what-if runs in the API) |
+| `<state machine>-failed` | From the `step-functions` module | Failed execution in the console, then the SageMaker job log |
+| `<function>-errors` | From the `lambda-function` module | Function log |
 | `cert-expiry-<name>` | ACM certificate expires in < 30 days | The ACM renewal status: usually a missing DNS validation record |
 | `splunk-delivery`, `splunk-freshness` | From the `log-shipping` module | Firehose error log |
 
@@ -52,8 +51,8 @@ to do two things:
 {"ts":"2026-11-03T10:15:00Z","level":"INFO","service":"api","env":"dev","run_id":"r-123","scenario_id":"s-42","job_id":"j-9","user":"<okta sub>","bu":"streaming","msg":"job queued"}
 ```
 
-The API creates `run_id` and sends it as a message attribute on the SQS job. The worker logs the
-same `run_id`, and the audit rows in PostgreSQL store it too. **Never log tokens, passwords or
+The API creates `run_id` and passes it as the Step Functions execution input. The optimizer job and
+the results publisher log the same `run_id`, and the audit rows in Aurora store it too. **Never log tokens, passwords or
 the `Authorization` header.** The data protection policy is only a safety net.
 
 **2. Publish job durations with CloudWatch Embedded Metric Format** (a log line; no API call or
@@ -81,13 +80,13 @@ aws application-signals start-discovery
 |---|---|---|
 | `name_prefix`, `environment` | – | |
 | `alert_emails` | `[]` | Each address must click the confirmation email |
-| `alb_arn_suffix`, `api_target_group_arn_suffix` | – | From `alb` |
-| `queue_name`, `dlq_name` | – | From `sqs` |
-| `rds_instance_id`, `redis_node_ids` | – | |
+| `alb_arn_suffix`, `target_group_arn_suffixes` | – | From `alb` (map must contain `api`) |
+| `aurora_cluster_id` | – | From `aurora` |
+| `state_machine_arns`, `lambda_function_names` | – | Dashboard widgets |
 | `ecs_cluster_name`, `ecs_service_names` | – | |
 | `certificate_arns` | `{}` | name → ARN, in **this** region only |
-| `waf_web_acl_name`, `cloudfront_distribution_id` | `null` | Dashboard widgets in us-east-1 |
-| Thresholds | see `variables.tf` | `api_5xx_percent_threshold` 2, `queue_oldest_age_seconds` 300, `rds_cpu_percent` 80, `rds_free_storage_gib` 10, `redis_percent` 80, `whatif_p95_ms` 10000, `certificate_days_to_expiry` 30 |
+| `waf_web_acl_name` | `null` | Regional web ACL (dashboard) |
+| Thresholds | see `variables.tf` | `api_5xx_percent_threshold` 2, `aurora_cpu_percent` 80, `aurora_acu_percent` 90, `whatif_p95_ms` 10000, `certificate_days_to_expiry` 30 |
 | `app_metric_namespace` | `MMM` | |
 | `enable_guardduty_alerts` | `true` | |
 | `enable_breakglass_alert` | `false` | prod stack sets `true` |

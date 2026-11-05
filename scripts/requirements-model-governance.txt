@@ -1,4 +1,3 @@
-# scripts/model_governance.py (model-governance.yml). MLflow client only; no training libraries.
-mlflow-skinny>=2.16,<3
-databricks-sdk>=0.40,<1
+# scripts/model_governance.py (model-governance.yml). AWS SDK only; no training libraries.
+boto3>=1.35,<2
 PyYAML>=6,<7

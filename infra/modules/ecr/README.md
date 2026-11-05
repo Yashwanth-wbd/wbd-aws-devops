@@ -8,7 +8,7 @@ The container image repositories of **one account**. Every environment has its o
 
 | Resource | Notes |
 |---|---|
-| `aws_ecr_repository` × 3 | `mmm/api`, `mmm/optimizer-worker`, `mmm/genai-gateway` (used from Release 2). The what-if worker runs the optimizer image. |
+| `aws_ecr_repository` × 4 | `mmm/api`, `mmm/ui` (ECS services), `mmm/sagemaker-optimizer`, `mmm/sagemaker-training` (SageMaker job images; training is used with the data platform). |
 | `aws_ecr_registry_scanning_configuration` | Amazon Inspector **enhanced, continuous** scanning for `mmm/*`. Images are re-checked whenever a new CVE is published, not only on push. |
 | `aws_ecr_lifecycle_policy` per repository | Untagged images are deleted after 7 days. The newest 50 `v*` release images and the newest 30 `sha-*` build images (dev) are kept. |
 
@@ -32,7 +32,7 @@ The promotion job (Step 11) pulls with `mmm-<source>-gha-ecr-read` and pushes wi
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `repositories` | list(string) | the 3 above | Must be `mmm/<name>` (the pipeline roles are scoped to `repository/mmm/*`) |
+| `repositories` | list(string) | the 4 above | Must be `mmm/<name>` (the pipeline roles are scoped to `repository/mmm/*`) |
 | `kms_key_arn` | string | – | `module.kms.key_arns["ecr"]` |
 | `enhanced_scanning` | bool | `true` | false = basic scan on push |
 | `untagged_expiry_days` | number | `7` | |

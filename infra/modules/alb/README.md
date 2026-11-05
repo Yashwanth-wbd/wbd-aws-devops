@@ -1,56 +1,55 @@
 # alb
 
-The internet-facing Application Load Balancer for the API. It sits behind CloudFront (Step 8).
+The internet-facing Application Load Balancer – the single front door of the app. It signs users
+in through Cognito (federated to WBD Okta) and routes to the `ui` and `api` ECS services. The
+regional WAF (`waf-regional` module) is attached to it.
 
-**Status:** implemented in Step 7.
+**Status:** implemented (v2 architecture; replaces CloudFront + origin-verify of v1).
 
 ## What it creates
 
 | Resource | Name | Notes |
 |---|---|---|
-| ALB | `<prefix>-alb` | In the public subnets with the `alb` security group. Drops invalid header fields; desync mitigation `strictest`; access logs go to the log bucket under `alb/`; deletion protection on by default. |
-| Target group | `<prefix>-api-tg` | Target type `ip` (needed for Fargate), port `app_port`, health check `GET /api/health` expecting `200`. |
-| HTTPS listener (443) | – | TLS policy `ELBSecurityPolicy-TLS13-1-2-2021-06`, certificate `certificate_arn`. **Default action: fixed 403.** |
-| Listener rule (priority 10) | – | Forwards to the target group **only if** the `X-Origin-Verify` header equals the `edge/origin-verify` secret. |
+| ALB | `<prefix>-alb` | Public subnets, `alb` security group (443/80 from `alb_ingress_cidrs`). Drops invalid header fields; desync mitigation `strictest`; access logs to the log bucket under `alb/`; deletion protection on by default |
+| Target groups | `<prefix>-ui-tg`, `<prefix>-api-tg` | Target type `ip` (Fargate). Health checks: ui `ui_health_check_path` (`/healthz`) on `ui_port`, api `health_check_path` (`/api/health`) on `app_port`, expecting `200` |
+| HTTP listener (80) | – | Redirect 301 to HTTPS only |
+| HTTPS listener (443) | – | TLS policy `ELBSecurityPolicy-TLS13-1-2-2021-06`. **Default:** `authenticate-cognito` (unauthenticated → redirect to sign-in) then forward to `ui` |
+| Rule priority 10 | – | `health_check_path` → `api`, no sign-in (smoke tests, uptime checks) |
+| Rule priority 20 | – | `/api/*` → `authenticate-cognito` with `on_unauthenticated_request = deny` (401 instead of a redirect, right for XHR), then forward to `api` |
 
-## Why a 403 by default
+## How the API knows the user
 
-Only CloudFront knows the `X-Origin-Verify` value: Step 8 adds it as a custom origin header. A
-request that goes straight to the ALB DNS name, bypassing CloudFront and its WAF, gets a 403.
-There is no port-80 listener: CloudFront talks to the ALB over HTTPS only, and the `alb` security
-group allows only 443 from the CloudFront origin-facing prefix list. Until Step 8 is applied, you can test by sending the header yourself (see the dev README).
-
-The value is the generated secret `mmm/<env>/edge/origin-verify`. To rotate it, change
-`generated_secret_rotation_id` in tfvars and apply. The ALB rule and CloudFront are updated in the
-same apply.
+After sign-in the ALB adds `x-amzn-oidc-data` (a JWT signed by the ALB with the user's claims,
+including `custom:groups`) and `x-amzn-oidc-identity` to every forwarded request. The API must
+verify the JWT signature with the ALB public key for its region and check that the `signer` field
+equals `ALB_ARN` (task environment). Session cookie: `mmm-session`, lifetime `cognito.session_seconds`.
+Without `cognito` (null) the listener forwards without authentication – only for a first smoke test.
 
 ## Checkov skips (with reason)
 
 | Check | Reason |
 |---|---|
 | `CKV_AWS_150` | Deletion protection is set per environment (`deletion_protection`, on in prod). |
-| `CKV2_AWS_28` | The WAF is attached to CloudFront (Step 8). The ALB accepts only CloudFront IPs plus the `X-Origin-Verify` header. |
+| `CKV2_AWS_28` | The regional WAF is associated by the `waf-regional` module. |
 | `CKV_AWS_378` | TLS ends at the ALB. ALB-to-task traffic stays in the VPC and is limited to the `alb` security group. |
+| `CKV_AWS_2`, `CKV_AWS_103` | Port 80 only redirects to HTTPS. |
 
 ## Inputs
 
 | Name | Default | Description |
 |---|---|---|
-| `name_prefix` | – | |
-| `vpc_id` | – | |
-| `public_subnet_ids` | – | `module.network.subnet_ids["public"]` |
-| `security_group_id` | – | `module.network.security_group_ids["alb"]` |
+| `name_prefix`, `vpc_id`, `public_subnet_ids`, `security_group_id` | – | From `network` |
 | `certificate_arn` | – | ACM certificate in the same region as the ALB |
-| `origin_verify_value` | – | Sensitive. `module.secrets.generated_values["edge/origin-verify"]` |
-| `app_port` | `8080` | |
+| `cognito` | `null` | `{ user_pool_arn, client_id, domain_prefix, session_seconds = 43200 }` from `cognito` |
+| `app_port`, `ui_port` | `8080` | |
 | `health_check_path` | `/api/health` | |
-| `access_log_bucket` | – | `module.log_bucket.bucket_name` |
-| `access_log_prefix` | `alb` | |
-| `deletion_protection` | `true` | Set `false` in dev if you want `terraform destroy` to work |
+| `ui_health_check_path` | `/healthz` | |
+| `access_log_bucket`, `access_log_prefix` | –, `alb` | `module.log_bucket` |
+| `deletion_protection` | `true` | `false` in dev if you want `terraform destroy` to work |
 | `idle_timeout` | `60` | |
 | `tags` | `{}` | |
 
 ## Outputs
 
-`alb_arn`, `alb_arn_suffix`, `alb_dns_name`, `alb_zone_id`, `target_group_arn`, `target_group_arn_suffix`,
-`https_listener_arn`.
+`alb_arn`, `alb_arn_suffix`, `alb_dns_name`, `alb_zone_id`, `target_group_arns` (map ui/api),
+`target_group_arn_suffixes` (map), `https_listener_arn`.

@@ -1,22 +1,23 @@
 # WBD MMM DevOps – Project Context and Continuation Guide
 
 This file is the memory of the project. Chat sessions are lost when the VDI closes, so everything
-needed to continue is written here. **Attach this file (plus `devops_plan_1.txt`) to a new chat to
-resume.**
+needed to continue is written here. **Attach this file (plus `docs/requirements/devops_plan_2.txt`)
+to a new chat to resume.**
 
-Last updated: 4 Nov 2026 (after Steps 0–15 were implemented, reviewed and pushed).
+Last updated: 5 Nov 2026 (v2 architecture from `wbd_Presentation.pptx` implemented and validated
+offline; **not committed yet**).
 
 ---
 
 ## 0. How to resume in a new chat
 
-Paste this to the AI agent, with this file and `devops_plan_1.txt` attached:
+Paste this to the AI agent, with this file and `devops_plan_2.txt` attached:
 
 > I'm continuing the WBD MMM DevOps project. Read `PROJECT_CONTEXT.md` in the project root first:
 > it lists what is done, the decisions taken, the open gaps and the next steps. The project is at
 > `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1`
 > and on GitHub at https://github.com/Yashwanth-wbd/wbd-aws-devops. Follow the rules in section 3.
-> Today I want to: <say what – e.g. "fill the real dev values I have", "fix the pipeline defects">.
+> Today I want to: <say what – e.g. "commit the v2 changes", "fill the real dev values I have">.
 
 If the tools are missing after a VDI reset, ask the agent to run section 3.1 first.
 
@@ -26,13 +27,35 @@ If the tools are missing after a VDI reset, ask the agent to run section 3.1 fir
 
 | Item | Value |
 |---|---|
-| What | DevOps for the WBD Media-Mix-Modeling (MMM) platform on **Amazon ECS Fargate**: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App code belongs to the dev teams (only the sample `apps/genai-gateway` is ours). |
+| What | DevOps for the WBD Media-Mix-Modeling (MMM) platform: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App, data-engineering and model code belong to the WBD / EY teams – nothing app-side is in this repo. |
 | Project folder (source of truth) | `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
-| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`, latest commit `211f89a` (Steps 14–15). GitHub = project folder: 297 files, nothing uncommitted (except this file until it is pushed). |
+| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`, last pushed commit `211f89a` (v1). **The v2 changes are local and uncommitted** (commit only when the user asks). |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset run `gh auth login --web --scopes repo,workflow` again. |
-| Requirement documents (copies in `docs/requirements/`, originals in `...\Desktop\wbd_devops\`) | `devops_plan_1.txt` (the step-by-step prompt, Steps 0–15 – the one being followed), `devops_plan.txt` (earlier version of the same prompt), `wbd_mmm_ecs_final.docx` (client design doc, 15 stages), `aws_resource_list.xlsx` (142 resources per env, sheets dev/staging/prod), `wbd_final.docx` (WBD RFP "Cross-Business-Unit Media Allocation & Measurement Platform" – marked confidential; the repo is public, the user accepted this), `wbd_0.docx` (platform overview: current/future state), `wbd_1.docx` (detailed summary of the RFP) |
+| Requirement documents (`docs/requirements/`) | **`wbd_Presentation.pptx`** (new v2 target architecture – the one being followed), `devops_plan_2.txt` (v2 plan: v1 → v2 delta, decisions), `aws_resource_list_2.xlsx` (v2 resources per env), `wbd_mmm_ecs_final_2.docx` (v2 design doc), `PROJECT_CONTEXT_2.md` (v2 planning context). v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
-| Status | **All 16 steps (0–15) implemented with placeholder values and validated offline.** Nothing has been applied to AWS. Real validation is waiting for client values, accounts and the app code. |
+| Status | **v2 implemented with placeholder values and validated offline** (fmt, validate, mock plan of all 3 envs). Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
+
+### 1.1 v2 architecture in one paragraph
+
+Planners sign in at **WBD Okta (SAML) → Cognito user pool → ALB `authenticate-cognito`** behind a
+**regional WAF**. The ALB routes `/` to the **`ui`** ECS service and `/api/*` to the **`api`** ECS
+service (Fargate). What-if runs in the API; an optimization run is an **async Step Functions
+execution** (`mmm-<env>-optimization`) that starts a **SageMaker Processing job** (image
+`mmm/sagemaker-optimizer`, current URI in SSM) and then the **results-publisher Lambda**, which
+writes the result to **Aurora PostgreSQL Serverless v2** through **RDS Proxy** (IAM auth). With the
+data platform, **EventBridge Scheduler / an `mmm.refresh` event** starts `mmm-<env>-model-refresh`:
+Databricks job (features) → SageMaker training → evaluation → **SageMaker Model Registry**
+(`PendingManualApproval`); `model-governance.yml` checks thresholds and a WBD approver approves,
+which publishes the response curves the optimizer reads. Release 2 GenAI: **private API Gateway
+LLM gateway** → OpenAI / Anthropic / Google with **Bedrock Guardrails** (`ApplyGuardrail`).
+
+### 1.2 What v2 removed
+
+CloudFront (+ KVS, OAC, us-east-1 WAF/cert, origin-verify secret, S3 frontend bucket), RDS instance,
+ElastiCache Valkey, SQS FIFO + DLQ, `whatif-worker` / `optimizer-worker` services, MWAA + data-trigger
+Lambda + DAGs + `data.yml`, MLflow/Unity Catalog model aliases, `genai-gateway` ECS service and the
+old `bedrock` module. Modules deleted: `rds`, `elasticache`, `sqs`, `edge`, `mwaa`, `data-trigger`,
+`bedrock`.
 
 ---
 
@@ -40,74 +63,74 @@ If the tools are missing after a VDI reset, ask the agent to run section 3.1 fir
 
 | Topic | Decision | Why / where documented |
 |---|---|---|
-| Container registry | **One ECR per environment**; CI pushes to dev ECR, promotion copies the same digest to staging (`vX.Y.Z-rcN`) and prod (`vX.Y.Z`) with `skopeo` | Matches `aws_resource_list.xlsx` steps 48–51. The docx proposed one shared ECR in a Shared account – conflict noted. `README.md` §3, `docs/09` |
-| Shared/tooling account | **Not built** (no `wbd-mmm-shared` stack) | GitHub-hosted runners make it unnecessary. **Needs confirmation with WBD** – the docx puts a VPC/NAT/runners/artifacts there |
-| CI runners | GitHub-hosted (`ubuntu-latest`) | docx recommends GitHub-hosted; `docs/00` |
-| Repository layout | Single repo (infra + pipelines + ecs + data + docs) | Plan §5 allows monorepo |
-| Account security baseline | CloudTrail, GuardDuty, Security Hub, Config, SCPs, account S3 BPA, EBS encryption, Access Analyzer, Macie: **owned by WBD, only verified** | `docs/01` |
-| Terraform state lock | S3 native lock file (`use_lockfile = true`, Terraform ≥ 1.10); DynamoDB table optional in bootstrap | `infra/bootstrap/README.md` |
-| DR for S3 | AWS Backup cross-region copy (RPO 24 h) instead of S3 replication; module supports CRR if WBD wants RPO in minutes | `docs/08`, `docs/01` |
-| App DNS | Route 53 records created by WBD DNS; Terraform outputs `dns_records_for_wbd` | `docs/01` |
-| Splunk token | Stored in Secrets Manager `mmm/<env>/splunk/hec` (not a Terraform variable) | `docs/05` |
-| Cache engine | ElastiCache **Valkey** (Redis-compatible) | docx alternative |
-| Authorization | App RBAC + PostgreSQL row-level security per BU (no OPA) | `docs/06` |
-| Release 2 (GenAI) | Built but **off**: `enable_genai = false` + GitHub variable `GENAI_ENABLED` | `docs/12` |
-| Data platform | MWAA + EventBridge + Lambda + Databricks, **off**: `enable_data_platform = false` | `docs/10` |
-| Placeholders | Every placeholder has `# add actual value` on the line above | `README.md` §6 |
-| Naming / tags | `mmm-<env>-<component>`, env = `dev`/`stg`/`prd`; tags Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component | `README.md` §6 |
-| CostCenter tag | **Removed** (5 Nov 2026): only a finance label, no effect on resources; add back to the `tags` locals if WBD Finance needs chargeback or a tag policy requires it | `README.md` §6 |
+| Container registry | **One ECR per environment**; CI pushes to dev ECR, promotion copies the same digest to staging (`vX.Y.Z-rcN`) and prod (`vX.Y.Z`) with `skopeo` | `README.md`, `docs/09` |
+| Shared/tooling account | **Not built** | GitHub-hosted runners make it unnecessary. **Needs confirmation with WBD** |
+| CI runners | GitHub-hosted (`ubuntu-latest`) | `docs/00` |
+| Repository layout | Single repo (infra + pipelines + ecs + data hooks + docs) | |
+| Account security baseline | CloudTrail, GuardDuty, Security Hub, Config, SCPs, … **owned by WBD, only verified** | `docs/01` |
+| Terraform state lock | S3 native lock file (`use_lockfile = true`) | `infra/bootstrap/README.md` |
+| Front door | **No CloudFront.** Public ALB + regional WAF; `alb_ingress_cidrs` default `0.0.0.0/0` (WAF + Cognito protect it); set WBD ranges to restrict | `infra/modules/alb`, `waf-regional` |
+| Sign-in | **Cognito federated to Okta via SAML** (simplest ALB-native option, no app secret in the UI); MFA enforced in Okta; groups via SAML attribute `groups` → `custom:groups` | `docs/04` |
+| App DNS | Route 53 alias only if `route53_zone_id` is set; otherwise WBD DNS adds the CNAME from `dns_records_for_wbd` | `docs/01` |
+| UI hosting | **`ui` ECS Fargate container** (React served by the container, `/healthz`), image `mmm/ui` | `ecs/dev/ui.json` |
+| Database | **Aurora PostgreSQL Serverless v2** 16.6 + RDS Proxy (IAM auth, TLS). dev 1 instance 0.5–4 ACU; staging 2 × 0.5–16; prod 2 × 1–32 | `infra/modules/aurora` |
+| Cache / queue | **None.** Step Functions executions replace the queue (idempotent by `run_id`); progress = DescribeExecution + run row in Aurora | `optimization.tf` |
+| Optimization engine | Step Functions → SageMaker Processing (`createProcessingJob.sync`) → Lambda publisher (`live` alias) | `optimization.tf` |
+| Image versions for SageMaker | SSM pointer `/mmm/<env_short>/images/sagemaker-*` = `<registry>/<repo>@<digest>`, written by `deploy.yml`; Terraform ignores the value | `optimization.tf`, `deploy.yml` |
+| Data orchestration | **No MWAA.** EventBridge Scheduler (per BU) + on-demand `mmm.refresh` event → Step Functions HTTP Task → Databricks Jobs API via an **EventBridge connection** (OAuth client credentials) | `data.tf` |
+| Model registry | **SageMaker Model Registry** per BU (`<prefix>-<bu>`); approval via `model-governance.yml` + `<env>-model-promotion` environment; approval publishes curves to `models/curves/<bu>/` | `docs/10` §7 |
+| Databricks code | Asset Bundle in `data/databricks/` (data engineers) deployed by `databricks.yml` with GitHub OIDC federation | `docs/10` |
+| GenAI (Release 2) | Built but **off** (`enable_genai = false`): private API Gateway + proxy Lambda to approved providers; Bedrock guardrail on every call | `docs/12` |
+| Data platform | Built but **off** (`enable_data_platform = false`) | `docs/10` |
+| Splunk token | Secrets Manager `mmm/<env>/splunk/hec` | `docs/05` |
+| Authorization | App RBAC by Okta group + PostgreSQL row-level security per BU | `docs/06` |
+| Placeholders | Every placeholder has `# add actual value` on the line above | `README.md` |
+| Naming / tags | `mmm-<env>-<component>`, env = `dev`/`stg`/`prd`; tags Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component (CostCenter removed) | `README.md` |
 
 ---
 
 ## 3. Working rules and local environment
 
 **Rules for any change**
-1. DevOps only – never write api/worker/frontend app code.
+1. DevOps only – never write api / ui / data-engineering / model code.
 2. No secrets in Git, images or Terraform variables.
-3. Terraform is applied by GitHub Actions through OIDC. Exceptions: the one-time state bootstrap and the **first apply** of each account (the pipeline roles don't exist yet) – run from a laptop with SSO.
-4. Edit only `infra/environments/dev/*.tf` and `ecs/dev/*.json`, then run `.\scripts\sync-environments.ps1` to copy to staging/prod (CI fails if they differ). `terraform.tfvars`, `backend.tf` and `README.md` are per environment and edited individually.
+3. Terraform is applied by GitHub Actions through OIDC. Exceptions: the one-time state bootstrap and the **first apply** of each account – run from a laptop with SSO.
+4. Edit only `infra/environments/dev/*.tf` and `ecs/dev/*.json`, then run `.\scripts\sync-environments.ps1` (it also deletes staging/prod files that no longer exist in dev; CI fails if they differ). `terraform.tfvars`, `backend.tf` and `README.md` are per environment.
 5. Every placeholder gets `# add actual value` on the line above.
-6. Do one step at a time and validate before moving on.
+6. Match the existing style and comment density. Do not commit unless asked.
 
 ### 3.1 Tools (no admin rights; installed under `C:\Users\yn\tools`)
 
 Reinstall after a VDI reset: `powershell -ExecutionPolicy Bypass -File .\scripts\install-prereqs.ps1`
-(uv and actionlint were added by hand last time: `pip install uv`; actionlint binary into `C:\Users\yn\tools\bin`).
+(uv and actionlint were added by hand: `pip install uv`; actionlint binary into `C:\Users\yn\tools\bin`).
 
 | Tool | Version used |
 |---|---|
-| Terraform | 1.17.1 |
+| Terraform | 1.17.1 (providers: aws 5.100.0, archive 2.8.1, random 3.9.1) |
 | AWS CLI | 2.39.3 |
-| Git | 2.56 |
-| GitHub CLI | 2.103.3 |
+| Git / GitHub CLI | 2.56 / 2.103.3 |
 | jq / tflint / Trivy | 1.8.2 / 0.65.0 / 0.76.1 |
 | Node / Python / uv | 22.23 / 3.12 / 0.13.7 |
-| actionlint / Checkov | 1.7.12 / latest (run as `python.exe <tools>\python\Scripts\checkov`) |
-| Docker | **not installed** (needs admin; only for local image builds – CI builds images) |
+| actionlint / Checkov | 1.7.12 / latest |
+| Docker | **not installed** (CI builds images) |
 
 PATH line for every new PowerShell window:
 
 ```powershell
-$t="$env:USERPROFILE\tools"; $env:Path = "$t\bin;$t\git\cmd;$t\git\bin;$t\awscli\Amazon\AWSCLIV2;$t\gh\bin;$t\node;$t\python;$t\python\Scripts;" + $env:Path
+$env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')
 ```
+
+Agent notes: `Select-String` fails on the UNC path (use the editor search); run shell commands with
+working directory `C:\Users\yn` and absolute paths.
 
 ### 3.2 Fast local copy (the network share is slow for Terraform/git)
 
 ```powershell
-# share -> local working copy (robocopy exit codes 0-3 = success)
 robocopy "\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1" C:\work\wbd /MIR /XD .terraform .venv
-```
-
-Git on the share needs a safe-directory exception:
-
-```powershell
 git config --global --add safe.directory '%(prefix)///USE_EIS_NTPCFS1.tw.tweis.net/WMAD_Profiles/yn/Desktop/wbd_devops/wbd_devops_implmenetation_1'
 ```
 
-Last push was done from `C:\work\wbd` (same `.git`), then the share was aligned with
-`git fetch origin; git reset origin/main` (keeps the files, moves the branch).
-
-### 3.3 Offline validation commands (all passed on 4 Nov 2026)
+### 3.3 Offline validation commands
 
 ```powershell
 cd infra; terraform fmt -check -recursive; cd ..
@@ -115,93 +138,69 @@ cd infra; terraform fmt -check -recursive; cd ..
 .\scripts\validate-modules.ps1                          # each module validates
 .\scripts\mock-plan.ps1 -Environment dev,staging,prod   # terraform test with mocked AWS
 tflint --recursive --config "$PWD\.tflint.hcl"
-checkov -d infra --framework terraform --quiet --compact --skip-path .terraform
+.\scripts\checkov-scan.ps1 -Path .\infra
 actionlint
 .\scripts\secret-scan.ps1
-cd apps\genai-gateway; uv run ruff check .; uv run mypy .; uv run pytest --cov   # 17 tests, 100 %
 ```
 
-Expected mock-plan results (resources to add):
+Mock-plan results on 5 Nov 2026 (resources to add):
 
 | Env | Default | All optional features on |
 |---|---|---|
-| dev | 292 | 431 |
-| staging | 309 | 450 |
-| prod | 309 | 452 (break-glass alert is prod only) |
-
-Checkov over `infra`: 1,333 passed, 0 failed. tflint, actionlint, secret scan: clean.
+| dev | 287 | 411 |
+| staging | 303 | 429 |
+| prod | 303 | 431 |
 
 ---
 
-## 4. What is built (status per step of `devops_plan_1.txt`)
+## 4. What is built
 
-| Step | Content | Status |
-|---|---|---|
-| 0 | Tools, access guides, project skeleton (`docs/00`, `docs/02`) | Done |
-| 1 | `infra/bootstrap`: state bucket (versioned, KMS, TLS-only), KMS key, optional DynamoDB lock; `dev/staging/prod.tfvars` | Done – apply pending accounts |
-| 2 | 23 modules in `infra/modules` (pinned `aws ~> 5.60`/`5.80`, `terraform >= 1.6`) | Done |
-| 3 | KMS per purpose, permission boundary (on all 14 IAM roles), GitHub OIDC + roles `gha-plan/apply/deploy/ecr-push/ecr-read`, budgets 50/80/100 % + anomaly detection | Done |
-| 4 | VPC /19, public/app/data/endpoint subnets, 2 AZ dev / 3 AZ stg-prd, NAT 1 vs per-AZ, gateway + interface endpoints, security groups, flow logs, optional Transit Gateway + Resolver | Done |
-| 5 | Secrets Manager containers + SSM parameters, generated Redis token and origin secret, RDS-managed master password | Done |
-| 6 | ECR (immutable, enhanced scan, lifecycle), S3 buckets (landing, results, approved-worm Object Lock, exports 30 d, frontend, logs, mwaa, data-quality), RDS PostgreSQL + Proxy (IAM auth, TLS, pgaudit), Valkey, SQS FIFO + DLQ | Done |
-| 7 | ECS cluster (Container Insights enhanced, Service Connect), ALB (CloudFront prefix list only, origin-secret check), services api / whatif-worker / optimizer-worker (0→N) / migrate task, autoscaling, circuit breaker, ECS Exec, optional Application Signals sidecar | Done |
-| 8 | WAF (managed rules, rate limit, logging), CloudFront (OAC, `/api/*` → ALB, security headers, KVS release switch), ACM inputs; Okta wiring via SSM | Done (Route 53 by WBD) |
-| 9 | SNS, alarms (5xx, SQS age, DLQ, RDS CPU, what-if latency, cert expiry, deploy rollback, GuardDuty), dashboard, Firehose → Splunk, log data protection | Done |
-| 10 | AWS Backup vault/plan (tag `backup=true`), vault lock (prod), cross-region copy option, RDS PITR 7/14/35 days | Done |
-| 11 | Workflows: `api-ci`, `optimizer-ci`, `genai-ci` (via `_python-service-ci`), `frontend-ci`, `terraform` (+`_terraform-apply`), `deploy`, `data`, `model-governance`, `repo-checks`; scripts `smoke.sh`, `run-migration.sh`, `promote-images.sh`, `trigger-ondemand.sh`, `ecs-deploy.sh`, `deploy-frontend.sh`, `setup-github.ps1` | Done |
-| 12 | Staging and prod stacks = same code, own `backend.tf` + `terraform.tfvars` | Done |
-| 13 | MWAA, data trigger (S3/EventBridge/Lambda, idempotent), Databricks access (Unity Catalog role, PrivateLink), per-BU KMS keys, `data/` DAG + manifest + quality suite, model governance | Done (behind `enable_data_platform`) – real validation deferred by the user |
-| Gate | Release 1 readiness pack `docs/11` | Ready – sign-offs open |
-| 14 | Bedrock module (guardrail, PrivateLink endpoint, invocation logging, alarms, dashboard, budget), `genai.tf` service on Service Connect, `apps/genai-gateway`, `genai-ci`, `GENAI_ENABLED` in deploy, Dependabot | Done (behind `enable_genai`) |
-| 15 | `docs/13-operations-and-handover.md`, 13 runbooks in `docs/runbooks/`, break-glass sign-in alert (prod) | Done – KT sessions/sign-offs at handover |
+| Area | Content |
+|---|---|
+| Bootstrap | `infra/bootstrap`: state bucket (versioned, KMS, TLS-only), KMS key |
+| Modules (`infra/modules`) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, **aurora**, ecs-cluster, alb, ecs-service, **cognito**, **waf-regional**, **step-functions**, **sagemaker**, **lambda-function**, monitoring, log-shipping, backup, databricks-access, **bedrock-guardrails**, **llm-gateway** (bold = new in v2). Each has a README |
+| Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets, Aurora), `frontdoor.tf` (Cognito, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (SSM image pointers, SageMaker role, publisher Lambda, optimization state machine), `data.tf` (Databricks access + connection, training side, model-refresh state machine, schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
+| ECS templates | `ecs/<env>/api.json`, `ui.json`, `migrate.json` |
+| Workflows | `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci` (via `_python-service-ci`, `build_image` input), `deploy` (api, ui, optimizer, training, publisher; promotion, prod Aurora snapshot, migration, smoke, rollback of ECS + SSM pointers + Lambda alias), `terraform` (+ `_terraform-apply`, drift skip when no role), `databricks`, `model-governance`, `repo-checks` |
+| Scripts | `smoke.sh` (health + Cognito redirect), `deploy-components.sh`, `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh`, `model_governance.py` (SageMaker registry), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py`, `setup-github.ps1` (`-DatabricksClientId`), `sync-environments.ps1`, `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1`, `secret-scan.ps1` |
+| Docs | `docs/00`–`13` and `docs/runbooks/` (incl. new `optimization-run-failed.md`) rewritten for v2; env READMEs with "Validate" commands |
 
-Repository map: `infra/` (bootstrap, modules, environments), `ecs/<env>/` (task definition overlays),
-`.github/workflows/`, `scripts/`, `data/`, `apps/genai-gateway/`, `docs/` (00–13 + runbooks).
-Each env folder has a `README.md` with the per-step "Validate" commands.
+v1 defects D1–D4 are fixed: Trivy `version:` on every trivy-action, drift job skips without role,
+skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`wbd-aws-devops`.
 
 ---
 
-## 5. Open issues and gaps (from the full reviews on 4 Nov 2026)
+## 5. Open issues and gaps
 
-### 5.1 Code defects – fix first (small)
+### 5.1 Still to run before committing
 
-| # | Problem | Where | Fix |
-|---|---|---|---|
-| D1 | Trivy setup fails in every CI run (`trivy-action@v0.33.1` without `version:`; download of Trivy 0.65.0 fails, curl exit 6). Seen on GitHub on all 3 commits. | `repo-checks.yml:19`, `_python-service-ci.yml:58,87`, `frontend-ci.yml:77` | Add `version: v0.76.1` (or newer) to each trivy-action step, or upgrade the action |
-| D2 | Nightly drift job fails when `TF_PLAN_ROLE_ARN_<ENV>` is not set (no skip like the PR plan job). Seen in the scheduled run. | `terraform.yml:174-193` | Copy the "Role configured?" skip step from the `plan` job |
-| D3 | Promotion uses `skopeo` but the workflow never installs it (usually on Ubuntu runners, not guaranteed after the Ubuntu 26 switch) | `deploy.yml` promote steps, `scripts/promote-images.sh` | Add `sudo apt-get install -y skopeo` (or check) before promotion |
-| D4 | **Terraform still points at a placeholder GitHub repo**: `github_org = "wbd-org"`, `github_repo = "wbd-mmm-platform"`; real repo is `Yashwanth-wbd/wbd-aws-devops` (or the final WBD repo). OIDC trust would reject the pipelines. | `infra/environments/*/terraform.tfvars:23-26`, `scripts/setup-github.ps1:34` default | Set to the real org/repo before the first apply |
+- Done on 5 Nov 2026: fmt, validate-modules, mock plan (all envs), `sync-environments.ps1 -Check`,
+  tflint, Checkov (0 failed, accepted skips have a reason comment), actionlint, secret scan – all clean.
+- At commit time: set the executable bit on the new `.sh` files (`git add --chmod=+x scripts/*.sh`).
 
-### 5.2 Gaps vs `devops_plan_1.txt`
+### 5.2 Open questions for WBD (implemented with the simpler industry-standard default)
 
-- No `.github/CODEOWNERS` (needs WBD team names; can be added with placeholders).
-- No automated DAST (OWASP ZAP baseline against staging before prod) – only a manual item R3 in `docs/11`.
-- `MLFLOW_TRACKING_URI` not exported as a GitHub variable (it is the constant `databricks` on the worker tasks; no workflow needs it yet).
-
-### 5.3 Gaps vs the design doc (`wbd_mmm_ecs_final.docx`) and resource list
-
-| Item | Status | Priority |
+| # | Question | Default implemented |
 |---|---|---|
-| SBOM (Syft) in CI | missing | should-have |
-| Image signing (cosign) | missing | if WBD mandates |
-| Dev cost controls (overnight scale-down, stop RDS out of hours) | only optimizer scales to 0 | should-have |
-| What-if pool scheduled scaling (business hours) | missing | should-have |
-| Fargate Spot for dev workers | module flag exists, not enabled | should-have |
-| Performance tests (k6/Locust) | missing | should-have (Stage 13) |
-| Post-deploy integration tests | only `/api/health` smoke test | should-have |
-| More dashboards (API, optimizer, DB, pipelines, model, cost) | one platform + one GenAI dashboard | should-have |
-| More alarms (99.5 % availability, optimization runtime, RDS connections > 80 %, failed Airflow run / stale data, model drift) | partial; several need app metrics | should-have |
-| Application Signals | built, `enable_application_signals = false` everywhere | enable when apps exist |
-| CloudWatch Synthetics canary (staging/prod, optional) | missing | optional |
-| Business-continuity one-page procedure | missing | should-have (doc) |
-| Shared account (`wbd-mmm-shared`) | not built – **decision to confirm with WBD** | decision |
-| Access Analyzer, Macie, CloudFront VPC origin, EventBridge Scheduler, Chatbot/Teams | not built (optional / WBD-owned) | optional |
+| Q1 | ALB reachable from the internet or only WBD ranges? Shield Advanced? | Internet + WAF + Cognito; `alb_ingress_cidrs` to restrict; no Shield Advanced |
+| Q2 | Throttling for 50–150 planners without SQS | Step Functions + SageMaker quotas; API limits concurrent runs per user (app side) |
+| Q3 | External LLM providers = data leaves AWS | Behind `enable_genai` + guardrail PII masking/blocking; needs WBD approval |
+| Q4 | Databricks workspace IP access list must allow Step Functions HTTP calls (public endpoint) | Confirm with WBD Databricks |
+| Q5 | Okta: SAML app per env, group names | `groups` attribute; names `mmm-bu-*` / `mmm-role-*` (docs/04, 06) |
+| Q6 | Separate Databricks service principal for bundle deploy (`DATABRICKS_CLIENT_ID`) vs the refresh SP | Two SPs recommended |
+
+### 5.3 Gaps (unchanged from v1 review, still open)
+
+CODEOWNERS (needs team names), DAST (ZAP), SBOM (Syft), image signing (cosign), dev cost
+scale-down, performance tests, post-deploy integration tests, more dashboards / availability alarm,
+Synthetics canary, business-continuity page, shared account decision.
 
 ### 5.4 Not in this repo but needed before a real deployment works
 
-- App code: `apps/api`, `apps/optimizer-worker`, `apps/frontend` (dev teams). Until then `api-ci`, `optimizer-ci`, `frontend-ci` fail and there is nothing to deploy. Their start/migration commands go into `ecs/<env>/*.json`.
-- Real values (section 6), issued ACM certificates, WBD DNS records.
-- Open Dependabot PR: https://github.com/Yashwanth-wbd/wbd-aws-devops/pull/1 (action version bumps; its CI fails for the reasons above).
+- App code: `apps/api`, `apps/ui`, `apps/sagemaker-optimizer`, `apps/sagemaker-training`,
+  `apps/results-publisher`, and the Databricks bundle `data/databricks/`. Until then the CI jobs
+  skip and there is nothing to deploy.
+- Real values (section 6), issued ACM certificate, WBD DNS record, Okta SAML apps.
 
 ---
 
@@ -210,103 +209,57 @@ Each env folder has a `README.md` with the per-step "Validate" commands.
 Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholder:
 `git grep -n -A1 "add actual value"`. Edit each environment's `terraform.tfvars` separately.
 
-### 6.1 AWS accounts and region
-| Value | Where |
+| Area | tfvars / place |
 |---|---|
-| Account IDs dev / staging / prod | `infra/bootstrap/<env>.tfvars` `aws_account_id`; `infra/environments/<env>/terraform.tfvars` `aws_account_id` |
-| Region (+ allowed regions, DR region) | `aws_region`, `allowed_regions`, `dr_region` (tfvars), `region` in `backend.tf` |
-| SSO access (permission sets: ReadOnly/Developer/DevOps/Security/BreakGlass) | `docs/02`; break-glass permission set name: if it isn't `BreakGlass`, pass `breakglass_permission_set` to `module "monitoring"` in `infra/environments/dev/monitoring.tf` (module default today) |
-| Existing GitHub OIDC provider in the account? | if yes: `create_github_oidc_provider = false` + `existing_github_oidc_provider_arn` |
-| Existing cost anomaly monitor / Bedrock invocation logging / CloudWatch Logs data-protection policy? | if yes: `enable_cost_anomaly_detection`, `enable_bedrock_invocation_logging`, `enable_log_data_protection` = `false` |
-
-### 6.2 Network
-| Value | Where |
-|---|---|
-| VPC CIDR per env (/19, no overlap with WBD) | `vpc_cidr` (dev placeholder `10.40.0.0/19`) |
-| AZ IDs (2 dev, 3 stg/prod) | `availability_zone_ids` |
-| Transit Gateway ID + routes (optional) | `transit_gateway_id`, `transit_gateway_routes`, enable flag |
-| DNS forwarding domains + WBD resolver IPs (optional) | `resolver_forward_domains`, `resolver_target_ips`, enable flag |
-| Central egress instead of NAT? | `enable_nat_gateway` |
-
-### 6.3 DNS, certificates, edge
-| Value | Where |
-|---|---|
-| App names (`mmm-dev`, `mmm-stg`, `mmm` .domain) | `cloudfront_aliases` |
-| ALB origin name (`origin-mmm-dev...`) | `alb_origin_domain_name` |
-| ACM cert ARN in us-east-1 for CloudFront (must be **ISSUED**) | `cloudfront_certificate_arn` |
-| ACM cert ARN in the project region for the ALB (ISSUED) | `alb_certificate_arn` |
-| Geo restriction (optional) | `geo_allow_countries` |
-| After apply: give WBD DNS the CNAMEs from `terraform output dns_records_for_wbd` | – |
-
-### 6.4 Okta (one app per environment)
-`okta_issuer`, `okta_spa_client_id`, `okta_audience` (tfvars → SSM `/mmm/<env>/okta/*`). Details: `docs/04`.
-
-### 6.5 GitHub
-| Value | Where |
-|---|---|
-| Final org/repo (now `Yashwanth-wbd/wbd-aws-devops`) | `github_org`, `github_repo` (tfvars), `-Repo` of `setup-github.ps1` |
-| Reviewer teams/users: staging (EY delivery lead), prod (WBD approvers + CAB), model approvers | `setup-github.ps1 -ReviewerTeams/-ReviewerUsers/-ModelApproverTeams` |
-| CODEOWNERS teams (DevOps for `infra/**`, `.github/**`, `ecs/**`; app teams for `apps/**`) | `.github/CODEOWNERS` (to create) |
-| Change-ticket format for prod tags | `deploy.yml:165` (`CHANGE_TICKET_PATTERN` variable optional) |
-
-### 6.6 Data platform (Step 13)
-`databricks_host`, `databricks_sql_http_path`, `databricks_account_id`, `databricks_privatelink_service_name`,
-`databricks_eval_client_id`, `databricks_promote_client_id`, business units, `third_party_vendors`,
-`data/model-thresholds.yaml` (Week-1 acceptance thresholds), then `enable_data_platform = true`.
-Unity Catalog role is two-phase: apply → register in Databricks → `databricks_self_assume_enabled = true` → apply.
-
-### 6.7 Monitoring, budgets, backup
-`alert_emails`, `budget_alert_emails`, `monthly_budget_usd`, `splunk_hec_endpoint` (+ `enable_splunk_shipping = true`),
-`approved_worm_lock_mode` (GOVERNANCE vs COMPLIANCE – **cannot be undone**), `approved_worm_retention_days`,
-prod `enable_vault_lock` / `enable_cross_region_copy` (WBD approval; vault lock is irreversible), sizing
-(`rds_instance_class`, `redis_node_type`, task counts).
-
-### 6.8 GenAI (Release 2, after the Release 1 gate)
-`genai_approved_model_ids`, `genai_token_quotas`, `genai_monthly_budget_usd` (200/500/2000), `genai_budget_service_names`,
-`genai_grounding_threshold`, `genai_relevance_threshold`, `genai_guardrail_version_label`, then `enable_genai = true`
-and GitHub variable `GENAI_ENABLED=true`. Enable the model in the Bedrock console per account.
-
-### 6.9 Images and pipelines
-GenAI base image (`apps/genai-gateway/Dockerfile` `PYTHON_IMAGE`, WBD-approved registry), Semgrep rule packs
-(`repo-checks.yml:35`), frontend build folder (`frontend-ci.yml:91`), app start/migration commands (`ecs/<env>/*.json`).
+| Accounts, region | `aws_account_id`, `aws_region`, `allowed_regions`, `dr_region`, `backend.tf`, `infra/bootstrap/<env>.tfvars` |
+| Network | `vpc_cidr`, `availability_zone_ids`, `enable_nat_gateway`, TGW / resolver values |
+| Front door | `app_domain_name`, `alb_certificate_arn` (workload region, ISSUED), `alb_ingress_cidrs`, `route53_zone_id` (optional), `geo_allow_countries`, `waf_count_only` |
+| Sign-in | `okta_saml_metadata_url` (one Okta SAML app per env), `cognito_domain_prefix`, `session_hours`; after apply give WBD Okta `terraform output okta_app_settings` |
+| Database | `aurora_min_acu`, `aurora_max_acu` (`aurora_engine_version`) |
+| Optimization | `optimizer_instance_type`, `optimizer_max_runtime_seconds` |
+| Data platform | `databricks_host`, `databricks_account_id`, `databricks_privatelink_service_name`, `databricks_sp_client_id`, `databricks_refresh_job_id`, `training_instance_type`, `model_refresh_schedule` / `_timezone`, `enable_model_refresh_schedule`, `training_data_retention_days`, `data/model-thresholds.yaml`, then `enable_data_platform = true` (UC role two-phase) |
+| GenAI | `llm_providers`, `genai_token_quotas`, `genai_reserved_concurrency`, guardrail thresholds, `manage_apigw_account_logging_role`, then `enable_genai = true` |
+| Monitoring, budgets, backup | `alert_emails`, `budget_alert_emails`, `monthly_budget_usd`, `splunk_hec_endpoint`, `approved_worm_lock_mode` (irreversible for COMPLIANCE), `approved_worm_retention_days`, prod `enable_vault_lock` / `enable_cross_region_copy` |
+| GitHub | reviewer teams/users, model approvers, `-DatabricksClientId`, change-ticket pattern |
 
 ---
 
 ## 7. Secrets (never in Git – filled in AWS after the first apply)
 
-| Secret (`mmm/<env>/...`) | Filled by | When |
+| Secret / credential | Filled by | When |
 |---|---|---|
-| `redis/token`, `edge/origin-verify` | Terraform (`random_password`) | automatic |
-| RDS master password | RDS-managed, auto-rotated | automatic |
-| `rds/migrate`, `rds/proxy`, `api/db` | DB bootstrap task (`enable_db_bootstrap = true`, apply, run `terraform output -raw db_bootstrap_run_command`, then set back to `false`) | **before the first migration/deploy** |
-| `databricks/sp` | WBD Databricks admins → then `databricks_token_available = true` | Step 13 |
-| `airflow/connections/databricks_default` | DevOps (JSON connection) | Step 13 |
-| `splunk/hec` (`{"hec_token":"..."}`) | WBD Splunk team | before `enable_splunk_shipping = true` |
-| `thirdparty/<vendor>` | WBD data owners | when the feed is used |
+| Aurora admin password | RDS-managed, auto-rotated | automatic |
+| `mmm/<env>/rds/migrate`, `rds/proxy`, `api/db` | DB bootstrap task (`enable_db_bootstrap = true`, apply, run `terraform output -raw db_bootstrap_run_command`, set back to `false`) | before the first migration |
+| Databricks client secret | DevOps, on the EventBridge connection `<prefix>-databricks` (`aws events update-connection`, docs/05) | data platform |
+| `mmm/<env>/splunk/hec` | WBD Splunk team | before `enable_splunk_shipping = true` |
+| `mmm/<env>/thirdparty/<vendor>` | WBD data owners | when the feed is used |
+| `mmm/<env>/llm/<provider>` (`{"api_key": "..."}`) | DevOps with WBD-approved keys | before `enable_genai = true` |
 
 GitHub needs **no secrets** (OIDC). Details: `docs/05`.
 
 ---
 
-## 8. GitHub configuration (Step 11)
+## 8. GitHub configuration
 
-- Environments: `dev` (no reviewers, `main` only), `staging` (EY delivery lead; `main`, `v*`, `data-v*`),
-  `prod` (WBD approvers, prevent self-review; `main`, `v*`, `data-v*`), optional `<env>-model-promotion`.
-- Branch protection on `main`: PR + 1–2 reviews (CODEOWNERS), checks green, no force push, linear history.
-- **Environment variables** (from `terraform output github_environment_variables`, set by `setup-github.ps1`):
+- Environments: `dev` (no reviewers, `main` only), `staging` (EY delivery lead; `main`, `v*`),
+  `prod` (WBD approvers, prevent self-review; `main`, `v*`), optional `<env>-model-promotion`
+  (WBD model approvers, `main` only).
+- **Environment variables** (`terraform output github_environment_variables`, set by `setup-github.ps1`):
   `AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_PUSH_ROLE_ARN, TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, ECR_REGISTRY,
-  ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, FRONTEND_BUCKET, CLOUDFRONT_DISTRIBUTION_ID,
-  FRONTEND_KVS_ARN, GENAI_ENABLED` (+ `MWAA_BUCKET, MWAA_ENVIRONMENT, QUALITY_BUCKET` with the data platform);
-  staging/prod also `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY` (previous env's `gha-ecr-read` role + registry).
-  Optional: `SMOKE_BASE_URL` (use the CloudFront domain until DNS exists), `CHANGE_TICKET_PATTERN`.
-- **Repository variables** (from `github_repository_variables`): `AWS_REGION`, `TF_PLAN_ROLE_ARN_DEV/_STAGING/_PROD`
-  (+ `DATABRICKS_*_<ENV>`, `MODEL_CATALOG_<ENV>` with the data platform).
+  ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, AURORA_CLUSTER_ID, PUBLISHER_FUNCTION,
+  OPTIMIZATION_STATE_MACHINE_ARN, SAGEMAKER_IMAGE_PARAM_PREFIX, GENAI_ENABLED` (+ `MODEL_REFRESH_STATE_MACHINE_ARN`,
+  `DATABRICKS_HOST` with the data platform; `DATABRICKS_CLIENT_ID` via `-DatabricksClientId`);
+  staging/prod also `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY`. Optional `SMOKE_BASE_URL`,
+  `SMOKE_CHECK_LOGIN`, `CHANGE_TICKET_PATTERN`.
+- **Repository variables** (`github_repository_variables`): `AWS_REGION`, `TF_PLAN_ROLE_ARN_<ENV>`
+  (+ `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` with the data platform).
 
 ```powershell
 .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment dev
 .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment staging -ReviewerTeams <ey-leads> `
   -SourceEcrReadRoleArn arn:aws:iam::<dev-acct>:role/mmm-dev-gha-ecr-read -SourceEcrRegistry <dev-acct>.dkr.ecr.<region>.amazonaws.com
 .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment prod -ReviewerTeams <wbd-approvers> `
+  -ModelApproverTeams <wbd-model-approvers> `
   -SourceEcrReadRoleArn arn:aws:iam::<stg-acct>:role/mmm-stg-gha-ecr-read -SourceEcrRegistry <stg-acct>.dkr.ecr.<region>.amazonaws.com
 ```
 
@@ -316,27 +269,27 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 9. Order of work once the values arrive
 
-1. Fix defects D1–D4 (section 5.1); decide which gaps in 5.2/5.3 to build.
+1. Run the remaining checks (5.1) and commit the v2 changes (when the user asks).
 2. Fill dev values (section 6) – `terraform.tfvars`, `infra/bootstrap/dev.tfvars`, `backend.tf`.
-3. `aws configure sso` for dev (`docs/02`); check `aws sts get-caller-identity`.
-4. Bootstrap state: `cd infra/bootstrap; terraform init; terraform apply -var-file=dev.tfvars`; copy the bucket and `state_kms_key_arn` into `infra/environments/dev/backend.tf` and `terraform.tfvars`.
-5. Make sure the ACM certificates are ISSUED.
-6. First apply of dev from the laptop (`infra/environments/dev`: `terraform init`, `plan -out`, `apply`). Confirm the SNS email subscriptions.
-7. Give WBD DNS the records from `terraform output dns_records_for_wbd`.
-8. `setup-github.ps1` for dev → from now on Terraform runs from GitHub Actions.
-9. DB bootstrap (section 7) to fill `rds/migrate`, `rds/proxy`, `api/db`.
-10. When the app teams merge `apps/*`: CI builds `sha-<7>` → `deploy.yml` deploys to dev (migration, update, smoke, rollback on failure).
-11. Run each step's "Validate" section in `infra/environments/dev/README.md` (Steps 3–11).
-12. Repeat 2–9 for staging (tag `vX.Y.Z-rcN`), then prod (tag `vX.Y.Z` with change ticket) – `infra/environments/staging|prod/README.md`.
-13. Step 13: data platform values → `enable_data_platform = true` → validate (`docs/10`).
-14. Release 1 gate: `docs/11` (pen test, restore test, failover, performance, UAT, sign-offs).
-15. Step 14 only after WBD approves Release 2: GenAI values → `enable_genai = true` → `GENAI_ENABLED=true` (`docs/12`).
-16. Step 15: KT sessions and handover checklist (`docs/13`).
+3. `aws configure sso` for dev (`docs/02`); `aws sts get-caller-identity`.
+4. Bootstrap state; copy bucket and `state_kms_key_arn` into `backend.tf` / tfvars.
+5. ACM certificate ISSUED in the workload region; Okta SAML app metadata URL from WBD.
+6. First apply of dev from the laptop. Confirm the SNS email subscriptions.
+7. Give WBD DNS `dns_records_for_wbd` and WBD Okta `okta_app_settings`.
+8. `setup-github.ps1` for dev → Terraform runs from GitHub Actions from now on.
+9. DB bootstrap (section 7).
+10. When the app teams merge `apps/*`: CI builds `sha-<7>` → `deploy.yml` deploys to dev.
+11. Run the "Validate" sections in `infra/environments/dev/README.md`.
+12. Staging (tag `vX.Y.Z-rcN`), then prod (tag `vX.Y.Z` with change ticket).
+13. Data platform values → `enable_data_platform = true` → validate (`docs/10`).
+14. Release 1 gate (`docs/11`); Release 2 GenAI only after WBD approval (`docs/12`); handover (`docs/13`).
 
 ---
 
-## 10. Session history (for context)
+## 10. Session history
 
-1. Earlier sessions (lost): Steps 0–13 implemented; pushed to GitHub as commits `52369fa` (Steps 0–13) and `848dab8` (CI fixes).
-2. 4 Nov 2026: tools reinstalled; Release 1 gate pack (`docs/11`); Step 14 (GenAI) and Step 15 (handover) implemented and validated offline; secret-scan script now skips local caches; reviewed against `devops_plan_1.txt`, the docx and the xlsx (sections 5.2–5.3); pushed commit `211f89a`; this file created.
-3. The user chose not to fix the gaps yet (to be done when real values arrive).
+1. Earlier sessions: v1 Steps 0–15 implemented and pushed (`52369fa`, `848dab8`, `211f89a`).
+2. 4 Nov 2026: Release 1 gate pack, GenAI, handover, reviews; this file created.
+3. 5 Nov 2026: v2 requirement (`wbd_Presentation.pptx`) reviewed, plan and `_2` documents written,
+   then v2 implemented: services removed / added as listed in 1.2 and 4, D1–D4 fixed, docs rewritten,
+   offline validation passed. Not committed.

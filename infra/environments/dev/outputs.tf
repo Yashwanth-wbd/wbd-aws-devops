@@ -46,7 +46,7 @@ output "security_group_ids" {
 }
 
 output "nat_public_ips" {
-  description = "NAT egress IPs."
+  description = "NAT egress IPs (give these to vendors / Okta admins who allow-list by IP)."
   value       = module.network.nat_public_ips
 }
 
@@ -73,53 +73,46 @@ output "ecr_repository_urls" {
 }
 
 output "bucket_names" {
-  description = "S3 bucket names (data, frontend and logs)."
+  description = "S3 bucket names (data and logs)."
   value       = merge({ for k, b in module.buckets : k => b.bucket_name }, { logs = module.log_bucket.bucket_name })
 }
 
-output "rds" {
+output "aurora" {
   description = "Database endpoints and secrets (no passwords)."
   value = {
-    proxy_endpoint         = module.rds.proxy_endpoint
-    proxy_resource_id      = module.rds.proxy_resource_id
-    instance_identifier    = module.rds.db_instance_identifier
-    db_name                = module.rds.db_name
-    master_user_secret_arn = module.rds.master_user_secret_arn
+    cluster_identifier     = module.aurora.cluster_identifier
+    writer_endpoint        = module.aurora.writer_endpoint
+    proxy_endpoint         = module.aurora.proxy_endpoint
+    proxy_resource_id      = module.aurora.proxy_resource_id
+    db_name                = module.aurora.db_name
+    master_user_secret_arn = module.aurora.master_user_secret_arn
   }
 }
 
-output "redis_primary_endpoint" {
-  description = "ElastiCache primary endpoint (TLS)."
-  value       = module.elasticache.primary_endpoint
-}
-
-output "sqs" {
-  description = "Job queue and DLQ."
-  value = {
-    queue_url = module.sqs.queue_url
-    dlq_url   = module.sqs.dlq_url
-  }
-}
-
-# ------------------------------------------------------------------ Step 7 - ECS
+# ------------------------------------------------------------------ Step 7 - ECS and optimization
 output "ecs" {
   description = "Cluster, services, task families and task roles."
   value = {
     cluster  = module.ecs_cluster.cluster_name
-    services = [module.svc_api.service_name, module.svc_whatif.service_name, module.svc_optimizer.service_name]
+    services = [module.svc_api.service_name, module.svc_ui.service_name]
     task_roles = {
-      api       = module.svc_api.task_role_arn
-      whatif    = module.svc_whatif.task_role_arn
-      optimizer = module.svc_optimizer.task_role_arn
-      migrate   = module.task_migrate.task_role_arn
+      api     = module.svc_api.task_role_arn
+      ui      = module.svc_ui.task_role_arn
+      migrate = module.task_migrate.task_role_arn
     }
     migrate_task_family = module.task_migrate.task_definition_family
   }
 }
 
-output "alb_dns_name" {
-  description = "ALB DNS name - point the origin hostname of alb_certificate_arn here (CNAME); CloudFront uses it in Step 8."
-  value       = module.alb.alb_dns_name
+output "optimization" {
+  description = "Optimization state machine, SageMaker role, image pointers and results publisher."
+  value = {
+    state_machine_arn = module.optimization_sfn.state_machine_arn
+    sagemaker_role    = module.sagemaker_optimization.role_arn
+    image_parameters  = { for k, p in aws_ssm_parameter.sagemaker_image : k => p.name }
+    publisher         = module.publisher.function_name
+    publisher_alias   = module.publisher.alias_arn
+  }
 }
 
 output "platform_check_run_command" {
@@ -128,50 +121,43 @@ output "platform_check_run_command" {
     "aws ecs run-task --cluster ${module.ecs_cluster.cluster_name}",
     "--task-definition ${module.task_platform_check[0].task_definition_family}",
     "--launch-type FARGATE",
-    "--network-configuration \"awsvpcConfiguration={subnets=[${join(",", module.network.private_app_subnet_ids)}],securityGroups=[${module.network.security_group_ids["workers"]},${module.network.security_group_ids["data_clients"]}],assignPublicIp=DISABLED}\"",
+    "--network-configuration \"awsvpcConfiguration={subnets=[${join(",", module.network.private_app_subnet_ids)}],securityGroups=[${module.network.security_group_ids["tasks"]},${module.network.security_group_ids["data_clients"]}],assignPublicIp=DISABLED}\"",
   ]) : null
 }
 
-# On-demand tasks get their security groups from run-task; bootstrap adds "workers" for NAT (public image, PyPI).
+# On-demand tasks get their security groups from run-task; bootstrap adds "tasks" for NAT (public image, PyPI).
 output "db_bootstrap_run_command" {
   description = "Runs the one-time DB bootstrap (only while enable_db_bootstrap = true)."
   value = var.enable_db_bootstrap ? join(" ", [
     "aws ecs run-task --cluster ${module.ecs_cluster.cluster_name}",
     "--task-definition ${module.task_migrate.task_definition_family}",
     "--launch-type FARGATE",
-    "--network-configuration \"awsvpcConfiguration={subnets=[${join(",", module.network.private_app_subnet_ids)}],securityGroups=[${module.network.security_group_ids["workers"]},${module.network.security_group_ids["data_clients"]}],assignPublicIp=DISABLED}\"",
+    "--network-configuration \"awsvpcConfiguration={subnets=[${join(",", module.network.private_app_subnet_ids)}],securityGroups=[${module.network.security_group_ids["tasks"]},${module.network.security_group_ids["data_clients"]}],assignPublicIp=DISABLED}\"",
   ]) : null
 }
 
-# ------------------------------------------------------------------ Step 8 - Edge
-output "edge" {
-  description = "CloudFront, WAF and frontend release pointer."
+# ------------------------------------------------------------------ Step 8 - Front door and sign-in
+output "front_door" {
+  description = "App URL, ALB, WAF and Cognito values."
   value = {
-    app_url                  = module.edge.app_url
-    distribution_id          = module.edge.distribution_id
-    distribution_domain_name = module.edge.distribution_domain_name
-    web_acl_arn              = module.edge.web_acl_arn
-    waf_log_group            = module.edge.waf_log_group_name
-    frontend_kvs_arn         = module.edge.frontend_kvs_arn
+    app_url       = local.app_url
+    alb_dns_name  = module.alb.alb_dns_name
+    web_acl_arn   = module.waf.web_acl_arn
+    waf_log_group = module.waf.log_group_name
+    user_pool_id  = module.cognito.user_pool_id
+    client_id     = module.cognito.client_id
+    logout_url    = module.cognito.logout_url
   }
 }
 
 output "dns_records_for_wbd" {
-  description = "CNAME records WBD DNS must create (Route 53 is out of scope for now)."
-  value = merge(
-    { for a in var.cloudfront_aliases : a => module.edge.distribution_domain_name },
-    { (var.alb_origin_domain_name) = module.alb.alb_dns_name },
-  )
+  description = "CNAME WBD DNS must create when Route 53 is not used (route53_zone_id = null)."
+  value       = var.route53_zone_id == null ? { (var.app_domain_name) = module.alb.alb_dns_name } : {}
 }
 
 output "okta_app_settings" {
-  description = "Values WBD enters in the Okta app of this environment (docs/04)."
-  value = {
-    sign_in_redirect_uri  = "${module.edge.app_url}/login/callback"
-    sign_out_redirect_uri = module.edge.app_url
-    trusted_origin_cors   = module.edge.app_url
-    grant_type            = "Authorization Code with PKCE (no client secret)"
-  }
+  description = "Values WBD enters in the Okta SAML app of this environment (docs/04)."
+  value       = module.cognito.okta_app_settings
 }
 
 # ------------------------------------------------------------------ Step 9 - Monitoring and logging
@@ -180,7 +166,7 @@ output "monitoring" {
   value = {
     alert_topic_arn     = module.monitoring.alert_topic_arn
     dashboard           = module.monitoring.dashboard_name
-    alarms              = module.monitoring.alarm_names
+    alarms              = concat(module.monitoring.alarm_names, [module.optimization_sfn.alarm_name, module.publisher.alarm_name])
     event_rules         = module.monitoring.event_rule_names
     splunk_stream       = module.log_shipping.delivery_stream_name
     splunk_log_groups   = module.log_shipping.shipped_log_groups
@@ -193,27 +179,26 @@ output "github_environment_variables" {
   description = "Values to set as GitHub Environment variables for this environment (gh variable set ... --env <env>)."
   value = merge(
     {
-      AWS_REGION                 = var.aws_region
-      TF_PLAN_ROLE_ARN           = module.iam_oidc.role_arns["plan"]
-      TF_APPLY_ROLE_ARN          = module.iam_oidc.role_arns["apply"]
-      AWS_DEPLOY_ROLE_ARN        = module.iam_oidc.role_arns["deploy"]
-      ECR_PUSH_ROLE_ARN          = module.iam_oidc.role_arns["ecr_push"]
-      APP_SUBNET_IDS             = join(",", module.network.private_app_subnet_ids)
-      DATA_CLIENTS_SG_ID         = module.network.security_group_ids["data_clients"]
-      ECR_REGISTRY               = module.ecr.registry
-      FRONTEND_BUCKET            = module.buckets["frontend"].bucket_name
-      ECS_CLUSTER                = module.ecs_cluster.cluster_name
-      APP_URL                    = module.edge.app_url
-      CLOUDFRONT_DISTRIBUTION_ID = module.edge.distribution_id
-      FRONTEND_KVS_ARN           = module.edge.frontend_kvs_arn
-      # Step 14: deploy.yml rolls out genai-gateway only when "true"
-      GENAI_ENABLED = tostring(var.enable_genai)
+      AWS_REGION                     = var.aws_region
+      TF_PLAN_ROLE_ARN               = module.iam_oidc.role_arns["plan"]
+      TF_APPLY_ROLE_ARN              = module.iam_oidc.role_arns["apply"]
+      AWS_DEPLOY_ROLE_ARN            = module.iam_oidc.role_arns["deploy"]
+      ECR_PUSH_ROLE_ARN              = module.iam_oidc.role_arns["ecr_push"]
+      APP_SUBNET_IDS                 = join(",", module.network.private_app_subnet_ids)
+      DATA_CLIENTS_SG_ID             = module.network.security_group_ids["data_clients"]
+      ECR_REGISTRY                   = module.ecr.registry
+      ECS_CLUSTER                    = module.ecs_cluster.cluster_name
+      APP_URL                        = local.app_url
+      AURORA_CLUSTER_ID              = module.aurora.cluster_identifier
+      PUBLISHER_FUNCTION             = module.publisher.function_name
+      OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
+      # deploy.yml writes the SageMaker image URIs here
+      SAGEMAKER_IMAGE_PARAM_PREFIX = "/mmm/${local.env_short}/images"
     },
-    # Step 13: data.yml
     var.enable_data_platform ? {
-      MWAA_BUCKET      = module.buckets["mwaa"].bucket_name
-      MWAA_ENVIRONMENT = module.mwaa[0].environment_name
-      QUALITY_BUCKET   = module.buckets["data-quality"].bucket_name
+      MODEL_REFRESH_STATE_MACHINE_ARN = module.refresh_sfn[0].state_machine_arn
+      # databricks.yml (bundle deploy); DATABRICKS_CLIENT_ID is set by setup-github.ps1 -DatabricksClientId
+      DATABRICKS_HOST = var.databricks_host
     } : {},
   )
 }
@@ -228,10 +213,9 @@ output "github_repository_variables" {
       "TF_PLAN_ROLE_ARN_${upper(var.environment)}" = module.iam_oidc.role_arns["plan"]
     },
     var.enable_data_platform ? {
-      "DATABRICKS_HOST_${upper(var.environment)}"              = var.databricks_host
-      "DATABRICKS_EVAL_CLIENT_ID_${upper(var.environment)}"    = var.databricks_eval_client_id
-      "DATABRICKS_PROMOTE_CLIENT_ID_${upper(var.environment)}" = var.databricks_promote_client_id
-      "MODEL_CATALOG_${upper(var.environment)}"                = local.model_catalog
+      "MODEL_EVAL_ROLE_ARN_${upper(var.environment)}"    = module.iam_oidc.role_arns["model_eval"]
+      "MODEL_APPROVE_ROLE_ARN_${upper(var.environment)}" = module.iam_oidc.role_arns["model_approve"]
+      "MODELS_BUCKET_${upper(var.environment)}"          = module.buckets["models"].bucket_name
     } : {},
   )
 }
@@ -245,49 +229,42 @@ output "backup" {
     plan_id         = module.backup.plan_id
     backup_role_arn = module.backup.backup_role_arn
     selection_tag   = "${module.backup.selection_tag}=true"
-    backed_up       = concat(["rds:${module.rds.db_instance_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}"])
+    backed_up       = concat(["aurora:${module.aurora.cluster_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}"])
   }
 }
 
-# ------------------------------------------------------------------ Step 13 - Data-team platform
+# ------------------------------------------------------------------ Step 13 - Data-team platform and model refresh
 output "data_platform" {
-  description = "MWAA, buckets, per-BU keys, trigger and Databricks values (null while enable_data_platform = false)."
+  description = "Buckets, per-BU keys, Databricks access, model refresh and registry values (null while enable_data_platform = false)."
   value = var.enable_data_platform ? {
-    mwaa_environment      = module.mwaa[0].environment_name
-    airflow_ui            = module.mwaa[0].webserver_url
-    mwaa_execution_role   = module.mwaa[0].execution_role_arn
-    mwaa_bucket           = module.buckets["mwaa"].bucket_name
-    landing_bucket        = module.buckets["landing"].bucket_name
-    quality_bucket        = module.buckets["data-quality"].bucket_name
-    business_unit_keys    = local.bu_key_arns
-    trigger_function      = module.data_trigger[0].function_name
-    trigger_log_group     = module.data_trigger[0].log_group_name
-    trigger_dlq_url       = module.data_trigger[0].dlq_url
-    uc_role_arn           = module.databricks_access[0].uc_role_arn
-    uc_external_id        = module.databricks_access[0].uc_external_id
-    workspace_endpoint_id = module.databricks_access[0].workspace_endpoint_id
-    model_catalog         = local.model_catalog
-    airflow_connection    = module.secrets.secret_names["airflow/connections/databricks_default"]
+    landing_bucket         = module.buckets["landing"].bucket_name
+    lakehouse_bucket       = module.buckets["lakehouse"].bucket_name
+    training_data_bucket   = module.buckets["training-data"].bucket_name
+    business_unit_keys     = local.bu_key_arns
+    uc_role_arn            = module.databricks_access[0].uc_role_arn
+    uc_external_id         = module.databricks_access[0].uc_external_id
+    workspace_endpoint_id  = module.databricks_access[0].workspace_endpoint_id
+    databricks_connection  = aws_cloudwatch_event_connection.databricks[0].name
+    refresh_state_machine  = module.refresh_sfn[0].state_machine_arn
+    refresh_schedules      = [for s in aws_scheduler_schedule.refresh : s.name]
+    refresh_event_rule     = aws_cloudwatch_event_rule.refresh_on_demand[0].name
+    training_role          = module.sagemaker_training[0].role_arn
+    model_package_groups   = module.sagemaker_training[0].model_package_group_names
+    training_image_pointer = aws_ssm_parameter.sagemaker_image["training"].name
   } : null
 }
 
 # ------------------------------------------------------------------ Step 14 - Release 2 GenAI
 output "genai" {
-  description = "GenAI gateway, guardrail, endpoint, logging and monitoring values (null while enable_genai = false)."
+  description = "LLM gateway and guardrail values (null while enable_genai = false)."
   value = var.enable_genai ? {
-    gateway_service       = module.svc_genai[0].service_name
-    gateway_url           = local.genai_gateway_url
-    gateway_task_role     = module.svc_genai[0].task_role_arn
-    gateway_log_group     = module.svc_genai[0].log_group_name
-    model_ids             = var.genai_approved_model_ids
-    guardrail_id          = module.bedrock[0].guardrail_id
-    guardrail_version     = module.bedrock[0].guardrail_version
-    bedrock_endpoint_id   = module.bedrock[0].vpc_endpoint_id
-    invocation_log_bucket = module.bedrock[0].invocation_log_bucket
-    invocation_log_group  = module.bedrock[0].invocation_log_group
-    dashboard             = module.bedrock[0].dashboard_name
-    alarms                = module.bedrock[0].alarm_names
-    budget                = module.bedrock[0].budget_name
-    parameters            = { for k, p in aws_ssm_parameter.genai : k => p.name }
+    gateway_url       = module.llm_gateway[0].invoke_url
+    rest_api_id       = module.llm_gateway[0].rest_api_id
+    proxy_function    = module.llm_gateway[0].proxy_function_name
+    log_groups        = module.llm_gateway[0].log_group_names
+    alarms            = concat(module.llm_gateway[0].alarm_names, [module.guardrails[0].alarm_name])
+    guardrail_id      = module.guardrails[0].guardrail_id
+    guardrail_version = module.guardrails[0].guardrail_version
+    provider_secrets  = [for p in keys(var.llm_providers) : module.secrets.secret_names["llm/${p}"]]
   } : null
 }

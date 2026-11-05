@@ -1,235 +1,253 @@
 # 10 – Data platform and model governance (Step 13)
 
-How data gets from the landing bucket into a trained model, and how a model reaches the
-optimizer. DevOps owns the AWS side, the Airflow DAG wrapper and the pipelines. The data team
-owns the Databricks jobs (transforms, Great Expectations checks, training) and the DAG logic
-they add later.
+How a business unit moves from landing-zone data to a trained model in the SageMaker Model Registry,
+and how an approved model’s response curves reach the optimizer. DevOps owns the AWS plumbing,
+Step Functions, schedules, and governance pipelines. The data team owns the Databricks Asset Bundle
+(`data/databricks/`) and the refresh job logic.
 
-Everything here is off until `enable_data_platform = true` in the environment's tfvars.
+Everything here is off until `enable_data_platform = true` in the environment’s tfvars.
 
 ## 1. Flow
 
 ```mermaid
 flowchart LR
-  feed[Source feed] -->|PutObject with BU key| land[(S3 landing<br/>&lt;bu&gt;/...)]
-  ondemand[scripts/trigger-ondemand.sh<br/>or API] -->|mmm.ondemand event| eb
-  land -->|Object Created| eb[EventBridge]
-  eb -->|retry 10x / 1 h, then DLQ| fn[Lambda data-trigger<br/>in VPC]
-  fn -->|InvokeRestApi POST dagRuns<br/>dag_run_id = hash| mwaa[MWAA mmm_ingest]
-  mwaa --> t[Databricks transform] --> q[data_quality] --> r[retrain]
-  r -->|register version, alias candidate| uc[(Unity Catalog<br/>MLflow registry)]
-  mwaa -->|run manifest| res[(S3 results/run-manifests)]
-  gov[model-governance.yml] -->|thresholds pass + WBD approval| uc
-  uc -->|alias production| ecs[ECS workers]
+  feed[Source feed] -->|PutObject under BU key| land[(S3 landing<br/>&lt;bu&gt;/...)]
+  sched[EventBridge Scheduler<br/>per BU] --> sfn
+  ondemand[scripts/trigger-model-refresh.sh<br/>mmm.refresh event] --> sfn
+  sfn[Step Functions<br/>mmm-&lt;env&gt;-model-refresh]
+  sfn -->|HTTP run-now| dbx[Databricks refresh job]
+  dbx -->|snapshot| train[(S3 training-data<br/>&lt;bu&gt;/&lt;refresh_id&gt;/)]
+  sfn --> sm_train[SageMaker training]
+  sm_train --> sm_eval[SageMaker evaluate]
+  sm_eval -->|evaluation.json + curves/| models[(S3 models<br/>evaluation/...)]
+  sm_eval --> reg[(SageMaker Model Registry<br/>PendingManualApproval)]
+  gov[model-governance.yml] -->|thresholds + WBD approval| reg
+  gov -->|copy curves| curves[(S3 models/curves/&lt;bu&gt;/)]
+  curves --> opt[SageMaker optimizer<br/>Step Functions optimization]
 ```
 
 | Piece | Where | Name (dev) |
 |---|---|---|
-| MWAA environment (Airflow 2.10.3, private web server) | `infra/modules/mwaa` | `mmm-dev-airflow` |
-| DAG bucket (`dags/`, `requirements.txt`, `release.json`) | buckets `mwaa` | `wbd-mmm-dev-mwaa-use1` |
-| Data-quality suites and results | buckets `data-quality` | `wbd-mmm-dev-data-quality-use1` |
-| Trigger Lambda, rules, DLQ, alarms | `infra/modules/data-trigger` | `mmm-dev-data-trigger`, `mmm-dev-data-trigger-dlq` |
-| Unity Catalog IAM role, PrivateLink | `infra/modules/databricks-access` | `mmm-dev-databricks-uc` |
-| Per-business-unit KMS keys | `kms` module | `alias/mmm-dev-s3-streaming`, … |
-| DAG, manifest schema, suites, thresholds | `data/` | – |
-| Pipelines | `.github/workflows/data.yml`, `model-governance.yml` | – |
+| Unity Catalog IAM role, optional PrivateLink | `infra/modules/databricks-access` | `mmm-dev-databricks-uc` |
+| EventBridge connection (Databricks OAuth) | `infra/environments/<env>/data.tf` | `mmm-dev-databricks` |
+| Model-refresh state machine | `infra/modules/step-functions` | `mmm-dev-model-refresh` |
+| Schedules (one per BU) | `data.tf` | `mmm-dev-refresh-<bu>` in group `mmm-dev-model-refresh` |
+| On-demand rule | `data.tf` | `mmm-dev-model-refresh-on-demand` |
+| SageMaker training role and model package groups | `infra/modules/sagemaker` | `mmm-dev-training`, groups `mmm-dev-<bu>` |
+| Thresholds and bundle hook | `data/` | `model-thresholds.yaml`, `databricks/` (data team) |
+| Pipelines | `.github/workflows/databricks.yml`, `model-governance.yml` | – |
 
-## 2. Trigger: exactly one run per file or request
+## 2. Triggers
 
-* **S3**: an `Object Created` event under `<business_unit>/` in the landing bucket. Other
-  prefixes and folder markers are ignored.
-* **On demand**: an EventBridge event with source `mmm.ondemand` and detail-type
-  `Data refresh requested`. Either run `scripts/trigger-ondemand.sh <env> <bu|all> "<reason>"`
-  or have the API send the event. The detail is `{business_unit, request_id, requested_by, reason}`.
-* **Idempotency**: the Lambda names the Airflow run deterministically:
-  `s3__sha256(bucket|key|etag)[:32]` or `ondemand__sha256(request_id)[:32]`. If EventBridge
-  delivers the event again, or the Lambda retries, Airflow answers 409 and the Lambda logs
-  `"result": "duplicate"`. Uploading the same object again with new content changes the ETag,
-  so it starts a new run.
-* **Failures**: EventBridge retries for an hour (10 attempts), and the Lambda's own async retries
-  apply too. Events that still fail land in `mmm-<env>-data-trigger-dlq`. Two alarms go to the
-  alert topic: `mmm-<env>-data-trigger-errors` and `mmm-<env>-data-trigger-dlq-not-empty`.
-  After the cause is fixed, check the DLQ message and send the event again: re-upload the
-  object, or re-run `trigger-ondemand.sh`.
-* **Logs**: `/aws/lambda/mmm-<env>-data-trigger` (JSON lines with `result`, `dag_run_id`).
-  They are shipped to Splunk like the other log groups.
+* **Schedule**: EventBridge Scheduler runs `mmm-<env_short>-refresh-<business_unit>` in group
+  `mmm-<env_short>-model-refresh` when `enable_model_refresh_schedule = true`. Expression and time
+  zone come from `model_refresh_schedule` and `model_refresh_timezone` (defaults in tfvars:
+  `cron(0 6 ? * MON *)`, `America/New_York`).
+* **On demand**: EventBridge event with source `mmm.refresh`, detail-type `Model Refresh Requested`,
+  and detail `{business_unit, requested_by, reason}`. Run
+  `scripts/trigger-model-refresh.sh <env> <bu|all> [reason]` or send the same event from an approved
+  caller (for example the API). For `all`, the script discovers business units from the schedule
+  group. An unknown `business_unit` matches no rule and starts nothing.
+* **Idempotency**: each execution gets a new `refresh_id` (UUID in the `Init` state). Re-running the
+  trigger starts a new refresh; there is no duplicate suppression on the event itself.
+* **Logs**: state machine log group `/aws/states/mmm-<env>-model-refresh`, SageMaker training/processing
+  logs, and Splunk groups `sfn-model-refresh`
+  and `sagemaker-train` when shipping is enabled. Alarm: `mmm-<env>-model-refresh-failed`.
 
-## 3. MWAA
+## 3. Model-refresh state machine
 
-* **Access**: the web server is `PRIVATE_ONLY`. It is reachable only from inside the VPC or from
-  the WBD network over the Transit Gateway. To open the UI, an engineer whose SSO permission set
-  allows `airflow:CreateWebLoginToken` on `arn:aws:airflow:<region>:<acct>:role/mmm-<env>-airflow/<Role>`
-  opens the MWAA console and clicks *Open Airflow UI*. WBD adds that permission to its permission
-  sets (docs/02): `User` for the data team, `Admin` for DevOps.
-* **Settings**: the DAG reads `mmm.*` Airflow configuration options set by Terraform
-  (`environment`, `name_prefix`, `landing_bucket`, `results_bucket`, `quality_bucket`,
-  `business_units`, `model_catalog`). No bucket names are hardcoded in the DAG.
-* **Connections**: from Secrets Manager under `mmm/<env>/airflow/connections/<conn_id>`. See §5.
-* **Logs**: the DAG-processing, scheduler, task, webserver and worker logs go to CloudWatch
-  (KMS key `mwaa`). Task and scheduler logs go to Splunk too. Alarm:
-  `mmm-<env>-airflow-scheduler-heartbeat`.
-* **Size** (`data.tf` `mwaa_sizing`): dev and staging `mw1.small` (1–2 and 1–4 workers), prod
-  `mw1.medium` (2–10 workers), 2 schedulers. Creating or updating the environment takes 20–30 min.
-* **Execution role** `mmm-<env>-mwaa-exec`: it can read the DAG bucket, write logs, use its
-  SQS queues, read `mmm/<env>/airflow/*` secrets, and read/write the landing, results and
-  data-quality buckets (with their keys). It has no other access.
+State machine `mmm-<env>-model-refresh` (6 h timeout). Definition: `infra/environments/<env>/data.tf`.
+
+| Step | What it does |
+|---|---|
+| **Init** | Sets `refresh_id` to a new UUID; keeps `business_unit` from the input. |
+| **GetTrainingImage** | Reads SSM `/mmm/<env_short>/images/sagemaker-training` (image digest pointer). |
+| **StartDatabricksJob** | HTTP `POST /api/2.2/jobs/run-now` via EventBridge connection `mmm-<env>-databricks`; job id `databricks_refresh_job_id`; parameters `business_unit` and `snapshot_uri` `s3://<training-data>/<bu>/<refresh_id>/`. |
+| **WaitForDatabricks / GetDatabricksRun** | Polls `runs/get` every 60 s until success or terminal failure. |
+| **TrainModel** | SageMaker training job `mmm-<env>-train-<refresh_id>` on the snapshot; artifacts under `s3://<models>/artifacts/<bu>/`. |
+| **EvaluateModel** | Processing job `mmm-<env>-eval-<refresh_id>` (same image, argument `evaluate`); writes `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json` and `curves/`. |
+| **RegisterModel** | `CreateModelPackage` in group `mmm-<env_short>-<bu>` with status `PendingManualApproval` and `ModelMetrics` pointing at `evaluation.json`. |
+
+Training uses `training_instance_type` and `training_max_runtime_seconds`. Evaluation uses the
+optimizer instance sizing from the environment tfvars (`optimizer_instance_type`,
+`optimizer_max_runtime_seconds`).
 
 ## 4. Databricks setup (WBD Databricks admins, once per environment)
 
-The steps are in order. Steps 1–3 need the AWS side applied first, with
-`enable_data_platform = true`.
+Apply AWS with `enable_data_platform = true` first. Host and job id live in tfvars (`databricks_host`,
+`databricks_refresh_job_id`).
 
-1. **Unity Catalog storage credential, phase 1.** `terraform output data_platform` shows
-   `uc_role_arn`. In Databricks, create a storage credential with that role ARN. Databricks shows
-   an **External ID**; it must equal `databricks_account_id` in the tfvars. If it differs, set the
-   variable to the value shown and apply.
-2. **Phase 2 (self-assume).** Databricks requires the role to trust itself. Set
-   `databricks_self_assume_enabled = true` in the tfvars, open a PR and apply. Then click
+1. **Unity Catalog storage credential, phase 1.** `terraform output data_platform` shows `uc_role_arn`
+   and `uc_external_id` (equals `databricks_account_id`). In Databricks, create a storage credential
+   with that role ARN. The **External ID** must match `databricks_account_id`; if Databricks shows a
+   different value, update the tfvar and apply.
+2. **Phase 2 (self-assume).** Set `databricks_self_assume_enabled = true`, open a PR and apply. Then
    *Validate configuration* on the storage credential.
-3. **External locations** on the same credential: `s3://wbd-mmm-<env>-landing-use1/`,
-   `s3://wbd-mmm-<env>-results-use1/` and `s3://wbd-mmm-<env>-data-quality-use1/`. The role can
-   decrypt with the S3 key and the business-unit keys.
-4. **Catalog** `mmm_<env-short>` (or `databricks_catalog`) with schema `models`. The models are
-   `mmm_<env-short>.models.mmm_<business_unit>`.
-5. **Service principals** (no secrets in GitHub):
-
-   | Service principal | Used by | Unity Catalog grants | GitHub OIDC federation policy subject |
-   |---|---|---|---|
-   | `mmm-<env>-airflow` | MWAA (`databricks_default`) | run the three jobs | – (OAuth secret, §5) |
-   | `mmm-<env>-model-eval` | `model-governance.yml` evaluate job | `USE CATALOG`, `USE SCHEMA`, `EXECUTE` and `APPLY TAG` on the models; read on the experiments | `repo:<org>/<repo>:ref:refs/heads/main` |
-   | `mmm-<env>-model-promote` | promote / rollback job | as eval plus `MANAGE` on the models (to set aliases) | `repo:<org>/<repo>:environment:<env>-model-promotion` |
-
-   Federation policy (account console → service principal → *Credentials & secrets* →
-   *Federation policies*): issuer `https://token.actions.githubusercontent.com`, the subject
-   above, and the audience Databricks proposes for the workspace. Put the application IDs into
-   `databricks_eval_client_id` / `databricks_promote_client_id` and apply. Then run
-   `scripts/setup-github.ps1` so the repository variables are set. The promote principal trusts
-   only the approval environment, so it cannot be used without a WBD approval.
-6. **Jobs** owned by the data team, named `mmm-<env>-transform`, `mmm-<env>-data-quality` and
-   `mmm-<env>-retrain`, are deployed with their own Databricks Asset Bundle. Each receives the job
-   parameters `environment`, `business_unit`, `source_bucket`, `source_key` and `airflow_run_id`.
-   `data_quality` also gets `suites_uri` / `results_uri`, and `retrain` gets `model_catalog` and
-   `register_alias=candidate`. `retrain` must log the metrics named in
-   `data/model-thresholds.yaml` on the MLflow run of the version it registers.
-7. **PrivateLink (optional)**: set `enable_databricks_privatelink = true` and
-   `databricks_privatelink_service_name` (from Databricks for the region). Terraform creates the
-   interface endpoint and a private hosted zone for the workspace host, so MWAA, the Lambda and
-   the ECS workers reach Databricks privately. WBD then registers the endpoint in the Databricks
-   account (*Network connectivity* → *VPC endpoint*) and attaches it to the workspace's private
-   access settings.
+3. **External locations** on that credential: `s3://wbd-mmm-<env>-landing-<region_code>/`,
+   `s3://wbd-mmm-<env>-lakehouse-<region_code>/`, and
+   `s3://wbd-mmm-<env>-training-data-<region_code>/`. The role can decrypt with the shared S3 key and
+   per-business-unit keys (`business_unit_keys` in the `data_platform` output).
+4. **Refresh job** owned by the data team in `data/databricks/` (Asset Bundle). It must accept
+   `business_unit` and `snapshot_uri` and write the training snapshot to that prefix. After deploy,
+   set `databricks_refresh_job_id` in tfvars to the job id.
+5. **Service principal for the state machine.** Create a workspace service principal; put its
+   application (client) id in `databricks_sp_client_id`. Its OAuth client secret is **not** in Secrets
+   Manager: DevOps sets it on the EventBridge connection (§5).
+6. **Service principal for bundle deploy.** Federation policy subject
+   `repo:<org>/<repo>:environment:<env>`, audience as Databricks proposes. Pass the application id to
+   `scripts/setup-github.ps1 -DatabricksClientId …` so the GitHub Environment gets `DATABRICKS_CLIENT_ID`.
+   `DATABRICKS_HOST` comes from Terraform (`github_environment_variables` output).
+7. **PrivateLink (optional):** `enable_databricks_privatelink = true` and
+   `databricks_privatelink_service_name`. Terraform creates the interface endpoint and private DNS for
+   the workspace host so the state machine HTTP tasks (and other VPC clients) reach Databricks
+   privately. WBD registers the endpoint in the Databricks account and attaches it to the workspace.
 
 ## 5. Secrets and settings
 
 | What | Where | Filled by |
 |---|---|---|
-| Airflow → Databricks connection | Secrets Manager `mmm/<env>/airflow/connections/databricks_default` | WBD Databricks admin, once |
-| `mmm_databricks_enabled` | Airflow Variable (UI → Admin → Variables) | Data team, after §4 is done |
-| GitHub → Databricks | none: OIDC federation, client IDs are repository variables | Terraform outputs + `setup-github.ps1` |
-| ECS workers → MLflow | `DATABRICKS_HOST` + SP token from `mmm/<env>/databricks/sp` (Step 5; injected once `databricks_token_available = true`); `MLFLOW_TRACKING_URI=databricks`, `MLFLOW_REGISTRY_URI=databricks-uc`, `MODEL_CATALOG`, `MODEL_ALIAS=production` | Terraform |
+| Databricks OAuth for the state machine | EventBridge connection `mmm-<env>-databricks` (secret managed by EventBridge) | DevOps out of band after apply ([docs/05](05-secrets-and-config.md)) |
+| Provider keys (not used here) | – | – |
+| GitHub → Databricks bundle deploy | Environment vars `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID` | Terraform + `setup-github.ps1` |
+| GitHub → AWS governance | Repository vars `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` | Terraform `github_repository_variables` output |
 
-Connection value (JSON; the client secret of `mmm-<env>-airflow`):
+Set the connection secret once (placeholder `set-out-of-band` is ignored on later applies):
 
 ```powershell
-$v = @{ conn_type = 'databricks'; host = 'https://dbc-00000000-0000.cloud.databricks.com'
-        login = '<sp-application-id>'; password = '<sp-oauth-secret>'
-        extra = @{ service_principal_oauth = $true } } | ConvertTo-Json -Compress
-aws secretsmanager put-secret-value --secret-id mmm/dev/airflow/connections/databricks_default --secret-string $v --profile mmm-dev-devops
+$env:AWS_PROFILE = "mmm-dev-devops"
+aws events update-connection --name mmm-dev-databricks --authorization-type OAUTH_CLIENT_CREDENTIALS `
+  --auth-parameters "OAuthParameters={ClientParameters={ClientID=<databricks_sp_client_id>,ClientSecret=<oauth-secret>},AuthorizationEndpoint=<databricks_host>/oidc/v1/token,HttpMethod=POST,OAuthHttpParameters={BodyParameters=[{Key=grant_type,Value=client_credentials},{Key=scope,Value=all-apis}]}}"
 ```
 
-Until `mmm_databricks_enabled` is `true`, the `databricks_enabled` task skips the three
-Databricks tasks. That lets the trigger → MWAA → manifest path be tested without Databricks.
+SSM `/mmm/<env>/databricks/host` mirrors `databricks_host` for operators and the bundle pipeline.
 
-## 6. Releasing DAGs (`data.yml`)
+## 6. Releasing Databricks code (`databricks.yml`)
 
 | Event | Result |
 |---|---|
-| PR touching `data/**` | ruff, DAG import test (Airflow 2.10.3 + MWAA constraints), manifest schema tests, thresholds and JSON checks |
-| Merge to `main` | validate, then publish to dev |
-| Tag `data-vX.Y.Z-rcN` | publish to staging (environment `staging`: EY delivery lead approves) |
-| Tag `data-vX.Y.Z` | publish to prod (environment `prod`: WBD approver); refused unless an `-rcN` tag is on the same commit |
+| Push to `main` touching `data/databricks/**` | Validate and deploy bundle target **dev** (skipped if `data/databricks/databricks.yml` is absent) |
+| **workflow_dispatch** | Validate and deploy the chosen target (staging / prod use GitHub Environment approval) |
 
-Publishing runs these steps in order:
-
-1. **`requirements.txt`**: uploaded only if its SHA-256 changed, then `update-environment` with
-   the new object version, and the job waits for `AVAILABLE`. If the update fails, MWAA keeps
-   the previous requirements and the job fails.
-2. **DAGs**: `data/dags` is synced to `s3://<mwaa bucket>/dags/` with `--delete`.
-3. **Quality suites**: `data/quality` is synced to `s3://<quality bucket>/suites/`.
-4. **Release record**: `release.json` (version, commit, actor, run) is written to the bucket
-   and to the job summary.
-
-To roll back, re-run `data.yml` for the previous tag (*Run workflow*, choose the environment),
-or push a revert to `main`. The data team never uploads to MWAA by hand. A pipeline for the
-Databricks bundle is added when the data team provides one.
+Auth is Databricks workload identity federation with GitHub OIDC (no Databricks token in GitHub).
+The data team never deploys jobs by hand in production; DevOps merges bundle changes through this
+workflow. Job parameters and the training/evaluation contract are in [data/README.md](../data/README.md).
 
 ## 7. Model governance (`model-governance.yml`)
 
+Details also in [scripts/README.md](../scripts/README.md) (§7 here).
+
 ```mermaid
 sequenceDiagram
-  participant R as retrain job
-  participant UC as Unity Catalog registry
+  participant SF as model-refresh SFN
+  participant SM as SageMaker Model Registry
   participant G as model-governance (hourly)
   participant A as WBD approver
-  R->>UC: register version N, alias candidate, metrics on run
-  G->>UC: candidate without governance tag?
-  G->>G: compare metrics with data/model-thresholds.yaml
+  SF->>SM: register version N, PendingManualApproval + ModelMetrics
+  G->>SM: PendingManualApproval without governance tag?
+  G->>G: compare evaluation.json with data/model-thresholds.yaml
   alt any metric fails or is missing
-    G->>UC: tag governance_status=failed + checks, remove candidate alias
-    Note over G: warning in run, report artifact; never promoted
+    G->>SM: tag governance_status=failed, status Rejected
+    Note over G: warning in run; never approvable
   else all pass
-    G->>UC: tag governance_status=passed
-    G->>A: start promote run (environment <env>-model-promotion)
+    G->>SM: tag governance_status=passed
+    G->>A: dispatch promote (environment <env>-model-promotion)
     A-->>G: approve (cannot approve own run)
-    G->>UC: alias production -> N, tag previous_production_version
+    G->>SM: status Approved; copy curves to s3://<models>/curves/<bu>/
   end
 ```
 
-* **Thresholds**: `data/model-thresholds.yaml`, per business unit and metric, `{min}` and/or
-  `{max}`. A missing or non-finite metric fails. The file is a placeholder until WBD and EY sign
-  it off. To test locally:
-  `python scripts/model_governance.py evaluate-file --business-unit streaming --metrics m.json`
-  (exit 0 = pass, 2 = fail).
-* **Evidence**: tags on the model version (`governance_status`, `governance_checks`,
-  `governance_evaluated_at`, `governance_run`, `promoted_by`, `promoted_at`, `promotion_run`) and
-  the `model-evaluation-<env>-<run>` artifact, kept 90 days.
-* **Manual runs** (*Actions → model-governance → Run workflow*):
-  * `evaluate`: one business unit or `all`; set a `version` to re-evaluate it.
-  * `promote`: business unit and version. Only `passed` versions can be promoted.
-  * `rollback`: business unit. By default `production` moves back to `previous_production_version`;
-    set a `version` to choose one. It needs the same approval.
-* **Workers** load `models:/<catalog>.models.mmm_<bu>@production`. A new model is picked up at
-  the next model load or worker deploy; no image change is needed.
-* **Environments**: an environment is evaluated only if its `DATABRICKS_HOST_<ENV>` repository
-  variable exists, i.e. its data platform is enabled and `setup-github.ps1` ran.
+* **Thresholds**: `data/model-thresholds.yaml`, per business unit and metric, `{min}` and/or `{max}`.
+  Metrics must appear in `evaluation.json` (flat object). A missing or non-finite value fails. The
+  file is a placeholder until WBD and EY sign it off. Offline checks:
 
-GitHub setup (once per environment, by a repository admin):
+  ```powershell
+  pip install -r scripts/requirements-model-governance.txt
+  python scripts/model_governance.py check-thresholds
+  python scripts/model_governance.py evaluate-file --business-unit streaming --metrics evaluation.json
+  ```
+
+  (`evaluate-file` exit 0 = pass, 2 = fail.)
+
+* **Roles**: hourly/dispatch **evaluate** uses `mmm-<env>-gha-model-eval` (GitHub OIDC, main branch).
+  It may tag and **reject** failing packages only. **promote** and **rollback** run in GitHub
+  Environment `<env>-model-promotion` (WBD model approvers, prevent self-review) with
+  `mmm-<env>-gha-model-approve`: sets **Approved**, copies `evaluation/.../curves/` to
+  `s3://<models bucket>/curves/<bu>/` plus `_model_package.json` (what the optimizer reads).
+
+* **Evidence**: SageMaker tags (`governance_status`, `governance_checks`, `governance_evaluated_at`,
+  `previous_approved_version`, `approved_by`, …) and artifact `model-evaluation-<env>-<run>` (90 days).
+
+* **Manual runs** (*Actions → model-governance → Run workflow*):
+  * `evaluate`: one business unit or `all`; optional `version` to re-evaluate.
+  * `promote`: business unit and version (must be tagged `passed`).
+  * `rollback`: re-publish curves from `previous_approved_version` or `--version`; reject the current
+    approved package (same approval gate).
+
+* **Environments**: evaluate runs only where `MODEL_EVAL_ROLE_ARN_<ENV>` exists (data platform enabled
+  and repository variables set from Terraform).
+
+GitHub setup (once per environment, repository admin):
 
 ```powershell
-.\scripts\setup-github.ps1 -Repo wbd-org/wbd-mmm-platform -Environment prod -ReviewerTeams wbd-release-approvers `
-  -ModelApproverTeams wbd-model-approvers
+.\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment prod -ReviewerTeams wbd-release-approvers `
+  -ModelApproverTeams wbd-model-approvers -DatabricksClientId <bundle-deploy-sp-app-id>
 ```
 
-This creates `prod-model-promotion` (required reviewers, prevent self-review, `main` only) and
-adds the `data-v*` tag policy to `staging` and `prod`.
+This creates `prod-model-promotion` (required reviewers, prevent self-review) and configures staging/prod
+tag policies for app releases (`v*` tags only).
 
 ## 8. Encryption and access per business unit
 
 * The landing bucket policy denies `PutObject` under `<bu>/` unless the object is encrypted with
   `alias/mmm-<env>-s3-<bu>`. Feeds must send
   `--sse aws:kms --sse-kms-key-id <that key ARN>` (`business_unit_keys` in `terraform output data_platform`).
-* Other buckets keep the shared S3 key. Unity Catalog, MWAA and the Lambda are granted only the
-  keys they need.
+* Lakehouse, training-data, and models buckets use the shared S3 KMS key unless a bucket policy says
+  otherwise. Unity Catalog and SageMaker roles receive only the keys they need.
 
-## 9. Troubleshooting
+## 9. Enabling, verification, troubleshooting
+
+### Enabling (per environment: dev → staging → prod)
+
+1. In `infra/environments/<env>/terraform.tfvars`: set `enable_data_platform = true` and WBD values for
+   `databricks_account_id`, `databricks_host`, `databricks_sp_client_id`, `databricks_refresh_job_id`,
+   `training_instance_type`, `training_max_runtime_seconds`, `model_refresh_schedule`,
+   `model_refresh_timezone`, and optionally `enable_model_refresh_schedule`,
+   `databricks_self_assume_enabled`, `enable_databricks_privatelink`,
+   `databricks_privatelink_service_name`. PR → plan → apply (`terraform.yml`).
+2. Complete Databricks §4 (UC phase 2, refresh job deployed via `databricks.yml`, connection secret §5).
+3. Run `scripts/setup-github.ps1` for the environment (model promotion reviewers and
+   `DATABRICKS_CLIENT_ID` when the bundle exists).
+4. Confirm `terraform output -json data_platform` and repository variables
+   `MODEL_*_<ENV>` / `MODELS_BUCKET_<ENV>`.
+
+### Verification commands
+
+```powershell
+$env:AWS_PROFILE = "mmm-dev-devops"
+$dp = terraform output -json data_platform | ConvertFrom-Json
+# Start one refresh (after connection secret and job id are valid)
+scripts/trigger-model-refresh.sh dev streaming "validation"
+aws stepfunctions list-executions --state-machine-arn $dp.refresh_state_machine --max-results 5 `
+  --query "executions[].[name,status,startDate]" --output table
+# Or start directly:
+aws stepfunctions start-execution --state-machine-arn $dp.refresh_state_machine `
+  --input '{"business_unit":"streaming"}'
+# Registry packages for a BU
+aws sagemaker list-model-packages --model-package-group-name "mmm-dev-streaming" `
+  --model-approval-status PendingManualApproval --sort-by CreationTime --sort-order Descending
+```
+
+Governance: `gh workflow run model-governance.yml -f environment=dev -f action=evaluate -f business_unit=streaming`.
+
+### Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| File landed, no DAG run | Lambda log: `ignored` means wrong prefix. Look for errors or messages in the DLQ. Check EventBridge is enabled on the landing bucket (`aws s3api get-bucket-notification-configuration`). |
-| Lambda `AccessDenied` on InvokeRestApi | the role allows only `mmm-<env>-airflow/User`; check `airflow_role_arn` |
-| Lambda times out | its security group allows 443 out; check the NAT route / PrivateLink for the MWAA API |
-| `PutObject` AccessDenied on landing | wrong or missing business-unit KMS key in the upload |
-| Databricks tasks skipped | Airflow Variable `mmm_databricks_enabled` is not `true` |
-| Databricks task `Invalid credentials` | the `databricks_default` secret JSON, or the SP OAuth secret has expired |
-| `requirements.txt` update `UPDATE_FAILED` | MWAA console → *Last update* error; the package conflicts with the constraints file |
-| model-governance `401` | federation policy subject or audience mismatch; compare the subject with §4 step 5 |
-| Promote refused | the version is not tagged `governance_status=passed`; evaluate it first |
+| Refresh never starts | Scheduler `state` DISABLED; on-demand detail `business_unit` must match a configured BU; rule `mmm-<env>-model-refresh-on-demand` enabled |
+| `StartDatabricksJob` auth errors | EventBridge connection secret and `databricks_sp_client_id`; connection name in `data_platform.databricks_connection` |
+| Databricks poll fails or times out | Job id; run in Databricks UI; PrivateLink / NAT if workspace is private |
+| Training or evaluate fails | SageMaker log groups under `/aws/sagemaker/`; image pointer SSM; snapshot prefix exists in training-data |
+| No `evaluation.json` | Processing job output path; training image `evaluate` entrypoint |
+| Governance skipped | `MODEL_EVAL_ROLE_ARN_<ENV>` unset; package already tagged `governance_status` |
+| Promote refused | Tag `governance_status=passed`; version still `PendingManualApproval` |
+| Optimizer uses old curves | Promote copies to `models/curves/<bu>/`; check `_model_package.json` |

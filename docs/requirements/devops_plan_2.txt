@@ -1,0 +1,366 @@
+# PROMPT v2 — Build the WBD MMM AWS Platform (Infra + CI/CD) — Hybrid Lakehouse + MLOps architecture
+
+> **Version 2** of `devops_plan_1.txt`, rewritten for the client architecture in
+> `wbd_Presentation.pptx` (2 slides: "supports auto ML training" and "supports optimization and
+> explainable planning"). Everything not changed by that architecture is carried over from v1.
+> Section A lists what changed; the steps below are the full v2 build.
+>
+> **How to use this file:** give this entire document to an AI coding agent (or follow it yourself).
+> It reproduces the **infrastructure (Terraform, modularized)**, **deployment** and **GitHub Actions
+> CI/CD** for the WBD MMM platform. Implement the steps **in order**; each step has a **Validate**
+> gate — do not proceed until it passes.
+>
+> **Scope:** DevOps only — **do NOT write application, model or data-pipeline code** (the developers
+> own `apps/api`, `apps/ui`; the data scientists own the SageMaker training/optimization code; the data
+> engineers own the Databricks Lakeflow jobs). This prompt builds everything that **provisions,
+> secures, runs and deploys** their work.
+>
+> Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
+>
+> **Implementation status (5 Nov 2026):** all steps are implemented in the repo (not committed yet).
+> Every [ASK]/[ASM] was built with the simpler industry-standard default; the chosen defaults and the
+> differences from this plan are in `PROJECT_CONTEXT_2.md` sections 4a and 6, and the points WBD
+> still has to confirm are in `PROJECT_CONTEXT.md` §5.2 (Q1–Q6). In short: Aurora Serverless v2 +
+> RDS Proxy; Cognito ← Okta SAML at the ALB; no CloudFront/SQS/ElastiCache/MWAA; what-if in the API;
+> run evidence in the `results` bucket; publisher Lambda without DLQ; one LLM proxy Lambda; Databricks
+> via an EventBridge connection and Asset Bundles (no `data-v*` tags); data platform and GenAI built but off.
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+Execute exactly ONE numbered step at a time. Do NOT start the next step until the user explicitly
+confirms the current step is validated.
+
+After completing a step you MUST:
+1. Create only the files/resources for **that single step**.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands**, (c) any Git/AWS inputs to set.
+3. **WAIT** for the user to run the commands and confirm ("validated" / "passed").
+4. Only then begin the next step.
+
+Never batch steps. If a validation fails, fix only the current step. If anything is ambiguous, ask.
+
+---
+
+## A. What changed vs v1 (summary)
+
+| Area | v1 (`devops_plan_1.txt`, built in this repo) | v2 (client architecture) |
+|---|---|---|
+| Front door | CloudFront + WAF (us-east-1) + OAC to S3, `/api/*` → ALB, ALB only from CloudFront | **Route 53 → AWS WAF (regional) → public ALB (HTTPS)**; no CloudFront [ASK] |
+| Frontend | React build in S3, served by CloudFront, KVS release switch | **`mmm-ui` ECS Fargate web container** (React + TypeScript), image in ECR |
+| User login | Okta app per env (OIDC + PKCE) used directly by SPA + API | **Amazon Cognito** user pool per env, **federated to the WBD enterprise IdP** (Okta) [ASK] |
+| API | ECS `mmm-api` (FastAPI) | ECS `mmm-api` (FastAPI) **with LangGraph + QA dashboard** |
+| Database | RDS PostgreSQL instance + RDS Proxy | **Aurora PostgreSQL** cluster (plans, runs, allocations) (+ RDS Proxy for Lambda) [ASK: slide footer still says "RDS PostgreSQL"] |
+| Optimization / what-if | ECS `whatif-worker` + `optimizer-worker`, SQS FIFO + DLQ, backlog autoscaling, scale-in protection | **API → Step Functions (async) → SageMaker job** (Model Summarizer · Optimizer · Simulation) → **S3 outputs** → **Lambda results publisher** → Aurora |
+| Cache | ElastiCache Valkey | **not in the architecture** [ASK] |
+| Job queue | SQS FIFO + DLQ | **Step Functions executions** (idempotent by run id) [ASK: SQS still needed to throttle 50–150 planners?] |
+| Orchestration (data) | MWAA (Airflow) + EventBridge + Lambda trigger | **EventBridge (schedule / manual / app-triggered) → Step Functions** (wait / retry) → **Databricks Lakeflow Jobs** |
+| Data layers | Databricks Bronze/Silver/Gold (dbt), WBD-owned | **Databricks on AWS** (private VPC compute) + **Delta Lake on S3** (Bronze/Silver/Gold), Gold = per-BU modeling tables (adstock & saturation) → **Feature Export** (plans, runs, allocations) |
+| Model training | Databricks + MLflow (training in Databricks) | **SageMaker** training (multi-stage models) from **immutable Parquet in S3**, **evaluation** (baseline → channel lift → title adjustment), **registration** |
+| Model registry | MLflow (Unity Catalog), `production` alias | **SageMaker Model Registry + S3** (approved models + response curves) |
+| GenAI | Bedrock only, private `genai-gateway` ECS service, PrivateLink, approved model only (Release 2) | **LangGraph in the API** → **Amazon API Gateway** → **OpenAI / Anthropic / Google models** + **Amazon Bedrock Guardrails**; Bedrock in the control plane [ASK: external providers = data leaves AWS] |
+| Images in ECR | `mmm/api`, `mmm/optimizer-worker`, `mmm/genai-gateway` | `mmm/api`, `mmm/ui`, `mmm/sagemaker-optimizer`, `mmm/sagemaker-training` [ASM] |
+| Data pipeline CI | `data.yml` uploads DAGs to MWAA | **Databricks Asset Bundles** deploy of Lakeflow jobs (dev → staging → prod) |
+| Model governance CI | `model-governance.yml` moves MLflow alias | SageMaker **model package approval** (PendingManualApproval → Approved) by the named WBD approver |
+
+**Unchanged:** Terraform modules + per-env stacks, GitHub Actions via OIDC, ECR per environment with
+digest promotion, ECS Fargate, ALB, KMS, Secrets Manager + SSM, IAM Identity Center, security groups,
+VPC layout, CloudWatch + CloudTrail, AWS Backup, budgets, naming/tagging, branching and release tags.
+
+---
+
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Build the WBD MMM platform's infrastructure and delivery
+pipeline. The application (UI + API) runs on **Amazon ECS on Fargate**; optimization and model
+training run on **Amazon SageMaker**, orchestrated by **AWS Step Functions**; data engineering runs on
+**Databricks on AWS** with **Delta Lake on S3**.
+
+**Golden rules (apply to every step):**
+1. **Everything is Terraform**, run from GitHub Actions via OIDC. Exceptions: the one-time state bootstrap and the first apply per account (pipeline roles don't exist yet) — run with SSO.
+2. **No secrets in Git, images or Terraform variables.** Runtime secrets live in Secrets Manager / SSM.
+3. **Modularize**: reusable modules in `infra/modules/`, thin stacks in `infra/environments/{dev,staging,prod}/`.
+4. **Build order: bootstrap → Dev → prove it works → Staging (same code) → Prod (same code).**
+5. **Validate after every step.**
+6. **Naming:** `mmm-<env>-<component>` (env = `dev|stg|prd`). **Tags:** `Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component` (+ `CostCenter` if WBD Finance requires it [ASK]).
+7. **SageMaker jobs, Lambda and ECS tasks run inside the VPC** (private subnets, no public IP), with KMS on volumes and outputs.
+
+---
+
+## 1. Final target stack
+
+`Terraform · GitHub Actions (OIDC) · ECR · ECS on Fargate (UI + API) + ALB · Route 53 · AWS WAF
+(regional) · ACM · Amazon Cognito (federated to WBD IdP) · Aurora PostgreSQL (+ RDS Proxy) · S3
+(landing, Delta Lake, training data, models/response curves, outputs, exports, approved WORM, logs) ·
+KMS · Secrets Manager + Parameter Store · AWS Step Functions · Amazon EventBridge (+ Scheduler) ·
+AWS Lambda · Amazon SageMaker (training, processing jobs, Model Registry) · Databricks on AWS
+(Lakeflow Jobs, Unity Catalog, Delta Lake) · Amazon API Gateway (LLM gateway) · Amazon Bedrock
+Guardrails · CloudWatch + CloudTrail (+ Splunk via Firehose [ASK]) · AWS Backup.`
+
+**Prescribed stack (slide footer):** React + TypeScript · Python / FastAPI · scikit-learn / XGBoost /
+LangGraph · SciPy · RDS PostgreSQL + Databricks / S3 · ECS · AWS recommended.
+
+**Two flows (from the slides):**
+- **Auto ML training (slide 1):** scheduled / manual / app-triggered refresh → EventBridge → Step Functions → Databricks Lakeflow Jobs: ingestion from S3 into the Databricks catalog → Bronze (raw) → Silver (cleansed, validated) → Gold (per-BU modeling tables, adstock & saturation) → Feature Export (plans, runs, allocations) → Step Functions publishes **immutable Parquet + metadata** to the S3 training-data bucket → **SageMaker model training** (multi-stage models) → **evaluation** (baseline → channel lift → title adjustment) → **model registration** (approved model versioned) → SageMaker Registry + S3 (approved models + response curves).
+- **Optimization and explainable planning (slide 2):** planner (upload inventory, choose objective, run & compare) → DNS/WAF → ALB → ECS UI → ECS API (FastAPI + LangGraph + QA dashboard) ↔ Aurora (plans, runs, allocations). API → **Step Functions (async execution)** → **SageMaker job for optimization & decision** (Model Summarizer: channel contribution, response curves, baseline, performance metrics · Optimizer: constrained / unconstrained across BUs, titles, periods, mixed units, owned inventory · Simulation: what-if, scenario comparison, logged override), reading the **approved model (SageMaker Registry)** and **approved response curves (S3)** → **S3 outputs (full run evidence)** → **Lambda results publisher** → Aurora. API → **API Gateway** → OpenAI / Anthropic / Google models, with **Bedrock Guardrails**. Sized for **50–150 concurrent planners** in planning seasons.
+
+**Control plane (both slides):** Data lineage & observability · Code repository · Security (RBAC, SSO/MFA) · Amazon Bedrock for GenAI capabilities · Privacy & GenAI guardrails.
+**Security + network:** IAM role assumption · IAM Identity Center · KMS · Secrets Manager · Security groups · VPC routes. **Operations:** CloudWatch metrics · CloudTrail · Terraform · CI/CD.
+
+---
+
+## 2. Prerequisite tools
+
+| Tool | Min version | Purpose |
+| --- | --- | --- |
+| Terraform | ≥ 1.10 (S3 native lock) | IaC |
+| AWS CLI v2 | latest | AWS access |
+| Git, GitHub CLI (`gh`), jq | latest | source control, repo/env variables |
+| tflint, Checkov, Trivy, actionlint | latest | CI security gates |
+| Docker | latest | optional local image builds (CI builds images) |
+| Databricks CLI (bundles) | latest | validate/deploy Lakeflow jobs (Databricks Asset Bundles) |
+| Node.js 22 + uv / Python 3.12 | — | local tests of UI/API/scripts |
+
+Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` if TLS inspection breaks downloads.
+
+---
+
+## 3. Access & accounts to request (ASK the client)
+
+Everything in v1 §3 still applies (accounts `wbd-mmm-dev/stage/prod`, region, CIDRs, Identity Center
+permission sets, GitHub org, DNS + ACM, Splunk, CAB, model-promotion approver). **New for v2:**
+- **Cognito**: confirm Cognito is the app's auth layer and which WBD IdP it federates to (Okta via OIDC or SAML); IdP metadata/client per environment; groups → BU + role claims; MFA enforced at the IdP.
+- **Aurora**: Aurora PostgreSQL provisioned vs Serverless v2; version; RDS Proxy yes/no (slide footer says "RDS PostgreSQL").
+- **Edge**: CloudFront removed on purpose? Public ALB reachable from the internet or only WBD ranges; Shield Advanced needed?
+- **Databricks**: whose workspace (WBD-owned or new in the MMM account), classic compute in a **customer-managed VPC** (which one), PrivateLink (workspace + secure cluster connectivity), Unity Catalog metastore, external locations on our S3 buckets, service principal for Step Functions (OAuth M2M).
+- **SageMaker**: approved instance types and quotas for training and processing jobs (per env), concurrency for 50–150 planners, whether data scientists need SageMaker Studio, network isolation, warm pools.
+- **What-if latency**: target is ~10 s (RFP App. A). A SageMaker job takes minutes to start — confirm how Simulation is served (see Step 9 note).
+- **GenAI**: is Amazon API Gateway a WBD-central LLM gateway or ours; approved providers/models (OpenAI, Anthropic, Google); legal/Responsible-AI approval for **data leaving AWS** to external providers; who holds the provider API keys; Bedrock guardrail policy.
+- **Cache / queue**: confirm ElastiCache and SQS are dropped (live progress and job throttling handled another way).
+
+---
+
+## 4. GitHub branching strategy (unchanged from v1)
+
+Trunk-based: `main` protected (PR, 1–2 reviewers via CODEOWNERS, checks green, no force-push, linear
+history). Merge to `main` → Dev (`sha-<7char>`); tag `vX.Y.Z-rcN` → Staging (EY lead approves); tag
+`vX.Y.Z` → Prod (WBD approver + CAB, change ticket). Data jobs: `data-vX.Y.Z-rcN` / `data-vX.Y.Z`.
+Image tags immutable; release record keeps tag + task-def revision + digest (+ SageMaker image digest).
+
+---
+
+## 5. Repository & folder structure
+
+```
+infra/
+├── bootstrap/                       # state bucket + KMS (+ optional DynamoDB lock)
+├── modules/
+│   ├── network/  kms/  iam-oidc/  permission-boundary/  budgets/        # kept
+│   ├── ecr/  ecs-cluster/  ecs-service/  alb/                           # kept (alb: path routing + Cognito auth)
+│   ├── s3-bucket/  log-bucket/  secrets/  monitoring/  backup/  log-shipping/   # kept
+│   ├── aurora/                      # NEW - replaces rds/
+│   ├── cognito/                     # NEW - user pool, IdP federation, app clients
+│   ├── waf-regional/                # NEW - replaces edge/ (CloudFront + us-east-1 WAF)
+│   ├── step-functions/              # NEW - state machine + role + logs (reused per workflow)
+│   ├── sagemaker/                   # NEW - execution roles, model package groups, security config
+│   ├── lambda-function/             # NEW - results publisher (VPC, DLQ, logs)
+│   ├── llm-gateway/                 # NEW - API Gateway + provider integrations (Release 2)
+│   ├── bedrock-guardrails/          # CHANGED from bedrock/ - guardrail + runtime endpoint only
+│   └── databricks-access/           # kept + Delta Lake external locations
+│   # REMOVED: rds/ elasticache/ sqs/ edge/ mwaa/ data-trigger/ (genai ECS service)
+└── environments/{dev,staging,prod}/
+ecs/{dev,staging,prod}/              # api.json, ui.json, migrate.json
+sagemaker/{dev,staging,prod}/        # job settings per env (instance type, volume, timeout) [ASM]
+.github/workflows/                   # api-ci, ui-ci, sagemaker-image-ci, terraform, deploy, databricks, model-governance, repo-checks
+scripts/  docs/
+```
+
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION
+
+### Step 0 — Prereqs & access
+- Install tools (§2). Configure AWS CLI SSO for dev.
+- **Validate:** `aws sts get-caller-identity` returns dev; `terraform version` ≥ 1.10.
+
+### Step 1 — Bootstrap the Terraform state backend (per account) — unchanged
+- `infra/bootstrap/`: S3 state bucket (versioned, KMS, TLS-only, public access blocked), KMS key, S3 lock file (DynamoDB optional).
+- **Validate:** apply; bucket exists; a second plan waits on the lock.
+
+### Step 2 — Module skeletons
+- Create/adjust modules per §5, each pinning `aws ~> 5.80` (or 6.x after testing), `terraform >= 1.10`.
+- **Validate:** `terraform fmt -recursive` clean; each module validates.
+
+### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets
+- **KMS** keys per purpose: `rds` (Aurora), `s3`, `logs`, `secrets`, `ecr`, **`sagemaker`** (training/processing volumes + outputs + model artifacts), `genai` (Release 2); per-BU S3 keys for the lakehouse (Step 14). `sqs` key only if SQS is kept.
+- **permission-boundary** on every Terraform-created role (incl. SageMaker, Step Functions, Lambda, EventBridge Scheduler roles).
+- **iam-oidc**: OIDC provider + `gha-plan`, `gha-apply`, `gha-deploy`, `gha-ecr-push`, `gha-ecr-read`. `gha-deploy` now also: update `mmm-ui` service, set SageMaker image tags in SSM, `sagemaker:UpdateModelPackage` only via the model-governance role (separate, see Step 14).
+- **budgets**: 50/80/100 % + anomaly detection; a **SageMaker** cost budget (training + processing).
+- **Validate:** plan shows OIDC provider, boundary, KMS keys incl. `sagemaker`.
+
+### Step 4 — Networking
+- **network**: VPC /19; public (ALB, NAT), private-app (ECS tasks, Lambda, **SageMaker job ENIs**), private-data (Aurora), private-endpoint (interface endpoints); 2 AZ dev / 3 AZ stg-prd; NAT 1 vs per-AZ; flow logs.
+- **Gateway endpoints:** S3, DynamoDB. **Interface endpoints:** ECR api/dkr, STS, Secrets Manager, SSM, SSM Messages, KMS, CloudWatch Logs/Monitoring, X-Ray, **`states`** (Step Functions), **`sagemaker.api`**, **`sagemaker.runtime`** (if endpoints are used), **`execute-api`** (private API Gateway, Release 2), **`bedrock-runtime`** (ApplyGuardrail, Release 2), `lambda` (optional). Drop `sqs` unless kept.
+- **Security groups:** ALB (443 from internet or WBD ranges [ASK] — no CloudFront prefix list), UI (from ALB), API (from ALB), Aurora (from RDS Proxy / API / Lambda), RDS Proxy (from API, Lambda, migrate), **SageMaker jobs** (no inbound; egress 443 to endpoints + S3 prefix list), **Lambda publisher** (no inbound; egress to RDS Proxy + endpoints), endpoints (443 from VPC). Databricks PrivateLink SG (Step 14).
+- Optional (unchanged): Transit Gateway attachment, Route 53 Resolver forwarding; **Databricks PrivateLink** + private hosted zone.
+- **Validate:** data subnets have no internet route; a test task + a test SageMaker processing job reach S3/ECR/Secrets/Logs via endpoints.
+
+### Step 5 — Secrets, configuration and identity settings
+- **Secrets Manager** (empty containers, filled out-of-band): `mmm/<env>/api/db`, `mmm/<env>/rds/proxy`, `mmm/<env>/rds/migrate`, `mmm/<env>/databricks/sp` (OAuth client secret for Step Functions → Databricks), `mmm/<env>/splunk/hec` [ASK], `mmm/<env>/thirdparty/<vendor>`, Release 2: `mmm/<env>/llm/openai`, `mmm/<env>/llm/anthropic`, `mmm/<env>/llm/google`. Aurora master password: **RDS-managed** with rotation. Removed: `redis/token`, `edge/origin-verify` (no CloudFront).
+- **SSM parameters:** `/mmm/<env>/genai_enabled`, `/mmm/<env>/cognito/{user_pool_id,client_id,domain}`, `/mmm/<env>/databricks/{host,job_ids}`, `/mmm/<env>/sagemaker/{optimizer_image,training_image,model_package_group/<bu>}`, `/mmm/<env>/stepfunctions/{optimization_arn,model_refresh_arn}`, per-BU token quotas.
+- **Validate:** repo secret scan clean; test `get-secret-value` works.
+
+### Step 6 — Data & storage (ECR, S3, Aurora)
+- **ecr**: `mmm/api`, `mmm/ui`, `mmm/sagemaker-optimizer`, `mmm/sagemaker-training` [ASM] — immutable tags, enhanced scanning, lifecycle; one registry per env with digest promotion.
+- **s3-bucket** (all: versioning, KMS, TLS-only, deny non-KMS uploads, access logs, BPA):
+  - `landing` — raw source files (EventBridge notifications on; Glacier after 1 y, keep 3+ y).
+  - `lakehouse` — Delta Lake Bronze/Silver/Gold (Unity Catalog external location, per-BU KMS keys) [ASM: one bucket with prefixes; or 3 buckets].
+  - `training-data` — **immutable** Parquet + metadata (Object Lock GOVERNANCE or versioning + deny delete) [ASK].
+  - `models` — SageMaker model artifacts + **approved response curves**.
+  - `outputs` — **full run evidence** of every optimization/simulation run (replaces v1 `results`).
+  - `exports` (30-day expiry), `approved-worm` (Object Lock, approved scenarios), `logs` (ALB/flow logs, SSE-S3 + ACL), `sagemaker-staging` (job code/inputs, 30-day expiry) [ASM].
+  - Removed: `frontend` (UI is a container), `mwaa`, `data-quality` (quality checks live in Lakeflow [ASK]).
+- **aurora**: Aurora PostgreSQL cluster (KMS, IAM auth, `rds.force_ssl`, pgaudit via cluster parameter group, Performance Insights, Enhanced Monitoring, CloudWatch log exports), writer + reader in stg/prd (Multi-AZ), deletion protection in prod, backtrack N/A (PostgreSQL). **RDS Proxy** in front (Lambda + ECS connection pooling, IAM auth, TLS) [ASK].
+- Removed: ElastiCache, SQS FIFO + DLQ (unless confirmed).
+- **Validate:** test task connects to Aurora via Proxy (TLS, IAM auth); buckets versioned, public access blocked; Object Lock on `training-data`/`approved-worm`.
+
+### Step 7 — ECS compute (UI + API) and ALB
+- **ecs-cluster**: Fargate, Container Insights enhanced, task execution role, ECS Exec (break-glass, audited). Service Connect namespace no longer needed for GenAI [ASM: keep if UI → API goes internal].
+- **alb**: public, HTTPS (TLS 1.2+, ACM regional cert), access logs; **two target groups (ip)**: `ui` (`/*`) and `api` (`/api/*`); health checks `/healthz` (UI) and `/api/health` (API) [ASK app teams]; **listener action `authenticate-cognito`** on the UI paths (Step 8) [ASM; or app-level PKCE]; security headers set by the UI container (nginx) or a response-header rule.
+- **ecs-service** (reused): `mmm-<env>-ui` (React + TS on nginx, non-root, read-only FS, 0.5 vCPU / 1 GB start), `mmm-<env>-api` (FastAPI + LangGraph + QA dashboard, 1 vCPU / 2 GB start, CPU/request target tracking, dev 1 / stg 2 / prd 3 tasks across AZs), `mmm-<env>-migrate` (one-off Alembic task). Rolling update 100/200, circuit breaker rollback ON, `ignore_changes = [task_definition, desired_count]`.
+- **API task role:** Aurora via Proxy (`rds-db:connect`), `states:StartExecution`/`DescribeExecution` on the optimization state machine, read `outputs` bucket, write `exports`/`approved-worm`, read SSM `/mmm/<env>/*`; Release 2: invoke the private LLM gateway (`execute-api:Invoke`) and `bedrock:ApplyGuardrail`.
+- Removed: `whatif-worker`, `optimizer-worker`, `genai-gateway` services, SQS backlog scaling, task scale-in protection.
+- **Validate:** UI and API healthy behind the ALB across AZs; `/api/*` reaches the API; bad image auto-rolls back.
+
+### Step 8 — Edge & login (Route 53, WAF, ACM, Cognito)
+- **waf-regional**: web ACL on the ALB — AWS managed rules (common, known bad inputs, IP reputation, SQLi), rate limit, optional geo/IP allow-list; logging to `aws-waf-logs-*` (→ Splunk).
+- **ACM**: one regional certificate for the app name (no us-east-1 cert — no CloudFront).
+- **Route 53**: WBD DNS creates `mmm-dev / mmm-stg / mmm` → ALB alias/CNAME (Terraform outputs the records).
+- **cognito**: user pool per env, **federated IdP** = WBD Okta (OIDC or SAML), hosted domain (custom domain optional), app client for the UI (Auth Code + PKCE), resource server + scopes for the API, groups/claims carrying BU + role; MFA/step-up enforced at Okta; advanced security (threat protection) on in prod [ASK]. API validates Cognito JWTs; RBAC in the app + **PostgreSQL row-level security** per BU.
+- **Validate:** login through Cognito → Okta + MFA; unauthenticated request to the UI is redirected; ALB rejects non-HTTPS; WAF blocks a test SQLi; one BU can't see another BU's data.
+
+### Step 9 — Optimization engine (Step Functions + SageMaker jobs + Lambda results publisher)
+- **sagemaker** (run side): execution role for optimization jobs (read `models`/response curves, read model package metadata, write `outputs`, KMS `sagemaker`/`s3`, logs, ECR pull), **VPC config** (private-app subnets + SG), KMS volume/output keys, network isolation where the job needs no AWS calls, max runtime, **model package groups per BU** (created here, filled by Step 14).
+- **step-functions** `mmm-<env>-optimization` (Standard): input = run request from the API (run id used as **execution name → idempotent**); states: validate → `sagemaker:createProcessingJob.sync` (or `createTrainingJob.sync`) with the optimizer image → on success publish → on failure mark run failed; retries with backoff, timeouts, catch → SNS. Logging (ALL, KMS) + X-Ray.
+- **lambda-function** `mmm-<env>-results-publisher`: in VPC, reads the run evidence from `outputs`, writes plans/runs/allocations to Aurora via RDS Proxy (IAM auth), DLQ/on-failure destination, reserved concurrency.
+- **Throughput:** 50–150 planners — SageMaker instance quotas, Step Functions concurrency guard (Map/semaphore or SQS buffer) [ASK]; **warm pools** for repeated runs [ASM].
+- **⚠ What-if latency note [ASK]:** a SageMaker processing/training job typically needs minutes to start, which cannot meet a ~10 s what-if target. Options to confirm with the architect: (a) Simulation on a **SageMaker real-time or serverless endpoint** (`sagemaker.runtime`), (b) Simulation computed **in the API** from cached response curves, (c) accept async what-if. Optimization runs (minutes) stay as jobs.
+- **Validate:** API starts an execution with a seed model; the job runs in the VPC; evidence lands in `outputs`; the publisher writes the run to Aurora; a failed job marks the run failed and alerts; the same run id twice starts one execution.
+
+### Step 10 — Monitoring & logging
+- **monitoring**: SNS alerts (+ optional Chatbot/Teams); Container Insights; Application Signals (API); dashboards (platform, API/UI, optimization runs, training pipeline, Aurora, cost, GenAI).
+- **Alarms:** ALB 5xx > 2 %, API no healthy targets, availability < 99.5 % (business hours), **Step Functions** executions failed / timed out / throttled, **optimization runtime** (standard > 2 min, large > 10 min), **SageMaker job failures**, **Lambda publisher** errors + DLQ not empty, **Aurora** CPU > 80 %, connections > 80 %, free storage, replica lag, cert expiry < 30 d, budget, ECS deployment rolled back, GuardDuty High, break-glass sign-in (prod), **training pipeline failed / data stale**, **model drift / failed thresholds** (from Step 14), Release 2: LLM gateway 4xx/5xx/latency, guardrail interventions, token quota.
+- **Logs:** ECS, Lambda, Step Functions, SageMaker, WAF, ALB → CloudWatch (retention 30 dev / 90 stg / 90+ prd) → Firehose → Splunk [ASK]; data-protection policy on log groups.
+- **Validate:** a test alarm reaches on-call; one `run_id` is traceable API → Step Functions → SageMaker → Lambda → Aurora.
+
+### Step 11 — Backup & DR
+- **backup**: AWS Backup vault (vault lock in prod), daily plan, selection by tag `backup=true`: **Aurora cluster**, `outputs`, `approved-worm`, `models`, `training-data`, `lakehouse` [ASK size/cost]. Aurora PITR 7/14/35 days. Cross-region copy in prod if WBD approves. SageMaker Model Registry metadata is rebuildable from `models` + Git [ASM].
+- **Validate:** restore Aurora to a point in time in staging; restore a model artifact; rebuild an env from code; RPO/RTO documented.
+
+### Step 12 — CI/CD pipelines + GitHub Environments/variables
+- `api-ci.yml`: lint, type-check, tests (coverage gate), dependency audit, build, Trivy (block fixable Critical/High), SBOM, push `sha-<7>` (main only).
+- **`ui-ci.yml`** (replaces `frontend-ci.yml`): npm ci, lint, type-check, tests, audit, build → **nginx container image** → scan → push `mmm/ui:sha-<7>`.
+- **`sagemaker-image-ci.yml`**: build/scan/push `mmm/sagemaker-optimizer` and `mmm/sagemaker-training` images (data science repos/folders).
+- `terraform.yml`: unchanged (PR plan, apply dev → staging → prod, nightly drift).
+- `deploy.yml`: `workflow_run` of api-ci/ui-ci/sagemaker-image-ci on main → dev; `v*-rc*` → staging; `v*` → prod. Steps: promote images by digest → (prod) **Aurora cluster snapshot** → migration task → deploy **api + ui** → **point the optimization state machine at the new optimizer image** (SSM parameter read at execution start, or update state machine definition) → smoke test (`/api/health`, UI `/healthz`, one dry-run execution in dev/stg) → rollback on failure → release record.
+- **`databricks.yml`** (replaces `data.yml`): `databricks bundle validate` → `bundle deploy -t dev` on main; `data-v*-rc*` → staging; `data-v*` → prod (GitHub OIDC → Databricks workload identity federation).
+- **`model-governance.yml`**: on a new model package (EventBridge → `repository_dispatch` or manual): show evaluation metrics vs thresholds (`data/model-thresholds.yaml`), gate on the `<env>-model-promotion` Environment (named WBD approver) → `sagemaker update-model-package --model-approval-status Approved`; rejected candidates logged.
+- `repo-checks.yml`: secret scan, SAST, shellcheck, actionlint, env-sync check; pin actions to commit SHAs.
+- **GitHub Environment variables:** `AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_PUSH_ROLE_ARN, TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, ECR_REGISTRY, ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, OPTIMIZATION_STATE_MACHINE_ARN, MODEL_REFRESH_STATE_MACHINE_ARN, DATABRICKS_HOST, GENAI_ENABLED` (+ `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY` in stg/prd). Removed: `FRONTEND_BUCKET, CLOUDFRONT_DISTRIBUTION_ID, FRONTEND_KVS_ARN, MWAA_BUCKET, MWAA_ENVIRONMENT, QUALITY_BUCKET`.
+- **Validate:** merge to main auto-deploys to dev; seeded vuln/secret blocked; prod waits for WBD approval and records approvers; rollback tested in staging.
+
+### Step 13 — Promote the platform to Staging then Prod
+- Same modules; only sizing (Aurora class/instances, SageMaker instance types/quotas, task counts), AZ count, approvals, vault lock, cross-region copy differ.
+- **Validate:** staging & prod `validate` + `plan` cleanly; tag promotion works end-to-end.
+
+### Step 14 — Data & ML training platform (Databricks + Delta Lake + SageMaker training + registry)
+> The data team never hand-deploys to prod; a **named WBD approver** authorizes model promotion.
+- **databricks-access** (extended): Unity Catalog storage credential role for `landing` + `lakehouse` + `training-data` (two-phase self-assume), external locations, per-BU KMS keys, **PrivateLink** (workspace + secure cluster connectivity) + private DNS, **customer-managed VPC** subnets/SGs for Databricks classic compute if WBD runs compute in our account [ASK]; service principal (OAuth M2M) secret in Secrets Manager.
+- **Triggers:** **EventBridge Scheduler** (scheduled refresh, e.g. weekly) + EventBridge rule for **manual / app-triggered** refresh (`mmm.refresh` event from the API) + optional S3 data-arrival rule on `landing`.
+- **step-functions** `mmm-<env>-model-refresh` (Standard): (1) **run Databricks Lakeflow job** (Step Functions **HTTP Task** + EventBridge connection with Databricks OAuth, `jobs/run-now` → poll `runs/get` with wait/retry) — ingestion → Bronze → Silver → Gold → Feature Export; (2) **publish Parquet + metadata** to `training-data` (immutable, manifest with input snapshot, code version, row counts, checksums); (3) `sagemaker:createTrainingJob.sync` (multi-stage models); (4) evaluation `createProcessingJob.sync` (baseline → channel lift → title adjustment, thresholds from `data/model-thresholds.yaml`); (5) **register model package** in the BU's model package group with status `PendingManualApproval` + response curves to `models`; (6) notify approvers. Failure at any state → SNS + run manifest marked failed. (Alternative [ASK]: SageMaker Pipelines for states 3–5.)
+- **sagemaker** (training side): training + evaluation execution roles (read `training-data`, write `models`, register model packages, KMS, VPC), EventBridge rule on **"SageMaker Model Package State Change"** → model-governance workflow / SNS.
+- **Governance:** promotion = `Approved` status on the model package by the named approver (GitHub `<env>-model-promotion` Environment); optimization jobs always load the **latest Approved** package per BU → no ECS redeploy; rollback = approve the previous version / reject the current one.
+- **Lineage & observability:** Unity Catalog lineage (Bronze → Gold), run manifest in `training-data`, SageMaker lineage/model cards for the model, CloudWatch dashboards for pipeline + training.
+- **Validate:** scheduled and manual refresh each start exactly one execution; Lakeflow job runs; Parquet lands immutable; training + evaluation run in the VPC; a failing model stays `PendingManualApproval`/`Rejected` and is logged; approving a model changes what the next optimization run uses.
+
+---
+
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2
+
+Same gate as v1: Release 1 (Steps 0–14) live in dev → staging → prod, data/ML platform live, readiness
+checklist (§11) passed, parallel run + UAT signed off, WBD approves Release 2 (approved LLM providers,
+token capacity, **data-egress approval for external models**). [ASK: the slides show LangGraph +
+LLMs inside the main architecture — confirm GenAI is still Release 2.]
+
+---
+
+### Step 15 — Release 2: GenAI (LangGraph + LLM gateway + Bedrock Guardrails)
+- Everything gated by `enable_genai` + GitHub variable `GENAI_ENABLED` + SSM `/mmm/<env>/genai_enabled`.
+- **LangGraph runs inside `mmm-api`** (no separate genai ECS service).
+- **llm-gateway**: **Amazon API Gateway** (private REST API via `execute-api` VPC endpoint, resource policy = API task role only) with one route per provider (`/openai`, `/anthropic`, `/google`) → Lambda (or HTTP) integration that adds the provider key from Secrets Manager; **usage plans / throttling per BU**, request/response logging (KMS), WAF on the API [ASK]. Egress to providers through NAT with an allow-list (Network Firewall/WBD proxy if required) [ASK]. Anthropic may be served through **Bedrock** instead of the public API [ASK].
+- **bedrock-guardrails**: Bedrock Guardrail (prompt-injection, PII anonymize/block, denied topics, contextual grounding + relevance); API calls **`ApplyGuardrail`** on every prompt and answer for **all** providers; `bedrock-runtime` VPC endpoint; guardrail invocation logs.
+- **QA dashboard** in the API: every AI answer logged with sources/citations, model, prompt/template version and guardrail version (Aurora + S3).
+- **Monitoring:** gateway errors/latency, guardrail interventions, per-BU token quota, LLM cost budget.
+- **Validate:** LLM calls only work through the gateway from the API role; guardrails block test attack prompts for every provider; every answer is logged with sources; quotas throttle a BU.
+
+### Step 16 — Handover & ongoing operations
+- Runbooks (v1 list updated): deploy, rollback (ECS + state machine + model approval), scale for planning season (SageMaker quotas, API tasks, Aurora), **failed optimization run**, **failed model refresh**, Lambda publisher DLQ, Aurora restore/failover, ECS task stuck, secret/cert rotation, Cognito/IdP outage, pipeline failure, model rollback, GenAI on/off, security incident, break-glass.
+- Ongoing: monthly image patching (incl. SageMaker images), weekly vuln fixes, nightly drift, quarterly access + restore tests, DR exercise twice a year.
+
+---
+
+## 7. Environment variables — quick reference
+
+**GitHub (per Environment, non-secret):** see Step 12. **No AWS keys, no app secrets.**
+**Secrets Manager:** `mmm/<env>/api/db`, `rds/proxy`, `rds/migrate`, `databricks/sp`, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`.
+**SSM:** `/mmm/<env>/genai_enabled`, `cognito/*`, `databricks/*`, `sagemaker/*`, `stepfunctions/*`, per-BU quotas.
+**ECS task env (IaC, non-secret):** `APP_ENV, AWS_REGION, DB_HOST, DB_NAME, OUTPUTS_BUCKET, EXPORTS_BUCKET, OPTIMIZATION_STATE_MACHINE_ARN, COGNITO_USER_POOL_ID, COGNITO_CLIENT_ID, SSM_PREFIX` (+ `LLM_GATEWAY_URL, GUARDRAIL_ID` in R2).
+
+---
+
+## 8. Security, authorization & OIDC
+
+- Keyless CI/CD (GitHub OIDC → per-env roles bound to `repo:<org>/<repo>:environment:<env>`).
+- Engineers: IAM Identity Center + permission sets. **App users: Cognito federated to WBD Okta (MFA, step-up for approvals/overrides) → app RBAC → PostgreSQL RLS per BU.**
+- Workloads: per-service ECS task roles, per-job SageMaker execution roles, per-state-machine roles, Lambda role — all with the permission boundary.
+- Encryption: KMS everywhere (incl. SageMaker volumes/outputs/artifacts); TLS 1.2+ (ALB, Aurora `force_ssl`, API Gateway). WORM for approved scenarios and training data.
+- Pipeline gates: SAST, dependency scan, secret scan, Trivy image scan + SBOM, Checkov, DAST before prod.
+- Edge: **regional WAF on the ALB** + rate limits; Shield Standard (Advanced if WBD requires).
+- GenAI: external provider calls only through the gateway, guardrails on every call, no WBD data to providers without written approval.
+
+---
+
+## 9. Deployment strategy & rollback
+
+- ECS (UI, API): rolling update + circuit breaker; blue/green optional.
+- Optimization engine: new optimizer image = new SSM image tag; rollback = previous tag (no in-flight execution affected).
+- Models: promotion = approve model package; rollback = re-approve the previous version / reject current.
+- Data jobs: Databricks bundle redeploy of the previous `data-v*` tag.
+- DB: Alembic migrations as a one-off ECS task before the new API; expand-then-contract; Aurora snapshot before prod migration.
+- Infra: revert PR + apply. GenAI: flag off. **Practise every rollback in staging.**
+
+---
+
+## 10. Release tagging — unchanged (`sha-<7>` dev, `vX.Y.Z-rcN` staging, `vX.Y.Z` prod). Databricks bundles have no own tags: `databricks.yml` deploys dev on merge to main and staging/prod by dispatch.
+
+---
+
+## 11. Per-step validation checklist
+
+Every Terraform step: `fmt -check` · `validate` · reviewed `plan` · targeted smoke. CI/CD: seeded
+vuln/secret blocked; dev auto-deploys; staging needs EY approval; prod needs WBD + CAB; rollback
+verified. **Production readiness:** WBD security sign-off, pen test clean, backups + restore tested,
+Aurora failover tested, SageMaker quotas raised, performance test with 50/100/150 planners passed
+(optimization + what-if targets), dashboards/alerts live, runbooks written, access reviewed, UAT
+signed off, CAB approved.
+
+---
+
+## 12. Order-of-operations summary
+
+**Tools → accounts/access → bootstrap state → modules → dev: foundation → network → secrets/identity
+config → ECR/S3/Aurora → ECS UI + API + ALB → Route 53/WAF/ACM/Cognito → optimization engine (Step
+Functions + SageMaker + Lambda) → monitoring → backup → CI/CD → staging → prod → data & ML training
+platform (Databricks Lakeflow + Delta Lake + SageMaker training/registry + governance) → 🚦 RELEASE 1
+COMPLETE → Release 2 GenAI (LangGraph + API Gateway LLM gateway + Bedrock Guardrails) → handover.**
+One step at a time; validate each; keep all three environments on identical code.

@@ -19,12 +19,12 @@ output "public_subnet_ids" {
 }
 
 output "private_app_subnet_ids" {
-  description = "Private-app subnets (ECS tasks, MWAA)."
+  description = "Private-app subnets (ECS tasks, SageMaker jobs, Lambda)."
   value       = [for az in local.azs : aws_subnet.app[az].id]
 }
 
 output "private_data_subnet_ids" {
-  description = "Private-data subnets (RDS, RDS Proxy, ElastiCache); no internet route."
+  description = "Private-data subnets (Aurora, RDS Proxy); no internet route."
   value       = [for az in local.azs : aws_subnet.data[az].id]
 }
 
@@ -49,7 +49,7 @@ output "nat_public_ips" {
 }
 
 output "security_group_ids" {
-  description = "Security group ID per role: endpoints, alb, api, workers, data_clients, rds_proxy, rds, redis (+ mwaa, resolver when enabled)."
+  description = "Security group ID per role: endpoints, alb, api, ui, tasks, data_clients, rds_proxy, rds, sagemaker, lambda (+ resolver, genai when enabled)."
   value       = { for k, sg in aws_security_group.this : k => sg.id }
 }
 

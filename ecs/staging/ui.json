@@ -1,0 +1,11 @@
+{
+  "//": "Merged over the Terraform task definition mmm-stg-ui by scripts/ecs-deploy.sh. Only app-owned fields of the 'app' container go here.",
+  "family": "mmm-stg-ui",
+  "repository": "mmm/ui",
+  "container": {
+    "//command": "add actual value - null = the image's default start command (static web server on port 8080 serving /healthz)",
+    "command": null,
+    "entryPoint": null,
+    "stopTimeout": 15
+  }
+}

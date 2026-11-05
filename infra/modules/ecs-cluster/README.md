@@ -25,7 +25,7 @@ The ECS Fargate cluster shared by all MMM services, and the one task **execution
   - read **only the secrets listed in `secret_arns`** and parameters under `parameter_path_arn`;
   - decrypt with the secrets KMS key only through Secrets Manager or SSM.
 - The **task role** (one per service, in `ecs-service`) is what the application code uses at
-  run time to call AWS (SQS, S3, RDS IAM auth).
+  run time to call AWS (S3, Step Functions, RDS Proxy IAM auth).
 
 ## Inputs
 

@@ -1,0 +1,76 @@
+# Databricks Asset Bundle (data/databricks/databricks.yml, owned by the data engineers): jobs and
+# pipelines incl. the model-refresh feature job started by the mmm-<env>-model-refresh state machine.
+# DevOps only ships the bundle; its contents are not reviewed here.
+#
+#   main (data/databricks/** changed) -> validate + deploy target dev
+#   dispatch                          -> validate + deploy the chosen target (staging/prod wait for approval)
+#
+# Auth: Databricks workload identity federation with GitHub OIDC - no Databricks token in GitHub.
+# GitHub Environment variables: DATABRICKS_HOST, DATABRICKS_CLIENT_ID (deploy service principal whose
+# federation policy trusts repo:<org>/<repo>:environment:<env>). Skipped while data/databricks/ is absent.
+name: databricks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - data/databricks/**
+      - .github/workflows/databricks.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_DIR: data/databricks
+  # add actual value
+  DATABRICKS_CLI_VERSION: "0.270.0"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment || 'dev' }}
+    concurrency:
+      group: databricks-${{ inputs.environment || 'dev' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TARGET: ${{ inputs.environment || 'dev' }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: present
+        run: |
+          if [ ! -f "$BUNDLE_DIR/databricks.yml" ]; then
+            echo "::notice::$BUNDLE_DIR/databricks.yml not found - Databricks deploy skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$DATABRICKS_HOST" ] || [ -z "$DATABRICKS_CLIENT_ID" ]; then
+            echo "::error::GitHub Environment $TARGET needs variables DATABRICKS_HOST and DATABRICKS_CLIENT_ID"; exit 1
+          else echo "yes=true" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.present.outputs.yes == 'true'
+        uses: databricks/setup-cli@main
+        with:
+          version: ${{ env.DATABRICKS_CLI_VERSION }}
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Validate
+        working-directory: ${{ env.BUNDLE_DIR }}
+        run: databricks bundle validate --target "$TARGET"
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Deploy
+        working-directory: ${{ env.BUNDLE_DIR }}
+        run: |
+          databricks bundle deploy --target "$TARGET" --auto-approve
+          echo "Bundle deployed to \`$TARGET\` (commit ${GITHUB_SHA::7})" >> "$GITHUB_STEP_SUMMARY"

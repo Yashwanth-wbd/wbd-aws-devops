@@ -1,5 +1,5 @@
 output "secret_arns" {
-  description = "Secret ARN per key (e.g. secret_arns[\"redis/token\"]); used in task definitions and execution-role policies."
+  description = "Secret ARN per key (e.g. secret_arns[\"api/db\"]); used in task definitions and execution-role policies."
   value       = { for k, s in aws_secretsmanager_secret.this : k => s.arn }
 }
 
@@ -9,7 +9,7 @@ output "secret_names" {
 }
 
 output "generated_values" {
-  description = "Values of the generated secrets, for resources that need them directly (ElastiCache auth token, CloudFront custom header)."
+  description = "Values of the generated secrets, for resources that need them directly."
   value       = { for k, p in random_password.this : k => p.result }
   sensitive   = true
 }

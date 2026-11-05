@@ -1,0 +1,137 @@
+# Web UI container (ECS service "ui" behind the ALB, port 8080, health check /healthz).
+# PR and main: install, lint, tests, build, dependency + image scan.
+# main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
+name: ui-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/ui/**
+      - .github/workflows/ui-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/ui/**
+      - .github/workflows/ui-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ui-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: apps/ui
+  REPOSITORY: mmm/ui
+  # add actual value
+  NODE_VERSION: "22"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
+
+      - name: Install, lint, test, build
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npm ci
+          npm run lint
+          npm test -- --coverage
+          npm run build
+
+      - name: Dependency audit (package-lock, fixable Critical/High)
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          version: ${{ vars.TRIVY_VERSION || 'v0.76.1' }}
+          scan-type: fs
+          scan-ref: ${{ env.APP_DIR }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: meta
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build "$APP_DIR" \
+            --tag "local/$REPOSITORY:${{ steps.meta.outputs.tag }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+      - name: Image scan (block fixable Critical/High)
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          version: ${{ vars.TRIVY_VERSION || 'v0.76.1' }}
+          image-ref: local/${{ env.REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Save image for the push job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save "local/$REPOSITORY:${{ steps.meta.outputs.tag }}" | gzip > "${RUNNER_TEMP}/image.tar.gz"
+
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ steps.meta.outputs.tag }}
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 1
+
+  push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: image-${{ needs.build.outputs.tag }}
+          path: ${{ runner.temp }}
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: ci-${{ github.run_id }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push sha tag (immutable - skipped if it already exists)
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          REGISTRY: ${{ vars.ECR_REGISTRY }}
+        run: |
+          if aws ecr describe-images --repository-name "$REPOSITORY" --image-ids "imageTag=$TAG" > /dev/null 2>&1; then
+            echo "$REPOSITORY:$TAG already in ECR"; exit 0
+          fi
+          gunzip -c "${RUNNER_TEMP}/image.tar.gz" | docker load
+          docker tag "local/$REPOSITORY:$TAG" "$REGISTRY/$REPOSITORY:$TAG"
+          docker push "$REGISTRY/$REPOSITORY:$TAG"
+          echo "Pushed \`$REGISTRY/$REPOSITORY:$TAG\`" >> "$GITHUB_STEP_SUMMARY"

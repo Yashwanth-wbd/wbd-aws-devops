@@ -4,7 +4,7 @@ variable "name_prefix" {
 }
 
 variable "allowed_regions" {
-  description = "Regions roles may use. Include us-east-1 (CloudFront certificates and WAF) and the DR region if one is approved."
+  description = "Regions roles may use. The workload region (ACM, WAF, Bedrock are all regional) and the DR region if one is approved."
   type        = list(string)
 
   validation {

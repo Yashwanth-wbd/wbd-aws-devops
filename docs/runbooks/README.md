@@ -23,12 +23,13 @@ aws sso login --sso-session wbd && aws sts get-caller-identity
 | Runbook | Use when | Typical alarm / signal |
 |---|---|---|
 | [deploy.md](deploy.md) | Releasing a version to dev, staging, prod | – |
-| [rollback.md](rollback.md) | A release is bad (app, frontend, infra, data, model, GenAI) | `api-5xx-rate`, `ecs-deployment-failed`, users |
-| [scale-planning-season.md](scale-planning-season.md) | Before the upfront / planning season or a known peak | `queue-oldest-job`, `whatif-p95`, `rds-cpu` |
-| [dlq.md](dlq.md) | Jobs failed 3 times | `dlq-not-empty`, `data-trigger-dlq-not-empty` |
-| [db-restore.md](db-restore.md) | Data was deleted or corrupted; database lost | users, `rds-free-storage`, AWS Health |
-| [cache-failure.md](cache-failure.md) | Redis down, slow or full | `redis-cpu-*`, `redis-memory-*`, API errors |
-| [ecs-task-stuck.md](ecs-task-stuck.md) | Tasks do not start, do not stop, or a deployment hangs | `ecs-service-error`, `api-no-healthy-targets`, `*-backlog-high` |
+| [rollback.md](rollback.md) | A release is bad (app, UI, infra, data, model, GenAI) | `api-5xx-rate`, `ecs-deployment-failed`, users |
+| [scale-planning-season.md](scale-planning-season.md) | Before the upfront / planning season or a known peak | `whatif-p95`, `aurora-cpu`, `aurora-acu-max`, `optimization-failed` |
+| [optimization-run-failed.md](optimization-run-failed.md) | An optimization Step Functions execution failed | `mmm-<env>-optimization-failed`, stuck runs in the UI |
+| [model-refresh-failed.md](model-refresh-failed.md) | A model refresh (Databricks → SageMaker training → registry) failed | `mmm-<env>-model-refresh-failed` |
+| [cognito-idp-outage.md](cognito-idp-outage.md) | Users cannot sign in (Cognito / Okta) | users, smoke test login check |
+| [db-restore.md](db-restore.md) | Data was deleted or corrupted; database lost | users, AWS Health, Aurora alarms |
+| [ecs-task-stuck.md](ecs-task-stuck.md) | Tasks do not start, do not stop, or a deployment hangs | `ecs-service-error`, `api-no-healthy-targets`, `ui-no-healthy-targets` |
 | [rotation.md](rotation.md) | Rotating secrets, tokens, certificates | `cert-expiry-*`, schedule |
 | [pipeline-failure.md](pipeline-failure.md) | A GitHub Actions workflow is red | GitHub notification |
 | [model-rollback.md](model-rollback.md) | A promoted MMM model gives bad results | planners, governance report |
@@ -41,7 +42,7 @@ aws sso login --sso-session wbd && aws sts get-caller-identity
 | Severity | Example | Response | Who |
 |---|---|---|---|
 | SEV1 | Prod down or data exposed | 15 min, continuous until mitigated; status every 30 min | On-call DevOps + EY lead + WBD app owner (+ WBD security for data) |
-| SEV2 | Prod degraded (slow what-ifs, optimizer backlog, one BU affected) | 1 h, same business day fix | On-call DevOps |
+| SEV2 | Prod degraded (slow what-ifs, optimization failures, one BU affected) | 1 h, same business day fix | On-call DevOps |
 | SEV3 | Non-prod broken, single alarm with workaround | Next business day | DevOps team |
 
 Alerts arrive through SNS topic `mmm-<env>-alerts` (email; add the on-call tool subscription when WBD names it).

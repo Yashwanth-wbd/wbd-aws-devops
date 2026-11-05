@@ -14,7 +14,7 @@ sequenceDiagram
   participant S as AWS STS
   participant R as IAM role (mmm-dev-gha-deploy)
   J->>G: request ID token (audience sts.amazonaws.com)
-  G-->>J: JWT: sub = repo:wbd-org/wbd-mmm-platform:environment:dev
+  G-->>J: JWT: sub = repo:Yashwanth-wbd/wbd-aws-devops:environment:dev
   J->>S: AssumeRoleWithWebIdentity(role ARN, JWT)
   S->>R: check trust policy (aud + sub match?)
   S-->>J: temporary credentials (1 h)
@@ -30,12 +30,17 @@ In **each** AWS account:
 | IAM OIDC identity provider | URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` |
 | `mmm-<env>-gha-plan` | Read-only + read Terraform state. Used by `terraform plan` on pull requests |
 | `mmm-<env>-gha-apply` | Terraform apply (bounded by the permission boundary) |
-| `mmm-<env>-gha-deploy` | ECS deploy only: register task definitions, update the named services, run the migration task, `iam:PassRole` on the listed task roles; frontend upload, `current_release` switch and `/mmm/<env>/okta/*` read |
+| `mmm-<env>-gha-deploy` | ECS rolling deploy (`api`, `ui`), run the `migrate` task, prod pre-migration Aurora cluster snapshot, read/write SageMaker image pointers `/mmm/<env_short>/images/*`, Lambda release (results publisher `live` alias) |
 | `mmm-<env>-gha-ecr-push` | Push images to **this account's** ECR registry. In dev it is used by CI builds; in staging and prod it receives the image copied during promotion |
 | `mmm-<env>-gha-ecr-read` (dev and staging) | Pull images from this account's ECR, used as the copy source when promoting to the next environment |
+| `mmm-<env>-gha-model-eval` (with data platform) | Read SageMaker Model Registry, evaluation objects in S3, tag packages, **Reject** failed versions; trust **`ref:refs/heads/main`** only |
+| `mmm-<env>-gha-model-approve` (with data platform) | Same plus **Approve** and publish response curves to `s3://<models>/curves/<bu>/`; trust GitHub Environment **`<env>-model-promotion`** |
 
 AWS no longer needs a certificate thumbprint for GitHub's OIDC provider (it uses its own
 trusted CA list). Terraform still sends one value because the API field exists.
+
+Model governance roles are created when `enable_data_platform = true` (same flag as
+`enable_model_governance` on the OIDC module).
 
 ## 3. Trust policies (who may assume each role)
 
@@ -44,7 +49,7 @@ When a job declares `environment: prod`, GitHub sets
 `sub = repo:<org>/<repo>:environment:prod`, so only jobs that passed the prod approval gate
 can assume the prod roles.
 
-Prod deploy role trust policy:
+Prod deploy role trust policy (org/repo placeholders match dev tfvars until WBD changes them):
 
 ```json
 {
@@ -56,7 +61,7 @@ Prod deploy role trust policy:
     "Condition": {
       "StringEquals": {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub": "repo:wbd-org/wbd-mmm-platform:environment:prod"
+        "token.actions.githubusercontent.com:sub": "repo:Yashwanth-wbd/wbd-aws-devops:environment:prod"
       }
     }
   }]
@@ -71,10 +76,22 @@ Prod deploy role trust policy:
 | `mmm-dev-gha-ecr-push` | `repo:<org>/<repo>:ref:refs/heads/main`, `…:environment:dev` |
 | `mmm-stg-gha-ecr-push` / `mmm-prd-gha-ecr-push` | `…:environment:staging` / `…:environment:prod` |
 | `mmm-dev-gha-ecr-read` / `mmm-stg-gha-ecr-read` | `…:environment:staging` / `…:environment:prod` (the next environment's promotion job) |
+| `mmm-<env>-gha-model-eval` | `repo:<org>/<repo>:ref:refs/heads/main` |
+| `mmm-<env>-gha-model-approve` | `repo:<org>/<repo>:environment:<env>-model-promotion` |
 
-The org and repo are placeholders (`wbd-org/wbd-mmm-platform`) until WBD creates the repo.
+## 4. Databricks bundle deploy (separate from model governance)
 
-## 4. Using it in a workflow
+`databricks.yml` deploys the Asset Bundle in `data/databricks/` using **Databricks GitHub OIDC
+workload identity** (`DATABRICKS_AUTH_TYPE=github-oidc`), not the AWS `gha-model-*` roles.
+GitHub Environment variables **`DATABRICKS_HOST`** (Terraform output) and
+**`DATABRICKS_CLIENT_ID`** (deploy service principal; set with
+`setup-github.ps1 -DatabricksClientId`) must exist when the bundle folder is present.
+
+The **model-refresh** Step Functions state machine calls Databricks with the **EventBridge
+connection** OAuth client (`databricks_sp_client_id` + secret set out of band—see
+[05-secrets-and-config.md](05-secrets-and-config.md)). That path does not use GitHub OIDC.
+
+## 5. Using it in a workflow
 
 ```yaml
 permissions:
@@ -97,7 +114,7 @@ jobs:
 The workflows (Step 11) use major-version tags (`@v5`). If WBD policy requires it, pin them to
 full commit SHAs and let Dependabot update them.
 
-## 5. GitHub configuration (Step 11)
+## 6. GitHub configuration (Step 11)
 
 Role ARNs are **not secrets**; they are stored as GitHub Environment variables.
 `scripts/setup-github.ps1` does all of this from the Terraform outputs (see
@@ -106,9 +123,9 @@ Below is the manual equivalent.
 
 ```bash
 # create the environments (approval rules are added in the GitHub UI or API)
-gh api -X PUT repos/wbd-org/wbd-mmm-platform/environments/dev
-gh api -X PUT repos/wbd-org/wbd-mmm-platform/environments/staging
-gh api -X PUT repos/wbd-org/wbd-mmm-platform/environments/prod
+gh api -X PUT repos/Yashwanth-wbd/wbd-aws-devops/environments/dev
+gh api -X PUT repos/Yashwanth-wbd/wbd-aws-devops/environments/staging
+gh api -X PUT repos/Yashwanth-wbd/wbd-aws-devops/environments/prod
 
 # add actual value
 gh variable set AWS_REGION          --env dev --body "us-east-1"
@@ -123,14 +140,18 @@ gh variable set ECR_PUSH_ROLE_ARN   --env dev --body "arn:aws:iam::111111111111:
 # repeat for staging and prod with their own account IDs.
 # staging and prod also get SOURCE_ECR_READ_ROLE_ARN + SOURCE_ECR_REGISTRY (the previous environment)
 
-# repository level (no --env): PR plans and the nightly drift check run without an environment
+# repository level (no --env): PR plans, drift check, model-governance evaluate job
 # add actual value
 gh variable set TF_PLAN_ROLE_ARN_DEV --body "arn:aws:iam::111111111111:role/mmm-dev-gha-plan"
+# when enable_data_platform = true (from terraform output github_repository_variables):
+# gh variable set MODEL_EVAL_ROLE_ARN_DEV --body "arn:aws:iam::111111111111:role/mmm-dev-gha-model-eval"
+# gh variable set MODEL_APPROVE_ROLE_ARN_DEV --body "arn:aws:iam::111111111111:role/mmm-dev-gha-model-approve"
+# gh variable set MODELS_BUCKET_DEV --body "wbd-mmm-dev-models-use1"
 ```
 
 The values come from the `terraform output` of each environment after Step 3.
 
-## 6. How the pipelines use it end to end
+## 7. How the pipelines use it end to end
 
 | Trigger | GitHub Environment | Roles assumed |
 |---|---|---|
@@ -140,8 +161,10 @@ The values come from the `terraform output` of each environment after Step 3.
 | Tag `vX.Y.Z-rcN` | `staging` (EY lead approves) | `mmm-dev-gha-ecr-read` → `mmm-stg-gha-ecr-push` (copy image), `mmm-stg-gha-deploy` |
 | Tag `vX.Y.Z` | `prod` (WBD approver + change ticket) | `mmm-stg-gha-ecr-read` → `mmm-prd-gha-ecr-push` (copy image), `mmm-prd-gha-deploy` |
 | Nightly drift check | none (runs on `main`) | `mmm-<env>-gha-plan` |
+| `model-governance.yml` evaluate (hourly / dispatch) | none | `mmm-<env>-gha-model-eval` |
+| `model-governance.yml` promote / rollback | `<env>-model-promotion` | `mmm-<env>-gha-model-approve` |
 
-## 7. Validate OIDC after Step 3
+## 8. Validate OIDC after Step 3
 
 1. Run a manual workflow with the `dev` environment that only calls
    `aws sts get-caller-identity`. It must print the `mmm-dev-gha-plan` role.

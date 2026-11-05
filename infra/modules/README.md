@@ -30,27 +30,28 @@ Shared conventions for all modules:
 |---|---|---|---|
 | [kms](kms/) | 3 | 1 | KMS keys per purpose with rotation |
 | [permission-boundary](permission-boundary/) | 3 | 1 | Boundary policy attached to every Terraform-created role |
-| [iam-oidc](iam-oidc/) | 3 | 1 | GitHub OIDC provider + gha-plan / apply / deploy / ecr-push / ecr-read roles |
+| [iam-oidc](iam-oidc/) | 3 | 1 | GitHub OIDC provider + gha-plan / apply / deploy / ecr-push / ecr-read roles; gha-model-eval / gha-model-approve with the data platform |
 | [budgets](budgets/) | 3 | 1 | Monthly budget alerts + Cost Anomaly Detection |
 | [network](network/) | 4 | 1 | VPC, subnets, NAT, endpoints, security groups, flow logs, optional TGW / Resolver |
 | [secrets](secrets/) | 5 | 1 | Secrets Manager containers, generated secrets, SSM parameters |
 | [ecr](ecr/) | 6 | 1 | Per-environment ECR repositories, scanning, lifecycle |
 | [s3-bucket](s3-bucket/) | 6 | 1 | Hardened data bucket (optional Object Lock and replication) |
-| [log-bucket](log-bucket/) | 6 | 1 | Log-delivery bucket for ALB / CloudFront / S3 access logs |
-| [rds](rds/) | 6 | 1 | RDS PostgreSQL + RDS Proxy |
-| [elasticache](elasticache/) | 6 | 1 | Valkey/Redis replication group |
-| [sqs](sqs/) | 6 | 1 | FIFO job queue + DLQ |
+| [log-bucket](log-bucket/) | 6 | 1 | Log-delivery bucket for ALB and S3 access logs |
+| [aurora](aurora/) | 6 | 1 | Aurora PostgreSQL Serverless v2 + RDS Proxy (IAM auth) |
 | [ecs-cluster](ecs-cluster/) | 7 | 1 | ECS cluster, capacity providers, Service Connect namespace, execution role |
-| [alb](alb/) | 7 | 1 | ALB, target group, HTTPS listener, origin-verify rule |
-| [ecs-service](ecs-service/) | 7 | 1 | One ECS service with task definition, task role, logs, autoscaling |
-| [edge](edge/) | 8 | 1 | WAF, CloudFront, security headers (Route 53 deferred) |
+| [alb](alb/) | 7 | 1 | Public ALB, `ui` / `api` target groups, HTTPS listener with Cognito authentication |
+| [ecs-service](ecs-service/) | 7 | 1 | One ECS service with task definition, task role, logs, CPU autoscaling |
+| [cognito](cognito/) | 8 | 1 | User pool federated to WBD Okta (SAML), ALB app client |
+| [waf-regional](waf-regional/) | 8 | 1 | Regional WAF on the ALB: managed rules, rate limit, optional geo filter |
+| [step-functions](step-functions/) | 8 | 1 | Standard state machine with role, logs and failure alarm (optimization, model refresh) |
+| [sagemaker](sagemaker/) | 8 | 1 | SageMaker job execution role; Model Registry groups per business unit (training) |
+| [lambda-function](lambda-function/) | 8 | 1 | VPC Lambda with `live` alias, seeded by Terraform, code shipped by `deploy.yml` (results publisher) |
 | [monitoring](monitoring/) | 9 | 1 | SNS, alarms, dashboards, EventBridge alerts |
 | [log-shipping](log-shipping/) | 9 | 1 | CloudWatch Logs → Firehose → Splunk |
 | [backup](backup/) | 10 | 1 | AWS Backup vault, plan, selection, vault lock, cross-region copy |
-| [mwaa](mwaa/) | 13 | 1 | MWAA Airflow environment |
-| [data-trigger](data-trigger/) | 13 | 1 | S3 / on-demand → EventBridge → Lambda → MWAA DAG run |
 | [databricks-access](databricks-access/) | 13 | 1 | Unity Catalog role, Databricks PrivateLink, private DNS |
-| [bedrock](bedrock/) | 14 | 2 | Bedrock PrivateLink endpoint, guardrail + version, invocation logging, alarms, dashboard, cost budget |
+| [bedrock-guardrails](bedrock-guardrails/) | 14 | 2 | Bedrock guardrail + pinned version, interventions alarm |
+| [llm-gateway](llm-gateway/) | 14 | 2 | Private API Gateway + proxy Lambda to the approved LLM providers, guardrail on every call |
 
 ## Adding a module
 
@@ -62,7 +63,7 @@ Shared conventions for all modules:
 
 ```powershell
 .\scripts\validate-modules.ps1               # all modules
-.\scripts\validate-modules.ps1 -Name sqs     # one module
+.\scripts\validate-modules.ps1 -Name aurora  # one module
 ```
 
 Runs `terraform fmt -check`, `terraform init -backend=false`, `terraform validate` and

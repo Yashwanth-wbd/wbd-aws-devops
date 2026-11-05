@@ -7,8 +7,8 @@ differently.
 |---|---|---|---|
 | Engineers | Okta + MFA → IAM Identity Center | Permission sets per account | [02-aws-access-sso-cli.md](02-aws-access-sso-cli.md) |
 | Pipelines | GitHub OIDC token | IAM roles whose trust is bound to repo + GitHub Environment | [03-github-oidc.md](03-github-oidc.md) |
-| Running services | ECS task role (automatic temporary credentials) | One IAM role per service, least privilege | Section 2 below |
-| Planners | Okta OIDC + MFA (step-up for sensitive actions) | App roles + business-unit claim + PostgreSQL RLS | [04-okta-mfa-app-login.md](04-okta-mfa-app-login.md) and section 3 |
+| Running services | ECS task role, Lambda role, or Step Functions role (temporary credentials) | One IAM role per component, least privilege | Section 2 below |
+| Planners | Okta (MFA at Okta) → Cognito SAML → ALB session | App roles + business-unit groups + PostgreSQL RLS | [04-okta-mfa-app-login.md](04-okta-mfa-app-login.md) and section 3 |
 
 ## 1. Guard rails on every IAM role Terraform creates
 
@@ -21,28 +21,93 @@ too broad, the boundary blocks:
 - using regions WBD has not approved
 - leaving the boundary off any new role it creates
 
-## 2. Service identities (ECS task roles)
+## 2. Service identities (ECS, Lambda, Step Functions, SageMaker)
+
+### ECS task roles
 
 | Role | May | May not |
 |---|---|---|
 | `mmm-<env>-ecs-task-exec` (shared execution role) | Pull from ECR, write its log groups, read **only the listed** secrets/parameters, KMS decrypt for those | Anything at runtime inside the app |
-| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), send to the job queue, read results bucket, read/write exports bucket, **write once** to the approved-WORM bucket (on approval), read SSM `/mmm/<env>/*` | Receive or delete queue messages; delete, change retention or bypass governance on approved-WORM objects (explicit deny) |
-| `mmm-<env>-task-whatif` | Connect as `mmm_app`, receive / delete queue messages, read/write results bucket, set its own task scale-in protection, read SSM | Send to queue, touch exports or approved-WORM |
-| `mmm-<env>-task-optimizer` | Same as what-if | Anything else |
-| `mmm-<env>-task-migrate` | Connect to RDS Proxy as `mmm_migrator`. Only while `enable_db_bootstrap = true`: also as `mmm_admin`, plus writing the `rds/migrate` and `rds/proxy` secrets | Queue, S3 |
-| `mmm-<env>-task-platform-check` | SQS round trip, S3 under `results/platform-check/` (test task, dev and staging) | DB login, other S3 paths |
+| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), start/watch/stop the optimization state machine, read approved curves under `models/curves/`, read/write the results bucket (run inputs under `runs/*/input/`), read/write exports, **write once** to approved-WORM (on approval), read SSM `/mmm/<env_short>/*`, invoke the private LLM gateway (`execute-api:Invoke`) when GenAI is enabled | Delete or tamper with approved-WORM objects (explicit deny); direct cluster login without the proxy |
+| `mmm-<env>-task-ui` | Read SSM `genai_enabled` (UI banner only) | Any other AWS API |
+| `mmm-<env>-task-migrate` | Connect to RDS Proxy as `mmm_migrator`. Only while `enable_db_bootstrap = true`: also as `mmm_admin`, plus writing the `rds/migrate` and `rds/proxy` secrets | S3, Step Functions |
+| `mmm-<env>-task-platform-check` | S3 round trip under `results/platform-check/`, `DescribeStateMachine` on the optimization state machine, read SageMaker image SSM parameters (dev/staging when enabled) | DB login, other S3 paths |
 
-Redis access is by network (security group) and the auth token, not by IAM.
-The task roles are defined in `infra/environments/<env>/ecs.tf` (Step 7).
-| `mmm-<env>-task-genai` (R2) | `bedrock:InvokeModel*` on the approved model ARNs, `bedrock:ApplyGuardrail` on the platform guardrail, read `/mmm/<env>/genai/*` | Any Bedrock call not through the PrivateLink endpoint; training, customization, provisioned throughput, logging and guardrail changes (explicit deny) – [docs/12](12-genai-bedrock.md) |
+What-if optimization runs **inside the API** on the approved curves. Full optimization is
+asynchronous: the API only starts the Step Functions execution; it does not run SageMaker jobs
+itself.
 
-Each service also has its own **security group** (Step 4), so network access is limited too:
-the API only accepts traffic from the ALB, the workers accept nothing inbound, the database
-only accepts the RDS Proxy.
+Network limits match the roles: the API accepts traffic only from the ALB security group; the UI
+only from the ALB; tasks and Lambda reach the database only through the RDS Proxy security group.
+
+Task roles are defined in `infra/environments/<env>/ecs.tf`.
+
+### Optimization pipeline (Step Functions + SageMaker + Lambda)
+
+| Role | May | May not |
+|---|---|---|
+| `mmm-<env>-optimization` (Step Functions) | Read the optimizer image from SSM, create/describe/stop SageMaker Processing jobs `<prefix>-opt-*`, invoke the results-publisher Lambda alias `live`, pass the SageMaker optimization role, use KMS grants for job volumes and S3 | Start executions (API only); change image pointers |
+| SageMaker role `mmm-<env>-sagemaker-optimization` | Read models and results buckets, write run output under results, pull `mmm/sagemaker-optimizer` from ECR | Other buckets, other repos |
+| `mmm-<env>-results-publisher` (Lambda) | Connect to RDS Proxy as `mmm_app`, read finished run output under `results/runs/*` | Write S3, start jobs |
+
+### Model refresh (only when `enable_data_platform = true`)
+
+| Role | May | May not |
+|---|---|---|
+| `mmm-<env>-model-refresh` (Step Functions) | Call Databricks job APIs through the EventBridge connection, run SageMaker training/evaluation jobs, register model packages `PendingManualApproval` | Approve models (governance pipeline only) |
+| SageMaker role `mmm-<env>-sagemaker-training` | Read training-data and models, write artifacts and evaluation reports, register into model package groups `<prefix>-<bu>` | Publish curves to `curves/` (approver role only) |
+| `mmm-<env>-model-refresh-trigger` | `states:StartExecution` on the model-refresh state machine (Scheduler and on-demand EventBridge rule) | Anything else |
+
+### GitHub Actions roles (OIDC)
+
+Defined in `infra/modules/iam-oidc/main.tf` per environment:
+
+| Role | Trust (summary) | Purpose |
+|---|---|---|
+| `mmm-<env>-gha-plan` | GitHub Environment `<env>`, optional PR and `main` | Read-only plan, state lock, refresh secret metadata |
+| `mmm-<env>-gha-apply` | GitHub Environment `<env>` | Terraform apply (AdministratorAccess capped by boundary) |
+| `mmm-<env>-gha-deploy` | GitHub Environment `<env>` | ECS deploy, migrate task, Aurora **cluster** snapshot, SSM image pointers, Lambda release |
+| `mmm-<env>-gha-ecr-push` | `<env>` and optionally `main` | Push images to dev ECR; promotion target in staging/prod |
+| `mmm-<env>-gha-ecr-read` | Trusted **previous** environment | Pull images for promotion |
+| `mmm-<env>-gha-model-eval` | `main` branch only | Read model registry + evaluation JSON; may set **Rejected** only |
+| `mmm-<env>-gha-model-approve` | GitHub Environment `<env>-model-promotion` | Approve/reject packages; copy curves to `s3://<models>/curves/<bu>/` |
+
+### GenAI (Release 2, `enable_genai = true`)
+
+There is no separate GenAI ECS task. The **API task role** invokes a private API Gateway (IAM
+SigV4) that proxies to approved external LLM providers; Bedrock guardrails run inside that path.
+Provider API keys live in Secrets Manager and are not on the task role. Details:
+[12-genai-bedrock.md](12-genai-bedrock.md).
+
+### Database users (RDS Proxy, IAM auth required)
+
+| DB user | Used by | How |
+|---|---|---|
+| `mmm_app` | API task, results-publisher Lambda | `rds-db:connect` on `arn:…:dbuser:<proxy_resource_id>/mmm_app` |
+| `mmm_migrator` | migrate task | Same pattern for `mmm_migrator` |
+| `mmm_admin` | migrate task during bootstrap only | Same pattern for `mmm_admin` |
+
+Passwords for these users are in Secrets Manager (`rds/proxy`, `rds/migrate`); the proxy reads
+them. Clients never use passwords at runtime—they present an IAM auth token to the proxy with TLS.
 
 ## 3. Planner authorization (application layer)
 
-### Roles (from the Okta `mmm_roles` claim)
+### Sign-in and request identity
+
+Planners open the app URL on the public ALB. Unauthenticated browser traffic is redirected to
+Cognito hosted UI → WBD Okta (MFA at Okta). After sign-in, the ALB sets session cookie
+`mmm-session`.
+
+- Default ALB route → **ui** target group (static web app).
+- `/api/health` → **api** target group without authentication (smoke tests and monitoring).
+- `/api/*` → authenticate with Cognito; unauthenticated API calls get **401** (not a redirect).
+
+The API reads the ALB-injected header `x-amzn-oidc-data` (JWT). The signer must match the
+environment variable `ALB_ARN`. Okta passes group membership in SAML attribute `groups`, mapped
+to Cognito **`custom:groups`**. The API maps those group names to business unit and app role
+(same naming convention as in [04](04-okta-mfa-app-login.md)—WBD to confirm group names).
+
+### Roles (from Okta groups via `custom:groups`)
 
 | Action | viewer | analyst | planner | approver | admin |
 |---|---|---|---|---|---|
@@ -95,8 +160,9 @@ Step 9; if pinning is high, the backend team may need to adjust how settings are
 
 | Store | Control |
 |---|---|
-| S3 buckets | Bucket policy: HTTPS only, deny non-KMS uploads, allow only named roles; per-BU KMS keys on data buckets (Step 13) |
-| SQS | Queue policy: API role can send, worker roles can receive/delete |
-| Redis | TLS + auth token, security group limited to API/worker SGs |
-| RDS | Reached only through RDS Proxy; IAM auth at the proxy; TLS forced |
-| Databricks | Unity Catalog grants per BU; ECS workers use a service principal with read on Gold and MLflow |
+| S3 buckets | Bucket policy: HTTPS only, deny non-KMS uploads, allow only named roles; per-BU KMS keys on data-platform buckets (Step 13) |
+| Aurora | Reached only through RDS Proxy; IAM auth at the proxy; TLS forced; cluster in private data subnets |
+| Step Functions | API may start optimization executions; refresh machine started only by Scheduler/EventBridge trigger role |
+| SageMaker | Job roles scoped to named buckets and ECR repos; job names prefixed by environment |
+| SageMaker Model Registry | Package groups per BU; governance roles may read evaluation JSON and (on approve) write `curves/` |
+| Databricks | Unity Catalog role on landing, lakehouse, training-data; no ECS task holds Databricks tokens—the refresh state machine uses an EventBridge connection (OAuth secret set out of band) |

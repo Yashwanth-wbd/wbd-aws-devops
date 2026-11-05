@@ -1,12 +1,14 @@
 # Week-1 acceptance thresholds for retrained media-mix models (scripts/model_governance.py).
-# A candidate is promoted only if EVERY metric passes AND the named WBD approver approves the
-# <env>-model-promotion GitHub Environment. A metric missing from the MLflow run fails the check.
+# A model package is approved only if EVERY metric passes AND the named WBD approver approves the
+# <env>-model-promotion GitHub Environment. A metric missing from evaluation.json fails the check.
 # Placeholder values until WBD and EY sign them off (docs/01).
 
-# Unity Catalog model name; {catalog} = MODEL_CATALOG_<ENV>, {business_unit} = key below
-model_name: "{catalog}.models.mmm_{business_unit}"
-candidate_alias: candidate
-production_alias: production
+# SageMaker model package group per business unit; {prefix} = mmm-<env_short>, {business_unit} = key below
+model_package_group: "{prefix}-{business_unit}"
+
+# The evaluation job writes <evaluation prefix>/evaluation.json ({"metric": value, ...}) and
+# <evaluation prefix>/curves/ (response curves). Approval copies the curves to s3://<models bucket>/curves/<bu>/.
+curves_prefix: "curves/{business_unit}/"
 
 business_units:
   usnetworks:

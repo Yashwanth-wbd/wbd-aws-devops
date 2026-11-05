@@ -20,8 +20,9 @@ variable "permissions_boundary_arn" {
 }
 
 variable "secret_arns" {
-  description = "Secrets Manager ARNs the execution role may inject into containers (only these)."
+  description = "Secrets Manager ARNs the execution role may inject into containers (only these; empty = none)."
   type        = list(string)
+  default     = []
 }
 
 variable "parameter_path_arn" {

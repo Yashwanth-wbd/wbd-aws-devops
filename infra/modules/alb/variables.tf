@@ -14,12 +14,12 @@ variable "public_subnet_ids" {
 }
 
 variable "security_group_id" {
-  description = "ALB security group (network module, alb): HTTPS from CloudFront only."
+  description = "ALB security group (network module, alb)."
   type        = string
 }
 
 variable "certificate_arn" {
-  description = "ACM certificate in this region for the ALB origin hostname (CloudFront checks it)."
+  description = "ACM certificate in this region for the app host name."
   type        = string
 
   validation {
@@ -28,10 +28,15 @@ variable "certificate_arn" {
   }
 }
 
-variable "origin_verify_value" {
-  description = "Shared secret CloudFront sends in X-Origin-Verify (secrets module, edge/origin-verify)."
-  type        = string
-  sensitive   = true
+variable "cognito" {
+  description = "Cognito sign-in at the ALB (cognito module). null = no authentication (only for tests)."
+  type = object({
+    user_pool_arn   = string
+    client_id       = string
+    domain_prefix   = string
+    session_seconds = optional(number, 43200)
+  })
+  default = null
 }
 
 variable "app_port" {
@@ -40,10 +45,22 @@ variable "app_port" {
   default     = 8080
 }
 
+variable "ui_port" {
+  description = "UI container port."
+  type        = number
+  default     = 8080
+}
+
 variable "health_check_path" {
-  description = "API health endpoint."
+  description = "API health endpoint (reachable without login)."
   type        = string
   default     = "/api/health"
+}
+
+variable "ui_health_check_path" {
+  description = "UI health endpoint (target group health check only)."
+  type        = string
+  default     = "/healthz"
 }
 
 variable "access_log_bucket" {

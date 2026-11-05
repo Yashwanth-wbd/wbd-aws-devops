@@ -36,14 +36,14 @@ git grep -n -A1 "add actual value"
 | Central egress firewall instead of NAT? | assumed no (`enable_nat_gateway = true`) | env tfvars | WBD Network | Open |
 | Resolver forward domains + target IPs | `wbd.internal` → `10.0.0.2`, `10.0.0.3` (`enable_resolver_forwarding = false`) | env tfvars | WBD Network | Open |
 | Existing VPC to reuse (if any) | none – new VPC created | network module | WBD Network | Open |
-| CloudFront origin-facing prefix list ID | looked up by name in the network module | ALB security group | AWS | Decided – no input needed |
+| ALB ingress CIDRs (who may reach HTTPS on the public ALB) | `["0.0.0.0/0"]` | env tfvars `alb_ingress_cidrs`, ALB security group | WBD Security / Network | Open – tighten to WBD egress ranges if required |
 
 ## GitHub and CI/CD
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
-| GitHub organisation | `wbd-org` | OIDC trust policies | WBD GitHub admins | Open |
-| Repository name | `wbd-mmm-platform` | OIDC trust policies | WBD GitHub admins | Open |
+| GitHub organisation | `Yashwanth-wbd` | OIDC trust policies | WBD GitHub admins | Open |
+| Repository name | `wbd-aws-devops` | OIDC trust policies | WBD GitHub admins | Open |
 | GitHub Actions approved instead of Jenkins | assumed yes | `.github/workflows/` | WBD | Open |
 | Staging approver(s) | `ey-delivery-lead` | GitHub Environment `staging` | EY | Open |
 | Prod approver(s) + CAB contact | `wbd-release-approver` | GitHub Environment `prod` | WBD | Open |
@@ -53,9 +53,9 @@ git grep -n -A1 "add actual value"
 | Change-ticket format for prod (CAB) | `CHG` + 7 digits in the annotated tag message | `deploy.yml` (`CHANGE_TICKET_PATTERN`) | WBD CAB | Open |
 | Pin actions to commit SHAs? | major tags (`@v5`), Dependabot | `.github/workflows/` | WBD Security | Open |
 | GitHub Advanced Security (secret scanning push protection, CodeQL) | not assumed | repo settings | WBD | Open |
-| App start / migration commands, health path, frontend build folder | `uvicorn app.main:app`, `python -m worker`, `alembic upgrade head`, `/api/health`, `dist/` | `ecs/<env>/*.json`, `frontend-ci.yml` | EY dev teams | Open |
+| App start / migration commands, health paths | API: `uvicorn app.main:app`, migrate: `alembic upgrade head`, `/api/health`, UI: `/healthz` | `ecs/<env>/{api,ui,migrate}.json`, `api-ci.yml`, `ui-ci.yml` | EY dev teams | Open |
 | Test coverage gate | 80 % | `_python-service-ci.yml` (`coverage_min`) | EY / WBD | Open |
-| Smoke URL before WBD DNS exists | CloudFront domain via `SMOKE_BASE_URL` | `deploy.yml` | EY | Open |
+| Smoke URL before WBD DNS exists | `APP_URL` from Terraform (`https://<app_domain_name>`) or override `SMOKE_BASE_URL` | `deploy.yml`, `scripts/smoke.sh` | EY | Open – ALB DNS name works until DNS is cut over |
 
 ## Security, logging, operations
 
@@ -73,64 +73,66 @@ git grep -n -A1 "add actual value"
 | Operations owner after handover, RACI, hypercare length | proposal in `docs/13` (4 weeks hypercare) | `docs/13-operations-and-handover.md` | WBD Ops / EY delivery lead | Open (Step 15) |
 | Splunk HEC token | none in Git – stored in Secrets Manager | `mmm/<env>/splunk/hec` | WBD Splunk | Open |
 | Object Lock retention for approved scenarios | `2555` days (7 years), GOVERNANCE in dev/staging, COMPLIANCE in prod | S3 module | WBD Legal / Audit | Open |
-| RDS instance class + storage per env | dev `db.t4g.medium` 50 GB; staging `db.r6g.large` 100 GB; prod `db.r6g.xlarge` 200 GB (autoscale to 1000) | env tfvars `rds_*` | WBD / EY sizing | Open |
-| ElastiCache node type per env | dev `cache.t4g.small`; staging and prod `cache.r6g.large` | env tfvars `redis_node_type` | WBD / EY sizing | Open |
-| ECS task counts per env (min–max) | api 1–2 / 2–4 / 3–10, what-if 1–2 / 1–4 / 2–6, optimizer 0–3 / 0–5 / 0–10 | `ecs.tf` `local.scaling` | EY load test / WBD | Open |
+| Aurora Serverless v2 ACU range per env | dev 0.5–4 (1 instance); staging 0.5–16 (2); prod 1–32 (2) | env tfvars `aurora_min_acu`, `aurora_max_acu` | WBD / EY sizing | Open |
+| ECS task counts per env (min–max, CPU autoscaling) | api 1–2 / 2–4 / 3–10; ui 1–2 / 2–3 / 2–6 | `ecs.tf` `local.ecs_sizing` | EY load test / WBD | Open |
 | Log retention staging / prod | 90 / 365 days (CloudWatch), flow logs 90 / 365 | env tfvars | WBD Security / Audit | Open |
 | Platform-check task in prod | `enable_platform_check_task = true` for go-live, then `false` | prod tfvars | EY | Open |
-| Valkey acceptable instead of Redis OSS? | assumed yes (Valkey 8.0) | elasticache module `engine` | WBD Architecture | Open |
 | RPO / RTO sign-off (per failure type) | proposal in `docs/08` section 1 (DB RPO ≤ 5 min, env rebuild RTO 4 h, region RTO 8 h) | backup module, docs/08 | WBD | Open |
 | Cross-region backup copy approved? | prod only, `enable_cross_region_copy = false` until approved | backup module | WBD | Open |
 | Vault lock (COMPLIANCE, irreversible) approved + retention (min 7 / max 400 days, monthly 365) | prod only, `enable_vault_lock = false` | backup module | WBD Security | Open |
 | S3 cross-region replication of results / approved-worm (RPO minutes instead of 24 h) | not built: the DR copy of these buckets is the AWS Backup cross-region copy (daily, RPO 24 h). S3 replication only if WBD needs RPO in minutes | backup module (`enable_cross_region_copy`) | WBD | Proposed (Step 12) |
+| WAF rate limit per IP | dev `2000` req/5 min | env tfvars `waf_rate_limit` | WBD Security | Open |
+| WAF geo allow list (empty = no geo block) | `geo_allow_countries = []` | env tfvars | WBD Security | Open |
+| WAF observe-only rules | `waf_count_only = []` | env tfvars | WBD Security | Open |
 
 ## Front door and Okta
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
-| App domain names (Step 8) + CNAMEs from `terraform output dns_records_for_wbd` | `mmm-dev.`, `mmm-stg.`, `mmm.example.wbd.com` (origins `origin-mmm-dev.`, `origin-mmm-stg.`, `origin-mmm.`) | env tfvars `cloudfront_aliases`, `alb_origin_domain_name` | WBD DNS | Open (Route 53 later) |
-| CloudFront certificate (Step 8): ACM in **us-east-1** covering every alias | `cloudfront_certificate_arn` | edge module | WBD DNS / PKI | Open |
-| ALB origin certificate (Step 7): ACM cert in `aws_region` for the origin name, e.g. `origin-mmm-dev.<wbd-domain>`, and a CNAME from that name to `alb_dns_name` | `alb_certificate_arn` in tfvars | alb module | WBD DNS / PKI | Open |
+| App domain name per environment | dev `mmm-dev.example.wbd.com`; staging/prod WBD to provide | env tfvars `app_domain_name` | WBD DNS | Open |
+| DNS: Route 53 zone in account or CNAME from WBD | `route53_zone_id = null` → use `terraform output dns_records_for_wbd` | `frontdoor.tf` | WBD DNS | Open |
+| ACM certificate in **workload region** for `app_domain_name` | `alb_certificate_arn` | `alb` module HTTPS listener | WBD DNS / PKI | Open |
+| Okta SAML app metadata URL per environment | dev `https://wbd.okta.com/app/exk…/sso/saml/metadata` | env tfvars `okta_saml_metadata_url` | WBD Identity | Open |
+| Cognito hosted domain prefix (globally unique per region) | dev `wbd-mmm-dev` | env tfvars `cognito_domain_prefix` | EY / WBD | Open |
+| ALB session length (hours) | `12` | env tfvars `session_hours` | WBD Identity | Open |
+| Okta SAML ACS URL + audience (from Terraform after apply) | `terraform output okta_app_settings` | Okta SAML app configuration | WBD Identity | Open – WBD enters values Terraform prints |
+| SAML group attribute name | `groups` (maps to Cognito `custom:groups`) | Okta app + `cognito` module | WBD Identity | Open |
+| Okta group names → BU + role | see `docs/04-okta-mfa-app-login.md` | Okta group membership | WBD Identity | Open |
 | Egress to PyPI through NAT (one-time DB bootstrap) or a WBD package mirror | – | `scripts/db-bootstrap.py` | WBD Network | Open |
-| Okta org URL | `https://wbd.okta.com` | SSM `/mmm/<env>/okta/issuer` | WBD Identity | Open |
-| Okta authorization server ID | `aus0000000000000000` | SSM `/mmm/<env>/okta/issuer` | WBD Identity | Open |
-| Okta SPA client ID per environment | dev `0oa00000000000000000`, staging `…0001`, prod `…0002` | SSM `/mmm/<env>/okta/client_id` | WBD Identity | Open |
-| Okta API audience (one per environment) | `api://mmm-dev`, `api://mmm-stg`, `api://mmm-prd` | SSM `/mmm/<env>/okta/audience` | WBD Identity | Open |
-| Okta group names → BU + role | see `docs/04-okta-mfa-app-login.md` | Okta claims | WBD Identity | Open |
-| Geo restriction for the app (Step 8) | `geo_allow_countries = []` (none) | edge module | WBD Security | Open |
-| HSTS preload for the WBD domain (Step 8) | not set (2-year HSTS with subdomains only) | edge module | WBD domain owners | Open |
-| Internet-facing or internal-only app? | assumed internet-facing behind CloudFront + WAF + Okta | edge module | WBD Security | Open |
+| Internet-facing or internal-only app? | internet-facing public ALB + regional WAF + Cognito/Okta | `alb`, `waf-regional` | WBD Security | Open |
 
 ## Data and AI
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
-| Databricks workspace host | `https://dbc-00000000-0000.cloud.databricks.com` | databricks-access module | WBD Databricks | Open |
+| Databricks workspace host | `https://dbc-00000000-0000.cloud.databricks.com` | tfvars, SSM `/mmm/<env>/databricks/host` | WBD Databricks | Open |
 | Databricks account ID | `00000000-0000-0000-0000-000000000000` | Unity Catalog IAM role trust | WBD Databricks | Open |
 | Databricks PrivateLink service name | `com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000` | databricks-access module | WBD Databricks | Open |
-| Databricks SQL warehouse HTTP path | `/sql/1.0/warehouses/0000000000000000` | worker task definitions | WBD Databricks | Open |
+| Databricks service principal client ID (model-refresh Step Functions) | dev `…00000000c001` | tfvars `databricks_sp_client_id`, EventBridge connection | WBD Databricks | Open |
+| Databricks service principal OAuth secret (model refresh) | not in Git – set on EventBridge connection `<prefix>-databricks` | `aws events update-connection` ([docs/05](05-secrets-and-config.md)) | WBD Databricks | Open |
+| Databricks refresh job ID (Lakeflow / jobs API) | `0` until job exists | tfvars `databricks_refresh_job_id` | WBD Data / EY | Open |
+| Databricks deploy SP client ID (Asset Bundle only) | WBD to provide | GitHub Environment `DATABRICKS_CLIENT_ID` via `setup-github.ps1 -DatabricksClientId` | WBD Databricks | Open |
 | Third-party vendors needing API keys | `adstra`, `inscape` | env tfvars `third_party_vendors` | WBD Data owners | Open |
-| Databricks service-principal token | none in Git – Secrets Manager | `mmm/<env>/databricks/sp` | WBD Databricks | Open |
-| Source feed delivery method (S3 / SFTP / API) | S3 drop to landing bucket | data-trigger module | WBD Data owners | Open |
-| Orchestration: MWAA or Databricks Workflows | MWAA + EventBridge + Lambda behind `enable_data_platform` | Step 13 | User / WBD | Decided |
-| Approved LLM model ID(s) (Release 2) | `genai_approved_model_ids = ["anthropic.claude-3-5-sonnet-20240620-v1:0"]` | bedrock module, gateway task role | WBD Responsible AI | Open |
-| Token capacity / per-BU quotas | `1000000` tokens/day per BU | SSM quotas | WBD | Open |
-| Guardrail thresholds (prompt attack, PII, grounding, relevance) | prompt attack `HIGH`, content `MEDIUM`, PII anonymize email/phone/name/address, block SSN/card/bank/keys/passwords, `genai_grounding_threshold = 0.75`, `genai_relevance_threshold = 0.75` | Bedrock Guardrails (Step 14) | WBD Responsible AI | Open |
-| Bedrock invocation logging already configured in the accounts? | assumed no: `enable_bedrock_invocation_logging = true` | bedrock module (account + region singleton) | WBD Cloud Platform | Open |
-| Monthly Bedrock budget | `genai_monthly_budget_usd` dev `200`, staging `500`, prod `2000` | bedrock module budget | WBD | Open |
-| Cost Explorer service names of the approved models | `["Amazon Bedrock", "Claude 3.5 Sonnet (Amazon Bedrock Edition)"]` | `genai_budget_service_names` | WBD Finance | Open (check Cost Explorer after the first calls) |
-| Bedrock model access / EULA per account | manual, Bedrock console (once per account) | Step 14 | WBD Cloud Platform | Open |
-| Approved GenAI gateway base image | `python:3.12-slim` | `apps/genai-gateway/Dockerfile` | WBD Security | Open |
-| Release 1 gate sign-offs (G1–G5) | – | `docs/11-release-1-readiness.md` | EY delivery lead / WBD | Open |
-| Model-promotion approver | `wbd-model-approver` | GitHub Environment `<env>-model-promotion` | WBD | Open |
+| Source feed delivery method (S3 / SFTP / API) | S3 drop to landing bucket | landing bucket policy | WBD Data owners | Open |
+| Model refresh schedule + timezone | `cron(0 6 ? * MON *)`, `America/New_York` | tfvars `model_refresh_schedule`, `model_refresh_timezone` | WBD Data | Open |
+| Enable scheduled refresh | `enable_model_refresh_schedule = false` | tfvars | WBD Data | Open |
+| SageMaker training / optimizer instance types | training `ml.m5.2xlarge`; optimizer `ml.m5.xlarge` | env tfvars | WBD / EY sizing | Open |
 | Enable the data platform per environment | `enable_data_platform = false` | env tfvars (Step 13) | User / WBD Data | Open |
-| Business unit names (S3 prefixes, keys, models) | `usnetworks`, `streaming`, `theatrical` | env tfvars `business_units` | WBD Data owners | Open |
+| Business unit names (S3 prefixes, keys, models) | `usnetworks`, `streaming`, `theatrical` | env tfvars `business_units` (default) | WBD Data owners | Open |
 | Unity Catalog storage-credential External ID | = `databricks_account_id` | Unity Catalog role trust (docs/10 §4) | WBD Databricks | Open |
-| Unity Catalog catalog per environment | `mmm_dev`, `mmm_stg`, `mmm_prd` | env tfvars `databricks_catalog` (null = default) | WBD Databricks | Open |
-| GitHub OIDC service principal for model evaluation | `00000000-0000-0000-0000-00000000e001` (dev), `…e002`, `…e003` | env tfvars `databricks_eval_client_id` | WBD Databricks | Open |
-| GitHub OIDC service principal for model promotion | `00000000-0000-0000-0000-00000000a001` (dev), `…a002`, `…a003` | env tfvars `databricks_promote_client_id` | WBD Databricks | Open |
 | Databricks PrivateLink in use? | `enable_databricks_privatelink = false` | env tfvars | WBD Databricks / Network | Open |
-| Airflow → Databricks connection (SP OAuth secret) | none in Git – Secrets Manager | `mmm/<env>/airflow/connections/databricks_default` | WBD Databricks | Open |
-| MWAA size per environment | dev/stg `mw1.small` 1–2 / 1–4 workers, prod `mw1.medium` 2–10 | `data.tf` `mwaa_sizing` | EY / WBD Data | Open |
 | Model acceptance thresholds per business unit | MAPE ≤ 0.15/0.20, R² ≥ 0.80/0.75, R-hat ≤ 1.05, 0 negative channels | `data/model-thresholds.yaml` | WBD Data science / EY | Open |
-| Databricks job names | `mmm-<env>-transform`, `-data-quality`, `-retrain` | `data/dags/mmm_ingest.py` | WBD Data team | Open |
+| Model-promotion approver | `wbd-model-approver` | GitHub Environment `<env>-model-promotion` | WBD | Open |
+| Release 1 gate sign-offs (G1–G5) | – | `docs/11-release-1-readiness.md` | EY delivery lead / WBD | Open |
+
+## Release 2 GenAI (`enable_genai`)
+
+| Input | Placeholder | Used in | Owner | Status |
+|---|---|---|---|---|
+| Approved external LLM providers | OpenAI, Anthropic, Google (`llm_providers` in tfvars) | `llm-gateway` module | WBD Responsible AI | Open |
+| Provider API keys | `{"api_key":"..."}` per provider | Secrets Manager `mmm/<env>/llm/<provider>` | WBD / vendor contracts | Open |
+| GenAI feature flag at runtime | `genai_enabled = false` | SSM `/mmm/<env>/genai_enabled` | WBD | Open |
+| Token capacity / per-BU quotas | `1000000` tokens/day per BU | SSM `/mmm/<env>/genai/token_quota/<bu>` | WBD | Open |
+| Guardrail thresholds (prompt attack, PII, grounding, relevance) | prompt attack `HIGH`, content `MEDIUM`, PII mask/block per module defaults; `genai_grounding_threshold = 0.75`, `genai_relevance_threshold = 0.75` | `bedrock-guardrails` module | WBD Responsible AI | Open |
+| Lambda reserved concurrency for LLM proxy | `20` | tfvars `genai_reserved_concurrency` | WBD | Open |
+| API Gateway account logging role | `manage_apigw_account_logging_role = true` | tfvars | WBD Cloud Platform | Open |

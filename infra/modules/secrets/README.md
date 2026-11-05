@@ -9,9 +9,9 @@ for one environment. All of it is encrypted with the `secrets` KMS key.
 
 | Resource | Notes |
 |---|---|
-| `aws_secretsmanager_secret` per entry in `secrets` | Name `<path_prefix>/<key>`, e.g. `mmm/dev/redis/token`; KMS key `alias/mmm-<env>-secrets` |
+| `aws_secretsmanager_secret` per entry in `secrets` | Name `<path_prefix>/<key>`, e.g. `mmm/dev/splunk/hec`; KMS key `alias/mmm-<env>-secrets` |
 | `random_password` + `aws_secretsmanager_secret_version` | Only for entries with `generate = true` |
-| `aws_ssm_parameter` per entry in `parameters` | Name `/<path_prefix>/<key>`, e.g. `/mmm/dev/okta/issuer`; `String`, or `SecureString` with `secure = true` |
+| `aws_ssm_parameter` per entry in `parameters` | Name `/<path_prefix>/<key>`, e.g. `/mmm/dev/cognito/client_id`; `String`, or `SecureString` with `secure = true` |
 
 The secret and parameter names are listed in the environment stack (`infra/environments/<env>/main.tf`),
 not in this module.
@@ -20,18 +20,18 @@ not in this module.
 
 | Kind | Example | Where the value comes from |
 |---|---|---|
-| Generated (`generate = true`) | `redis/token`, `edge/origin-verify` | `random_password`, alphanumeric so it is valid as a Redis token and an HTTP header. The value exists only in Secrets Manager and the KMS-encrypted Terraform state. |
-| Container (`generate = false`) | `api/db`, `rds/proxy`, `databricks/sp`, `splunk/hec`, `thirdparty/<vendor>` | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never reads or overwrites it. |
-| RDS admin password | – | **Not here.** RDS creates and rotates it itself (`manage_master_user_password`, Step 6). |
+| Generated (`generate = true`) | none in v2 (supported for future use) | `random_password`, alphanumeric. The value exists only in Secrets Manager and the KMS-encrypted Terraform state. |
+| Container (`generate = false`) | `api/db`, `rds/proxy`, `rds/migrate`, `splunk/hec`, `thirdparty/<vendor>`, `llm/<provider>` (GenAI) | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never reads or overwrites it. |
+| Aurora admin password | – | **Not here.** RDS creates and rotates it itself (`manage_master_user_password`). |
+| Databricks client secret | – | **Not here.** It lives in the EventBridge connection `<prefix>-databricks` (data platform), set out of band (docs/05). |
 
 - **No secret value is ever a Terraform variable**, and nothing has a `change-me` default.
 - An ECS task that references an empty container fails to start. That is intentional, so a
   missing credential is noticed straight away.
 - To regenerate every generated secret, change `generated_secret_rotation_id` (for example to
-  `2026-12-01`) and apply. Then apply the consumers (ElastiCache, CloudFront, ALB) and force a
-  new ECS deployment.
-- `generated_values` is a **sensitive** output. Only other modules in the same stack use it,
-  for example ElastiCache `auth_token` and the CloudFront custom header. It is never printed.
+  `2026-12-01`) and apply. Then force a new ECS deployment of the consumers.
+- `generated_values` is a **sensitive** output. Only other modules in the same stack may use it.
+  It is never printed.
 
 ## Encryption and TLS
 

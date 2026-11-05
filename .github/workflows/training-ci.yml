@@ -1,0 +1,31 @@
+# SageMaker training + evaluation image (state machine "model-refresh"; argument "evaluate" = evaluation).
+name: training-ci
+
+on:
+  pull_request:
+    paths:
+      - apps/sagemaker-training/**
+      - .github/workflows/training-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/sagemaker-training/**
+      - .github/workflows/training-ci.yml
+      - .github/workflows/_python-service-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: training-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/_python-service-ci.yml
+    with:
+      app_dir: apps/sagemaker-training
+      repository: mmm/sagemaker-training

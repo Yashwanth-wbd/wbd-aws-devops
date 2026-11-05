@@ -1,6 +1,7 @@
-# Reusable CI for a Python service (api, optimizer-worker; genai-gateway in Release 2).
+# Reusable CI for a Python component (api, sagemaker-optimizer, sagemaker-training, results-publisher).
 # PR and main: lint, type-check, tests with a coverage gate, dependency + image scan.
 # main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
+# build_image = false (Lambda code): tests and dependency audit only; deploy.yml zips the code.
 name: python-service-ci
 
 on:
@@ -11,9 +12,13 @@ on:
         type: string
         required: true
       repository:
-        description: ECR repository, e.g. mmm/api
+        description: ECR repository, e.g. mmm/api (unused when build_image is false)
         type: string
-        required: true
+        default: ""
+      build_image:
+        description: Build, scan and push a container image
+        type: boolean
+        default: true
       python_version:
         type: string
         default: "3.12"
@@ -57,6 +62,7 @@ jobs:
       - name: Dependency audit (uv.lock, fixable Critical/High)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          version: ${{ vars.TRIVY_VERSION || 'v0.76.1' }}
           scan-type: fs
           scan-ref: ${{ inputs.app_dir }}
           scanners: vuln
@@ -66,6 +72,7 @@ jobs:
 
   build:
     needs: test
+    if: inputs.build_image
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -86,6 +93,7 @@ jobs:
       - name: Image scan (block fixable Critical/High)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          version: ${{ vars.TRIVY_VERSION || 'v0.76.1' }}
           image-ref: local/${{ inputs.repository }}:${{ steps.meta.outputs.tag }}
           scanners: vuln,secret
           severity: CRITICAL,HIGH
@@ -104,7 +112,7 @@ jobs:
           retention-days: 1
 
   push:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: inputs.build_image && github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15

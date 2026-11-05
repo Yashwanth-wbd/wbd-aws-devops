@@ -3,94 +3,44 @@ locals {
 
   # Simple single-metric alarms; anything with metric math is written out below.
   simple_alarms = merge(
+    { for svc, tg in var.target_group_arn_suffixes : "${svc}-no-healthy-targets" => {
+      description = "${svc} target group has no healthy task - the ${svc == "ui" ? "web app" : "API"} is down"
+      namespace   = "AWS/ApplicationELB"
+      metric      = "HealthyHostCount"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix, TargetGroup = tg }
+      statistic   = "Minimum"
+      period      = 60
+      evaluations = 2
+      threshold   = 1
+      operator    = "LessThanThreshold"
+      missing     = "breaching"
+    } },
     {
-      api-no-healthy-targets = {
-        description = "API target group has no healthy task - the app is down"
-        namespace   = "AWS/ApplicationELB"
-        metric      = "HealthyHostCount"
-        dimensions  = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.api_target_group_arn_suffix }
-        statistic   = "Minimum"
-        period      = 60
-        evaluations = 2
-        threshold   = 1
-        operator    = "LessThanThreshold"
-        missing     = "breaching"
-      }
-      queue-oldest-job = {
-        description = "Oldest job in ${var.queue_name} waits > ${var.queue_oldest_age_seconds}s - workers are not keeping up or are failing"
-        namespace   = "AWS/SQS"
-        metric      = "ApproximateAgeOfOldestMessage"
-        dimensions  = { QueueName = var.queue_name }
-        statistic   = "Maximum"
-        period      = 60
-        evaluations = 5
-        threshold   = var.queue_oldest_age_seconds
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-      dlq-not-empty = {
-        description = "Jobs failed 3 times and are in ${var.dlq_name} - check worker logs, then redrive"
-        namespace   = "AWS/SQS"
-        metric      = "ApproximateNumberOfMessagesVisible"
-        dimensions  = { QueueName = var.dlq_name }
-        statistic   = "Maximum"
-        period      = 60
-        evaluations = 1
-        threshold   = 0
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-      rds-cpu = {
-        description = "RDS CPU > ${var.rds_cpu_percent}% for 15 minutes"
+      aurora-cpu = {
+        description = "Aurora CPU > ${var.aurora_cpu_percent}% for 15 minutes"
         namespace   = "AWS/RDS"
         metric      = "CPUUtilization"
-        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
+        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
         statistic   = "Average"
         period      = 300
         evaluations = 3
-        threshold   = var.rds_cpu_percent
+        threshold   = var.aurora_cpu_percent
         operator    = "GreaterThanThreshold"
         missing     = "notBreaching"
       }
-      rds-free-storage = {
-        description = "RDS free storage < ${var.rds_free_storage_gib} GiB (autoscaling storage may be at its maximum)"
+      aurora-acu-max = {
+        description = "Aurora Serverless at > ${var.aurora_acu_percent}% of its maximum ACU for 15 minutes - raise aurora_max_acu"
         namespace   = "AWS/RDS"
-        metric      = "FreeStorageSpace"
-        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
-        statistic   = "Minimum"
+        metric      = "ACUUtilization"
+        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        statistic   = "Average"
         period      = 300
-        evaluations = 1
-        threshold   = var.rds_free_storage_gib * 1073741824
-        operator    = "LessThanThreshold"
+        evaluations = 3
+        threshold   = var.aurora_acu_percent
+        operator    = "GreaterThanThreshold"
         missing     = "notBreaching"
       }
     },
-    merge([for n in var.redis_node_ids : {
-      "redis-cpu-${n}" = {
-        description = "ElastiCache ${n} engine CPU > ${var.redis_percent}%"
-        namespace   = "AWS/ElastiCache"
-        metric      = "EngineCPUUtilization"
-        dimensions  = { CacheClusterId = n }
-        statistic   = "Average"
-        period      = 300
-        evaluations = 3
-        threshold   = var.redis_percent
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-      "redis-memory-${n}" = {
-        description = "ElastiCache ${n} memory > ${var.redis_percent}% - evictions will start"
-        namespace   = "AWS/ElastiCache"
-        metric      = "DatabaseMemoryUsagePercentage"
-        dimensions  = { CacheClusterId = n }
-        statistic   = "Maximum"
-        period      = 300
-        evaluations = 2
-        threshold   = var.redis_percent
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-    }]...),
     { for k, arn in var.certificate_arns : "cert-expiry-${k}" => {
       description = "ACM certificate ${k} expires in < ${var.certificate_days_to_expiry} days (renewal is failing - check DNS validation)"
       namespace   = "AWS/CertificateManager"
@@ -147,8 +97,8 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx_rate" {
 
   dynamic "metric_query" {
     for_each = {
-      requests  = { metric = "RequestCount", dimensions = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.api_target_group_arn_suffix } }
-      target5xx = { metric = "HTTPCode_Target_5XX_Count", dimensions = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.api_target_group_arn_suffix } }
+      requests  = { metric = "RequestCount", dimensions = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.target_group_arn_suffixes["api"] } }
+      target5xx = { metric = "HTTPCode_Target_5XX_Count", dimensions = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.target_group_arn_suffixes["api"] } }
       elb5xx    = { metric = "HTTPCode_ELB_5XX_Count", dimensions = { LoadBalancer = var.alb_arn_suffix } }
     }
 
@@ -168,7 +118,8 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx_rate" {
   tags = local.tags
 }
 
-# Published by the what-if worker (Embedded Metric Format, see README "App metric contract").
+# Published by the API, which runs the interactive what-if on the approved response curves
+# (Embedded Metric Format, see README "App metric contract").
 resource "aws_cloudwatch_metric_alarm" "whatif_latency" {
   alarm_name          = "${var.name_prefix}-whatif-p95"
   alarm_description   = "What-if simulation p95 > ${var.whatif_p95_ms / 1000}s for 3 of 5 minutes"

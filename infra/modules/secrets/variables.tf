@@ -1,5 +1,5 @@
 variable "path_prefix" {
-  description = "Path for secret and parameter names, e.g. mmm/dev -> secret mmm/dev/redis/token, parameter /mmm/dev/genai_enabled."
+  description = "Path for secret and parameter names, e.g. mmm/dev -> secret mmm/dev/api/db, parameter /mmm/dev/genai_enabled."
   type        = string
 
   validation {
@@ -27,7 +27,7 @@ variable "secrets" {
 
   validation {
     condition     = alltrue([for k, s in var.secrets : can(regex("^[a-z0-9_-]+(/[a-z0-9_-]+)*$", k)) && s.length >= 32 && s.length <= 128])
-    error_message = "Secret keys must be lowercase path segments (letters, digits, '_' or '-', e.g. Airflow conn IDs); length must be 32-128."
+    error_message = "Secret keys must be lowercase path segments (letters, digits, '_' or '-'); length must be 32-128."
   }
 }
 

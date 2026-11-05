@@ -1,7 +1,7 @@
 # 08 – Backup, restore and disaster recovery
 
 What is protected, how fast it comes back (RPO/RTO), and the exact restore steps. The
-infrastructure is in `infra/modules/backup` (Step 10).
+infrastructure is in `infra/modules/backup` (Step 10) and `infra/modules/aurora`.
 
 ## 1. RPO and RTO targets
 
@@ -10,83 +10,96 @@ These are proposed values, to be confirmed by WBD (tracked in `docs/01`).
 
 | Failure | Example | RPO | RTO | How |
 |---|---|---|---|---|
-| Bad data or a bad migration | Wrong rows deleted | ≤ 5 min | 1 h | RDS point-in-time restore (section 3) |
+| Bad data or a bad migration | Wrong rows deleted | ≤ 5 min | 1 h | Aurora PITR (section 3) |
 | Object overwritten or deleted | Results file overwritten | 0 | 15 min | S3 versioning: restore the previous version (section 4) |
 | Bucket or many objects lost | Bucket emptied | 24 h | 2 h | AWS Backup S3 restore (section 4) |
-| Bad app release | 5xx after deploy | 0 | 10 min | Circuit breaker, or redeploy the previous image (Step 11) |
-| One AZ down | AZ outage | 0 | minutes (automatic) | Multi-AZ RDS and Redis, tasks in 3 AZs (staging, prod) |
+| Bad app release | 5xx after deploy | 0 | 10 min | Circuit breaker, or redeploy the previous image ([09](09-cicd-pipelines.md)) |
+| One AZ down | AZ outage | 0 | minutes (automatic) | Aurora reader in another AZ (staging, prod); Fargate tasks spread across AZs |
 | Whole environment lost | Account or stack destroyed | 24 h (DB ≤ 5 min if the region is fine) | 4 h | Rebuild from code (section 5) + restore data |
 | Region down (prod) | Regional outage | 24 h | 8 h | Rebuild in `dr_region` from code + DR-vault copies (section 6). Needs WBD approval for cross-region copy. |
-| Redis lost | Node failure | n/a (cache) | minutes | Failover (staging, prod), or the app warms the cache again |
-| SQS jobs lost | Region failure | in-flight jobs | – | Users re-submit; job state is in the DB |
+| Optimization run lost mid-flight | Step Functions or SageMaker failure | n/a | minutes | User re-runs from the API; run state and inputs are in Aurora and S3 |
 
 ## 2. What protects what
 
 | Data | Day-to-day | Backup | Off-region |
 |---|---|---|---|
-| RDS | Multi-AZ (staging, prod) | Native PITR 7 / 14 / 35 days + AWS Backup daily (+ monthly, 1 year, prod) | AWS Backup copy (prod, optional) |
-| `results`, `approved-worm` | Versioning, Object Lock (approved) | AWS Backup daily | AWS Backup copy (prod, optional) |
-| `landing` | Versioning | Re-loadable from the source systems | – |
-| `exports` | Versioning | Not backed up (30-day temporary files) | – |
+| Aurora PostgreSQL | Serverless v2 cluster `mmm-<env_short>-aurora`; writer + reader (staging, prod) | Native **PITR** (7 / 14 / 35 days per env) **plus** AWS Backup daily cluster snapshots (tag `backup=true`) **plus** prod **pre-migration cluster snapshot** in `deploy.yml` | AWS Backup copy (prod, optional) |
+| S3 `results`, `approved-worm`, `models` | Versioning; Object Lock on approved-worm | AWS Backup daily (tag `backup=true`) | AWS Backup copy (prod, optional) |
+| SageMaker Model Registry | Metadata in AWS; artifacts and `evaluation.json` in `models` bucket | Same as `models` bucket | Same as bucket copy |
+| S3 `landing` | Versioning | Re-loadable from source systems | – |
+| S3 `training-data` | Object Lock (data platform) | Not in AWS Backup plan (rebuild from lakehouse) | – |
+| S3 `exports` | Versioning | Not backed up (30-day expiry) | – |
 | Terraform state | Versioning | – | Bootstrap bucket replication (prod, optional) |
 
-**Decision (Step 12, proposed to WBD):** the off-region copy of `results` and `approved-worm` is
-the AWS Backup cross-region copy (`enable_cross_region_copy`, prod). That keeps one mechanism, one
-DR vault and one approval for all data, at RPO 24 h, which matches the proposed region RTO of 8 h.
-S3 cross-region **replication** (RPO in minutes) is ready in the `s3-bucket` module
-(`replication` input). It is not switched on, because it needs DR buckets and KMS keys in
-us-west-2 plus an Object Lock bucket for `approved-worm`. Turn it on only if WBD asks for a
-shorter RPO.
+**Decision (Step 12, proposed to WBD):** the off-region copy of `results`, `approved-worm` and
+`models` is the AWS Backup cross-region copy (`enable_cross_region_copy`, prod). That keeps one
+mechanism, one DR vault and one approval for all data, at RPO 24 h, which matches the proposed
+region RTO of 8 h. S3 cross-region **replication** is available in the `s3-bucket` module but is
+not switched on unless WBD asks for a shorter RPO.
 
-## 3. Restore RDS to a point in time
+Details: `infra/modules/backup/README.md`, `infra/environments/dev/backup.tf`.
 
-PITR always creates a **new** instance. The current one is untouched until you cut over.
+## 3. Restore Aurora to a point in time
+
+PITR always creates a **new cluster**. The current cluster is untouched until you cut over.
+Cluster id: `mmm-<env_short>-aurora`. RDS Proxy: `mmm-<env_short>-aurora-proxy`.
 
 ```powershell
 $env:AWS_PROFILE = "mmm-dev-devops"
-$id  = "mmm-dev-pg"
+$cluster = "mmm-dev-aurora"
 $sg  = (terraform output -json security_group_ids | ConvertFrom-Json).rds
-aws rds describe-db-instances --db-instance-identifier $id --query "DBInstances[0].LatestRestorableTime"
+$subnet = "$cluster-subnets"
 
-# 1. Restore next to the current instance (time in UTC, before the bad change)
-aws rds restore-db-instance-to-point-in-time `
-  --source-db-instance-identifier $id --target-db-instance-identifier "$id-restore" `
+aws rds describe-db-clusters --db-cluster-identifier $cluster `
+  --query "DBClusters[0].LatestRestorableTime"
+
+# 1. Restore a new cluster (time in UTC, before the bad change)
+$restore = "$cluster-restore"
+aws rds restore-db-cluster-to-point-in-time `
+  --source-db-cluster-identifier $cluster `
+  --db-cluster-identifier $restore `
+  --restore-type copy-on-write `
   --restore-time 2026-11-03T09:55:00Z `
-  --db-subnet-group-name "$id-subnets" --db-parameter-group-name "$id-params" `
-  --vpc-security-group-ids $sg --no-publicly-accessible --enable-iam-database-authentication `
-  --manage-master-user-password --master-user-secret-kms-key-id "alias/mmm-dev-secrets" `
-  --copy-tags-to-snapshot --deletion-protection
-# staging / prod: add --multi-az
-aws rds wait db-instance-available --db-instance-identifier "$id-restore"     # 15-30 min
+  --db-subnet-group-name $subnet `
+  --vpc-security-group-ids $sg `
+  --no-publicly-accessible
+aws rds wait db-cluster-available --db-cluster-identifier $restore
+
+# 2. Add a Serverless v2 instance (required before the cluster accepts connections)
+aws rds create-db-cluster-instance `
+  --db-cluster-identifier $restore `
+  --db-instance-identifier "$restore-01" `
+  --db-instance-class db.serverless `
+  --engine aurora-postgresql
+aws rds wait db-instance-available --db-instance-identifier "$restore-01"
 ```
 
-2. **Check the data.** ECS Exec into the migrate task, or connect from a task in the app subnets,
-   to `"$id-restore"` and compare row counts or the affected rows.
-3. **Choose:**
-   - *Copy back a few rows:* export them from the restored instance, import into the current
-     one, then delete the restore (`aws rds delete-db-instance --db-instance-identifier "$id-restore" --skip-final-snapshot`).
-     You need to turn deletion protection off first.
-   - *Replace the whole database:* scale the services to 0 (or put the API in maintenance), then
-     rename the instances:
+3. **Check the data.** ECS Exec into the migrate task, or connect from a task in the app subnets
+   through the **restored cluster endpoint** (not the proxy yet) and compare row counts or the
+   affected rows.
 
-     ```powershell
-     aws rds modify-db-instance --db-instance-identifier $id --new-db-instance-identifier "$id-old" --apply-immediately
-     aws rds wait db-instance-available --db-instance-identifier "$id-old"
-     aws rds modify-db-instance --db-instance-identifier "$id-restore" --new-db-instance-identifier $id --apply-immediately
-     aws rds wait db-instance-available --db-instance-identifier $id
+4. **Choose:**
 
-     # Terraform tracks the instance by its resource ID (dbi-...), which still points to "-old".
-     terraform state rm module.rds.aws_db_instance.this
-     terraform import module.rds.aws_db_instance.this $id
-     terraform plan    # proxy target, admin secret ARN, monitoring, tags; review, then apply
-     ```
+   - *Copy back a few rows:* export from the restored cluster, import into the live cluster via
+     the proxy, then delete the restore cluster when done.
+   - *Replace the whole database:* stop writes (scale `api`/`ui` to 0 or maintenance mode), then
+     either:
+     - **Repoint RDS Proxy** to the restored cluster:
+       `aws rds register-db-proxy-targets --db-proxy-name "$cluster-proxy" --db-cluster-identifiers $restore`
+       (after deregistering the old target), **or**
+     - **Rename/swap clusters** so Terraform's identifier stays `mmm-<env_short>-aurora` and
+       import the restored cluster into state (DevOps + DBA—plan carefully).
 
-     Check `aws rds describe-db-proxy-targets --db-proxy-name mmm-dev-pg-proxy` returns
-     `AVAILABLE`, scale the services back, and delete `"$id-old"` after the incident review.
+     After cutover, check
+     `aws rds describe-db-proxy-targets --db-proxy-name "$cluster-proxy"` shows `AVAILABLE`,
+     scale services back, run `smoke.sh` against `APP_URL`.
 
-**Restore from an AWS Backup snapshot** works the same way: AWS Backup console → Vault
-`mmm-<env>-vault` → recovery point → Restore. Use the same subnet group, parameter group and
-security group. Then do steps 2 and 3.
+**Restore from an AWS Backup recovery point:** AWS Backup console → Vault
+`mmm-<env>-vault` → recovery point → Restore (Aurora cluster). Then add a `db.serverless`
+instance if the restore job did not create one, and follow steps 3–4.
+
+**Prod pre-deploy snapshot:** `deploy.yml` creates `mmm-prd-predeploy-<version>-<run>` before
+migrations—useful when the failure is tied to a specific release.
 
 ## 4. Restore S3 objects
 
@@ -111,22 +124,16 @@ first place. A restore is only needed if the bucket itself is lost.
 ## 5. Rebuild a whole environment from code
 
 1. Bootstrap state (Step 1), if the state bucket is gone.
-2. Create only what the database restore needs. Terraform also creates their dependencies:
-   network, KMS and security groups.
-
-   ```powershell
-   terraform apply -target=module.rds.aws_db_subnet_group.this -target=module.rds.aws_db_parameter_group.this
-   ```
-
-3. Restore RDS from the latest AWS Backup recovery point **as `mmm-<env>-pg`**, using that subnet
-   group, parameter group and the `rds` security group. Then adopt it:
-   `terraform import module.rds.aws_db_instance.this mmm-<env>-pg`. Without this, the next apply
-   would create an empty database.
+2. Create network, KMS and security groups, then Aurora subnet/parameter groups if needed.
+3. Restore Aurora from the latest AWS Backup recovery point **as `mmm-<env_short>-aurora`**
+   (or restore beside it and repoint the proxy), using the cluster subnet group and `rds`
+   security group. Adopt into Terraform:
+   `terraform import module.aurora.aws_rds_cluster.this mmm-<env_short>-aurora` (and instances).
+   Without this, the next apply would create an empty database.
 4. `terraform apply` the whole stack (Steps 3–10) with the same tfvars. Names are fixed, so
-   everything comes back with the same names. Then refill the WBD-issued secrets: Databricks,
-   Splunk and third-party (`docs/05`).
-5. Restore `results` and `approved-worm` from AWS Backup (section 4).
-6. Deploy the current release (Step 11 pipeline), then smoke test.
+   everything comes back with the same names. Refill WBD-issued secrets ([05](05-secrets-and-config.md)).
+5. Restore `results`, `approved-worm` and `models` from AWS Backup (section 4).
+6. Deploy the current release (`deploy.yml`), then smoke test.
 
 Run this end to end in staging at least twice a year (Step 15 runbook). Record the measured times
 against section 1.
@@ -134,15 +141,15 @@ against section 1.
 ## 6. Region failure (prod, if WBD approves the cross-region copy)
 
 1. In the prod tfvars, set `aws_region` to `dr_region` and use a separate state key. Apply Steps 3–10.
-2. Restore RDS and the buckets from the **DR vault** `mmm-prd-vault-dr`.
-3. Point WBD DNS (the CloudFront origin) at the new ALB. CloudFront itself is global.
+2. Restore Aurora and the buckets from the **DR vault** `mmm-prd-vault-dr`.
+3. Point WBD DNS at the new ALB (`terraform output dns_records_for_wbd` or Route 53 alias).
 4. Deploy the release. ECR images are copied to the DR region by the promotion job, or rebuilt.
 
 ## 7. Regular tests
 
 | Test | How often | Where |
 |---|---|---|
-| RDS point-in-time restore | Quarterly | staging (dev for the first run, Step 10) |
+| Aurora point-in-time restore | Quarterly | staging (dev for the first run, Step 10) |
 | S3 object and bucket restore | Quarterly | staging |
 | Full environment rebuild | Twice a year | staging |
 | Check backup jobs succeed | Weekly (automatic alert on failure) | all |

@@ -1,4 +1,0 @@
-# data.yml lints with: ruff check --select E,F,W,B,I --ignore E501 --target-version py311
-# MWAA puts dags/ on sys.path, so the shared helpers import as mmm_lib.
-[lint.isort]
-known-first-party = ["mmm_lib"]

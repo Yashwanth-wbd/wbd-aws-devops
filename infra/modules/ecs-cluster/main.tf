@@ -59,7 +59,7 @@ resource "aws_ecs_cluster_capacity_providers" "this" {
   }
 }
 
-# Service Connect: services call each other by name (e.g. http://genai-gateway:8080 in Release 2).
+# Service Connect: services call each other by name (http://<service>:<port>) if a later release needs it.
 resource "aws_service_discovery_http_namespace" "this" {
   name        = "${var.name_prefix}.internal"
   description = "Service Connect namespace for ${local.cluster_name}"
@@ -126,10 +126,13 @@ data "aws_iam_policy_document" "exec" {
     resources = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/ecs/${var.name_prefix}/*:*"]
   }
 
-  statement {
-    sid       = "InjectListedSecrets"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = var.secret_arns
+  dynamic "statement" {
+    for_each = length(var.secret_arns) > 0 ? [1] : []
+    content {
+      sid       = "InjectListedSecrets"
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = var.secret_arns
+    }
   }
 
   statement {

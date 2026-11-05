@@ -18,6 +18,7 @@ jobs:
       - name: Secret scan (same rules as scripts/secret-scan.ps1)
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          version: ${{ vars.TRIVY_VERSION || 'v0.76.1' }}
           scan-type: fs
           scan-ref: .
           scanners: secret
@@ -44,9 +45,9 @@ jobs:
       - name: shellcheck scripts
         run: shellcheck scripts/*.sh
 
-      - name: Line endings (scripts, DAGs and the Lambda run on Linux)
+      - name: Line endings (scripts run on Linux)
         run: |
-          bad=$(grep -rlU $'\r' scripts/*.sh scripts/*.py data infra/modules/data-trigger/lambda || true)
+          bad=$(grep -lU $'\r' scripts/*.sh scripts/*.py || true)
           [ -z "$bad" ] || { echo "::error::CRLF line endings in: $bad"; exit 1; }
 
       - name: actionlint
