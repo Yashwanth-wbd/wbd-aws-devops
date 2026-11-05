@@ -24,6 +24,11 @@
 > RDS Proxy; Cognito ← Okta SAML at the ALB; no CloudFront/SQS/ElastiCache/MWAA; what-if in the API;
 > run evidence in the `results` bucket; publisher Lambda without DLQ; one LLM proxy Lambda; Databricks
 > via an EventBridge connection and Asset Bundles (no `data-v*` tags); data platform and GenAI built but off.
+> A later review against this plan added the Step 9 alarms and the seven dashboards, the Step 11
+> backup of `training-data` and `lakehouse`, the Step 12 optimization dry run after each release
+> (dev/staging) and actions pinned to commit SHAs. Not built: Cognito threat protection (AWS does not
+> support it for federated sign-in), publisher DLQ, Synthetics canary. Still open (gaps): SBOM, DAST,
+> cosign, CODEOWNERS, performance tests.
 
 ---
 
