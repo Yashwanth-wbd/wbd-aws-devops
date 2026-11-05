@@ -10,7 +10,7 @@ variable "service_name" {
 }
 
 variable "task_role_suffix" {
-  description = "Task role name suffix: role is <name_prefix>-task-<suffix> (e.g. api, whatif, optimizer, migrate)."
+  description = "Task role name suffix: role is <name_prefix>-task-<suffix> (e.g. api, ui, migrate)."
   type        = string
 }
 
@@ -81,7 +81,7 @@ variable "memory" {
 }
 
 variable "container_port" {
-  description = "Port the app listens on (null for workers)."
+  description = "Port the app listens on (null for one-off tasks such as migrate)."
   type        = number
   default     = null
 }

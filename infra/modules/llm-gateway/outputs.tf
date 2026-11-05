@@ -25,5 +25,10 @@ output "log_group_names" {
 
 output "alarm_names" {
   description = "Gateway alarms."
-  value       = [aws_cloudwatch_metric_alarm.errors_5xx.alarm_name]
+  value       = [aws_cloudwatch_metric_alarm.errors_5xx.alarm_name, aws_cloudwatch_metric_alarm.errors_4xx.alarm_name, aws_cloudwatch_metric_alarm.latency.alarm_name]
+}
+
+output "api_name" {
+  description = "REST API name (dashboard dimension ApiName)."
+  value       = aws_api_gateway_rest_api.this.name
 }

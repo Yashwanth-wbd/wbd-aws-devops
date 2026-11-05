@@ -35,14 +35,44 @@ variable "aurora_cluster_id" {
   type        = string
 }
 
+variable "aurora_max_connections" {
+  description = "max_connections of the Aurora writer at max ACU (connections alarm). null = no connections alarm."
+  type        = number
+  default     = null
+}
+
+variable "aurora_has_reader" {
+  description = "The cluster has a reader instance (replica lag alarm)."
+  type        = bool
+  default     = false
+}
+
 variable "state_machine_arns" {
-  description = "Step Functions state machines shown on the dashboard (name => ARN). Each has its own failure alarm."
+  description = "Step Functions state machines (name => ARN). Keys optimization and model-refresh get their own dashboard and runtime / overdue alarms; failure and throttling alarms come from the step-functions module."
   type        = map(string)
   default     = {}
 }
 
 variable "lambda_function_names" {
   description = "Lambda functions shown on the dashboard. Each has its own errors alarm."
+  type        = list(string)
+  default     = []
+}
+
+variable "publisher_function_name" {
+  description = "Results publisher Lambda (optimization dashboard)."
+  type        = string
+  default     = null
+}
+
+variable "llm_gateway_api_name" {
+  description = "LLM gateway REST API name (GenAI dashboard). null = no GenAI dashboard."
+  type        = string
+  default     = null
+}
+
+variable "genai_business_units" {
+  description = "Business units whose GenAI token use is shown on the GenAI dashboard."
   type        = list(string)
   default     = []
 }
@@ -94,10 +124,63 @@ variable "aurora_acu_percent" {
   default     = 90
 }
 
+variable "aurora_connections_percent" {
+  description = "Aurora connections threshold (% of aurora_max_connections)."
+  type        = number
+  default     = 80
+}
+
+variable "aurora_free_local_storage_gib" {
+  description = "Alarm when the Aurora local (temporary) storage falls below this many GiB."
+  type        = number
+  default     = 2
+}
+
+variable "aurora_replica_lag_ms" {
+  description = "Aurora reader replica lag threshold (ms)."
+  type        = number
+  default     = 1000
+}
+
+variable "availability_target_percent" {
+  description = "Hourly availability (requests without a 5xx) below this raises the alarm."
+  type        = number
+  default     = 99.5
+}
+
+variable "availability_min_requests" {
+  description = "Below this many requests per hour availability is not evaluated."
+  type        = number
+  default     = 100
+}
+
 variable "whatif_p95_ms" {
   description = "What-if p95 duration threshold (ms)."
   type        = number
   default     = 10000
+}
+
+variable "optimization_standard_p95_seconds" {
+  description = "p95 duration (s) of standard optimization runs that raises the alarm (app metric OptimizeDurationMs, RunSize = standard)."
+  type        = number
+  default     = 120
+}
+
+variable "optimization_max_minutes" {
+  description = "Any optimization execution (large runs included) longer than this raises the alarm."
+  type        = number
+  default     = 10
+}
+
+variable "model_refresh_overdue_days" {
+  description = "Alarm when no model-refresh execution succeeded for this many days (1-7). null = off (scheduled refresh off)."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.model_refresh_overdue_days == null || try(var.model_refresh_overdue_days >= 1 && var.model_refresh_overdue_days <= 7, false)
+    error_message = "model_refresh_overdue_days must be 1-7 (CloudWatch evaluates at most 7 days)."
+  }
 }
 
 variable "certificate_days_to_expiry" {

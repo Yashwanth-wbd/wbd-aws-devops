@@ -14,7 +14,8 @@
 # are never changed. A component whose app folder is not in the commit is skipped.
 #
 # One job per run does everything after the approval gate: promote images -> (prod) Aurora snapshot ->
-# migration -> ECS -> smoke test -> SageMaker image pointers -> publisher -> release record.
+# migration -> ECS -> smoke test -> SageMaker image pointers -> publisher -> optimization dry run
+# (dev/staging) -> release record.
 # Any failure rolls every changed component back.
 name: deploy
 
@@ -131,7 +132,7 @@ jobs:
       CLUSTER: ${{ vars.ECS_CLUSTER }}
       REGISTRY: ${{ vars.ECR_REGISTRY }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.resolve.outputs.commit }}
           fetch-depth: 0
@@ -176,7 +177,7 @@ jobs:
 
       - name: Source registry login (previous environment)
         if: needs.resolve.outputs.promote == 'true'
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.SOURCE_ECR_READ_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -202,7 +203,7 @@ jobs:
 
       - name: Target registry login
         if: needs.resolve.outputs.promote == 'true'
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -219,7 +220,7 @@ jobs:
           done 3< "$STATE/sources.tsv"
 
       # ---------------------------------------------------------------- deploy
-      - uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -248,9 +249,11 @@ jobs:
 
       - name: Aurora snapshot before migration (prod)
         if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(env.COMPONENTS, 'api')
+        env:
+          AURORA_CLUSTER_ID: ${{ vars.AURORA_CLUSTER_ID }}
         run: |
           id="$PREFIX-predeploy-${VERSION//./-}-${GITHUB_RUN_ID}"
-          aws rds create-db-cluster-snapshot --db-cluster-identifier "$PREFIX-aurora" --db-cluster-snapshot-identifier "$id" \
+          aws rds create-db-cluster-snapshot --db-cluster-identifier "${AURORA_CLUSTER_ID:-$PREFIX-aurora}" --db-cluster-snapshot-identifier "$id" \
             --tags "Key=release,Value=$VERSION" "Key=github_run,Value=$GITHUB_RUN_ID" > /dev/null
           aws rds wait db-cluster-snapshot-available --db-cluster-snapshot-identifier "$id"
           echo "SNAPSHOT=$id" >> "$GITHUB_ENV"
@@ -299,6 +302,19 @@ jobs:
           echo "PUBLISHER_SHA256=$sha" >> "$GITHUB_ENV"
           new=$(scripts/lambda-release.sh publish "$PUBLISHER" "$RUNNER_TEMP/publisher.zip" "$VERSION")
           printf '\t%s\n' "$new" >> "$STATE/lambda.tsv"
+
+      - name: Optimization dry run (dev, staging)
+        if: >-
+          needs.resolve.outputs.environment != 'prod' && vars.SMOKE_DRY_RUN != 'false' &&
+          (contains(env.COMPONENTS, 'optimizer') || contains(env.COMPONENTS, 'publisher'))
+        env:
+          STATE_MACHINE: ${{ vars.OPTIMIZATION_STATE_MACHINE_ARN }}
+          RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
+          MODELS_BUCKET: ${{ vars.MODELS_BUCKET }}
+          BUSINESS_UNIT: ${{ vars.DRY_RUN_BUSINESS_UNIT }}
+        run: |
+          scripts/dry-run-optimization.sh "$STATE_MACHINE" "$RESULTS_BUCKET" "$MODELS_BUCKET" "$BUSINESS_UNIT" \
+            "$SSM_PREFIX/images/sagemaker-optimizer"
 
       # ---------------------------------------------------------------- rollback
       - name: Roll back
@@ -353,7 +369,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - if: always() && needs.resolve.result == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-record-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}
           path: ${{ runner.temp }}/deploy-state/release-record.json

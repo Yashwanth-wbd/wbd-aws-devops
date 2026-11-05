@@ -27,7 +27,7 @@ These are proposed values, to be confirmed by WBD (tracked in `docs/01`).
 | S3 `results`, `approved-worm`, `models` | Versioning; Object Lock on approved-worm | AWS Backup daily (tag `backup=true`) | AWS Backup copy (prod, optional) |
 | SageMaker Model Registry | Metadata in AWS; artifacts and `evaluation.json` in `models` bucket | Same as `models` bucket | Same as bucket copy |
 | S3 `landing` | Versioning | Re-loadable from source systems | – |
-| S3 `training-data` | Object Lock (data platform) | Not in AWS Backup plan (rebuild from lakehouse) | – |
+| S3 `training-data`, `lakehouse` (data platform) | Versioning; Object Lock on training-data | AWS Backup daily (tag `backup=true`); lakehouse size / cost to be confirmed by WBD (remove it from `backed_up_buckets` in `backup.tf` to exclude it) | AWS Backup copy (prod, optional) |
 | S3 `exports` | Versioning | Not backed up (30-day expiry) | – |
 | Terraform state | Versioning | – | Bootstrap bucket replication (prod, optional) |
 

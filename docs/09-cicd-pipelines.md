@@ -76,9 +76,13 @@ If `apps/<folder>` is missing in the checkout, that component is skipped with a 
    `/` → 302 to Cognito hosted UI (12 × 10 s by default).
 7. **SageMaker pointers**: write `registry/repo@digest` to SSM for `optimizer` / `training`.
 8. **Publisher**: `lambda-release.sh build` + `publish` → new version, alias `live` moved.
-9. **Rollback** on failure after step 5 started: previous ECS task defs, previous SSM values,
-   previous Lambda version. Migrations are **not** reverted (expand-then-contract).
-10. **Release record:** JSON artifact + job summary (version, digests, revisions, approvers,
+9. **Optimization dry run** (dev and staging, when `optimizer` or `publisher` changed;
+   `SMOKE_DRY_RUN=false` skips it): `scripts/dry-run-optimization.sh` starts one execution
+   `dryrun-<run>-<attempt>` with `dry_run = true` for `DRY_RUN_BUSINESS_UNIT` and waits up to 20 minutes.
+   It is skipped while no optimizer image was released or that BU has no approved curves yet.
+10. **Rollback** on failure after step 5 started: previous ECS task defs, previous SSM values,
+    previous Lambda version. Migrations are **not** reverted (expand-then-contract).
+11. **Release record:** JSON artifact + job summary (version, digests, revisions, approvers,
     change ticket, Aurora snapshot id).
 
 ### Who owns what in a task definition
@@ -133,7 +137,8 @@ gh auth login
 | `ECS_CLUSTER`, `APP_SUBNET_IDS`, `DATA_CLIENTS_SG_ID` | deploy, migration |
 | `APP_URL`, `AURORA_CLUSTER_ID`, `PUBLISHER_FUNCTION` | smoke test, prod snapshot, Lambda release |
 | `SAGEMAKER_IMAGE_PARAM_PREFIX` | deploy (SSM `/mmm/<env_short>/images`) |
-| `OPTIMIZATION_STATE_MACHINE_ARN` | optional diagnostics |
+| `OPTIMIZATION_STATE_MACHINE_ARN` | deploy dry run, runbooks |
+| `RESULTS_BUCKET`, `MODELS_BUCKET`, `DRY_RUN_BUSINESS_UNIT` | deploy dry run (dev, staging only) |
 | `SOURCE_ECR_READ_ROLE_ARN`, `SOURCE_ECR_REGISTRY` | staging/prod promotion |
 | `DATABRICKS_HOST` | `databricks.yml` (data platform) |
 | `DATABRICKS_CLIENT_ID` | `databricks.yml` (set by `-DatabricksClientId`, not in Terraform output) |
@@ -146,6 +151,7 @@ gh auth login
 | `SMOKE_BASE_URL` | `APP_URL` | Override smoke URL (for example before WBD DNS points at the ALB) |
 | `SMOKE_CHECK_VERSION` | off | `true` once `/api/health` returns `APP_VERSION` |
 | `SMOKE_CHECK_LOGIN` | `true` | Set `false` to skip the `/` → Cognito redirect check |
+| `SMOKE_DRY_RUN` | `true` | Set `false` to skip the post-release optimization dry run (dev, staging) |
 | `CHANGE_TICKET_PATTERN` | `CHG[0-9]{7}` | Regex for the change ticket in the prod tag message |
 
 **Repository variables** (from `terraform output github_repository_variables` per env):
@@ -162,8 +168,9 @@ CI/terraform checks when paths change; protect tags `v*` with a ruleset.
 
 ### 4.3 Recommended GitHub settings
 
-Secret scanning, Dependabot for actions/pip/npm, allow only selected actions, pin third-party
-actions to SHAs if WBD policy requires it.
+Secret scanning, Dependabot for actions/pip/npm, allow only selected actions. Every action in
+`.github/workflows` is pinned to a full commit SHA with the version as a comment
+(`uses: actions/checkout@<sha> # v5.1.0`); the weekly Dependabot PR moves SHA and comment together.
 
 ## 5. Contract with the app teams
 
@@ -175,7 +182,7 @@ actions to SHAs if WBD policy requires it.
 | Health | `GET /api/health` → 200 without auth; should include `APP_VERSION` when possible | `GET /healthz` → 200 (ALB target group) | n/a (batch job) | n/a | n/a |
 | ECS / runtime | `ecs/<env>/api.json` command | `ecs/<env>/ui.json` | Started by Step Functions `optimization` | Started by `model-refresh` (train + evaluate) | Handler `handler.lambda_handler` in deployed zip |
 | Migrations | Alembic in API image; `ecs/<env>/migrate.json` | – | – | – | – |
-| Config | Env vars and secrets from ECS ([05](05-secrets-and-config.md)) | `API_BASE_PATH`, `LOGOUT_URL` from Terraform | `APP_ENV`, `RUN_ID`, `BUSINESS_UNIT` from state machine | `APP_ENV`, `BUSINESS_UNIT`; CLI arg `evaluate` for evaluation job | DB and `RESULTS_BUCKET` from Lambda env (Terraform) |
+| Config | Env vars and secrets from ECS ([05](05-secrets-and-config.md)) | `API_BASE_PATH`, `LOGOUT_URL` from Terraform | `APP_ENV`, `RUN_ID`, `BUSINESS_UNIT`, `DRY_RUN` (`true`: load input + curves, write a small output, no solve) from state machine | `APP_ENV`, `BUSINESS_UNIT`; CLI arg `evaluate` for evaluation job | DB and `RESULTS_BUCKET` from Lambda env (Terraform); event field `dry_run` (`true`: check the DB connection, write no run) |
 | Shutdown | Finish in-flight HTTP on SIGTERM (~30 s) | Short stop timeout (~15 s) | SageMaker max runtime from tfvar | Training/processing max runtime from tfvar | Lambda timeout 120 s |
 
 ## 6. Everyday operations

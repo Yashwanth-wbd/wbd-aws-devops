@@ -335,3 +335,41 @@ resource "aws_cloudwatch_metric_alarm" "errors_5xx" {
 
   tags = local.tags
 }
+
+# 4xx = throttled (429), blocked by the guardrail or a bad request from the API.
+resource "aws_cloudwatch_metric_alarm" "errors_4xx" {
+  alarm_name          = "${local.name}-4xx"
+  alarm_description   = "LLM gateway 4xx > ${var.client_error_alarm_threshold} in 5 minutes (throttling 429, guardrail blocks or bad requests) - see ${aws_cloudwatch_log_group.proxy.name}"
+  namespace           = "AWS/ApiGateway"
+  metric_name         = "4XXError"
+  dimensions          = { ApiName = aws_api_gateway_rest_api.this.name, Stage = aws_api_gateway_stage.v1.stage_name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = var.client_error_alarm_threshold
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [var.alarm_topic_arn]
+  ok_actions          = [var.alarm_topic_arn]
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "latency" {
+  alarm_name          = "${local.name}-latency-p95"
+  alarm_description   = "LLM gateway p95 latency > ${var.latency_p95_ms / 1000}s for 3 of 5 periods of 5 minutes (provider slow)"
+  namespace           = "AWS/ApiGateway"
+  metric_name         = "Latency"
+  dimensions          = { ApiName = aws_api_gateway_rest_api.this.name, Stage = aws_api_gateway_stage.v1.stage_name }
+  extended_statistic  = "p95"
+  period              = 300
+  evaluation_periods  = 5
+  datapoints_to_alarm = 3
+  threshold           = var.latency_p95_ms
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [var.alarm_topic_arn]
+  ok_actions          = [var.alarm_topic_arn]
+
+  tags = local.tags
+}

@@ -258,6 +258,58 @@ data "aws_iam_policy_document" "deploy" {
       ]])
     }
   }
+
+  # Post-release dry run of the optimization state machine (dev/staging).
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunStart"
+      actions   = ["states:StartExecution"]
+      resources = ["arn:${local.partition}:states:${local.region}:${local.account_id}:stateMachine:${var.name_prefix}-optimization"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunWatch"
+      actions   = ["states:DescribeExecution"]
+      resources = ["arn:${local.partition}:states:${local.region}:${local.account_id}:execution:${var.name_prefix}-optimization:dryrun-*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunInput"
+      actions   = ["s3:PutObject"]
+      resources = ["${var.deploy_dry_run.results_bucket_arn}/runs/dryrun-*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunCurvesPresent"
+      actions   = ["s3:ListBucket"]
+      resources = [var.deploy_dry_run.models_bucket_arn]
+
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["curves/*"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunBucketKey"
+      actions   = ["kms:GenerateDataKey"]
+      resources = [var.s3_kms_key_arn]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "deploy" {

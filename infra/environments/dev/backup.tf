@@ -1,8 +1,10 @@
 # ================================================================== Step 10 - Backup and DR
 locals {
   # Aurora is selected through cluster_tags in module "aurora"; these buckets through their tags.
-  # training-data is not backed up: it is immutable (Object Lock) and can be rebuilt from the lakehouse.
-  backed_up_buckets = ["results", "approved-worm", "models"]
+  # training-data and lakehouse exist only with the data platform. Object Lock protects training-data
+  # from deletion, the backup also covers a lost bucket or key (restore into a new bucket).
+  # WBD to confirm the lakehouse backup size / cost; drop it from this list to exclude it.
+  backed_up_buckets = ["results", "approved-worm", "models", "training-data", "lakehouse"]
 
   backup_retention = {
     dev     = { daily = 7, monthly = null }

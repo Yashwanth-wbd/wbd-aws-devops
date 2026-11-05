@@ -75,13 +75,13 @@ jobs:
       BUSINESS_UNIT: ${{ inputs.business_unit || 'all' }}
       VERSION: ${{ inputs.action == 'evaluate' && inputs.version || '' }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
       - run: pip install --quiet -r scripts/requirements-model-governance.txt
 
-      - uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars[format('MODEL_EVAL_ROLE_ARN_{0}', matrix.environment)] }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -95,7 +95,7 @@ jobs:
           [ -n "$VERSION" ] && args+=(--version "$VERSION")
           python scripts/model_governance.py evaluate "${args[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: model-evaluation-${{ matrix.environment }}-${{ github.run_id }}
@@ -142,13 +142,13 @@ jobs:
           [ "$BUSINESS_UNIT" != all ] || { echo "::error::$ACTION needs one business_unit"; exit 1; }
           [ "$ACTION" != promote ] || [ -n "$VERSION" ] || { echo "::error::promote needs a version"; exit 1; }
 
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
       - run: pip install --quiet -r scripts/requirements-model-governance.txt
 
-      - uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}

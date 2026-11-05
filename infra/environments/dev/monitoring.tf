@@ -46,8 +46,19 @@ module "monitoring" {
   ecs_service_names         = [module.svc_api.service_name, module.svc_ui.service_name]
   state_machine_arns        = local.state_machines
   lambda_function_names     = local.lambda_functions
+  publisher_function_name   = module.publisher.function_name
   certificate_arns          = local.watched_certificates
   waf_web_acl_name          = module.waf.web_acl_name
+
+  # Aurora PostgreSQL default max_connections = LEAST(memory / 9531392, 5000); 2 GiB per ACU at max_acu
+  aurora_max_connections = min(floor(var.aurora_max_acu * 2147483648 / 9531392), 5000)
+  aurora_has_reader      = var.environment != "dev"
+
+  # Weekly schedule: alarm after 7 days without a successful refresh
+  model_refresh_overdue_days = var.enable_data_platform && var.enable_model_refresh_schedule ? 7 : null
+
+  llm_gateway_api_name = var.enable_genai ? module.llm_gateway[0].api_name : null
+  genai_business_units = var.enable_genai ? keys(var.genai_token_quotas) : []
 
   enable_log_data_protection = var.enable_log_data_protection
 

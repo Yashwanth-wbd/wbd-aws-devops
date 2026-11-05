@@ -42,6 +42,7 @@ SageMaker job logs.
 | Publisher Lambda error | DB/proxy unreachable, bad S3 output path, code bug | Publisher log; [ecs-task-stuck.md](ecs-task-stuck.md) if VPC-related |
 | `AccessDenied` on S3 curves | Model not promoted for that BU | [model-rollback.md](model-rollback.md) or promote the approved package |
 | Stuck `RUNNING` | SageMaker quota or capacity | Service quotas; retry after capacity returns |
+| Deploy step "Optimization dry run" red (execution `dryrun-<run>-<attempt>`) | The new optimizer image or publisher does not handle `DRY_RUN` / `dry_run`, or one of the causes above | The release was rolled back automatically; look at the dry-run execution like any other run, fix, release again |
 
 ## 4. Re-run
 

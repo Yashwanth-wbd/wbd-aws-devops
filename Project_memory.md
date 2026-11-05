@@ -75,7 +75,10 @@ old `bedrock` module. Modules deleted: `rds`, `elasticache`, `sqs`, `edge`, `mwa
 | Databricks customer-managed VPC | Not built – WBD workspace; PrivateLink optional (off) |
 | `data-v*` tags for Databricks jobs | None – `databricks.yml` deploys the bundle on merge to main (dev) or by dispatch |
 | Databricks credentials secret | Held by the EventBridge connection (OAuth client credentials) |
-| SageMaker endpoint, Studio, Synthetics, Chatbot, AI-log bucket, GenAI dashboard | Not built |
+| SageMaker endpoint, Studio, Synthetics, Chatbot, AI-log bucket | Not built |
+| Cognito advanced security (threat protection) in prod | Not built – AWS threat protection does not apply to federated (Okta) sign-in; risk checks and MFA stay in Okta |
+| Lambda publisher "DLQ not empty" alarm, separate SageMaker job alarm | Not needed – no DLQ (sync invoke); job failures fail the state machine (`-failed` alarm) |
+| Availability < 99.5 % "business hours" | Hourly alarm over all hours (CloudWatch cannot limit an alarm to business hours) |
 
 ---
 
@@ -184,9 +187,9 @@ Mock-plan results on 5 Nov 2026 (resources to add):
 
 | Env | Default | All optional features on |
 |---|---|---|
-| dev | 287 | 411 |
-| staging | 303 | 429 |
-| prod | 303 | 431 |
+| dev | 297 | 430 |
+| staging | 314 | 449 |
+| prod | 314 | 451 |
 
 Last run (5 Nov 2026): all of the above clean (Checkov 0 failed; accepted findings have a
 `#checkov:skip=<ID>:<reason>` comment).
@@ -201,8 +204,10 @@ Last run (5 Nov 2026): all of the above clean (Checkov 0 failed; accepted findin
 | Modules (`infra/modules`) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, **aurora**, ecs-cluster, alb, ecs-service, **cognito**, **waf-regional**, **step-functions**, **sagemaker**, **lambda-function**, monitoring, log-shipping, backup, databricks-access, **bedrock-guardrails**, **llm-gateway** (bold = new in v2). Each has a README |
 | Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets, Aurora), `frontdoor.tf` (Cognito, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (SSM image pointers, SageMaker role, publisher Lambda, optimization state machine), `data.tf` (Databricks access + connection, training side, model-refresh state machine, schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
 | ECS templates | `ecs/<env>/api.json`, `ui.json`, `migrate.json` |
-| Workflows | `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer, training, publisher; promotion, prod Aurora snapshot, migration, smoke, rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role), `databricks`, `model-governance`, `repo-checks` |
-| Scripts | `smoke.sh` (health + Cognito redirect), `deploy-components.sh`, `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh`, `model_governance.py` (SageMaker registry), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py`, `setup-github.ps1` (`-DatabricksClientId`), `sync-environments.ps1`, `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1`, `secret-scan.ps1` |
+| Workflows | `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer, training, publisher; promotion, prod Aurora snapshot, migration, smoke, optimization dry run in dev/staging, rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role), `databricks`, `model-governance`, `repo-checks`. **All actions pinned to commit SHAs** (`@<sha> # vX.Y.Z`; Dependabot updates them) |
+| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, Aurora CPU / ACU / connections / free local storage / replica lag (stg, prd), what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors, cert expiry, model refresh overdue (7 days), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization, aurora, cost (+ training, genai). Events: ECS deploy failed / service error, GuardDuty High, break-glass, backup job failed, model package state |
+| Backup | Aurora + `results`, `approved-worm`, `models`, and with the data platform `training-data`, `lakehouse` (lakehouse cost to confirm) |
+| Scripts | `smoke.sh` (health + Cognito redirect), `dry-run-optimization.sh` (post-release `dry_run` execution), `deploy-components.sh`, `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh`, `model_governance.py` (SageMaker registry), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py`, `setup-github.ps1` (`-DatabricksClientId`), `sync-environments.ps1`, `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1`, `secret-scan.ps1` |
 | Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed, model refresh failed, Cognito/Okta outage, DB restore, ECS task stuck, rotation, pipeline failure, model rollback, GenAI, security incident, break-glass) |
 | Requirement doc tools | `docs/requirements/tools/` – `extract_pptx.py` (slide text + images), `extract.py` (v1 docx/xlsx dump), `build_v2.py` (generates the `_2` xlsx/docx), `check_v2.py`; README explains use |
 
@@ -227,8 +232,12 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 ### 6.2 Gaps (still open)
 
 CODEOWNERS (needs team names), DAST (ZAP), SBOM (Syft), image signing (cosign), dev cost
-scale-down, performance tests, post-deploy integration tests, more dashboards / availability alarm,
-Synthetics canary, business-continuity page, shared account decision.
+scale-down, performance tests, post-deploy integration tests beyond the dry run, Synthetics canary,
+business-continuity page, shared account decision.
+
+App contract added on 5 Nov 2026 (the app teams must implement): `DRY_RUN` env in the optimizer
+image and `dry_run` in the publisher event; metrics `OptimizeDurationMs` (`RunSize` standard/large,
+from the publisher) and `GenAITokens` (`BusinessUnit`, from the API) – see `infra/modules/monitoring/README.md`.
 
 ### 6.3 Not in this repo but needed before a real deployment works
 
@@ -285,8 +294,9 @@ GitHub needs **no secrets** (OIDC). Details: `docs/05`.
   ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, AURORA_CLUSTER_ID, PUBLISHER_FUNCTION,
   OPTIMIZATION_STATE_MACHINE_ARN, SAGEMAKER_IMAGE_PARAM_PREFIX, GENAI_ENABLED` (+ `MODEL_REFRESH_STATE_MACHINE_ARN`,
   `DATABRICKS_HOST` with the data platform; `DATABRICKS_CLIENT_ID` via `-DatabricksClientId`);
+  dev/staging also `RESULTS_BUCKET, MODELS_BUCKET, DRY_RUN_BUSINESS_UNIT` (dry run);
   staging/prod also `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY`. Optional `SMOKE_BASE_URL`,
-  `SMOKE_CHECK_LOGIN`, `CHANGE_TICKET_PATTERN`.
+  `SMOKE_CHECK_LOGIN`, `SMOKE_DRY_RUN`, `CHANGE_TICKET_PATTERN`.
 - **Repository variables** (`github_repository_variables`): `AWS_REGION`, `TF_PLAN_ROLE_ARN_<ENV>`
   (+ `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` with the data platform).
 
@@ -372,3 +382,4 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 9 | 5 Nov 2026 | Push to GitHub | `89382f2` (v2), `bf4a051` (CI guards + shellcheck fix), `9504793` (context); all workflows green |
 | 10 | 5 Nov 2026 | Confirm everything is pushed | Local = `origin/main`, nothing uncommitted |
 | 11 | 5 Nov 2026 | Keep the chat context in one file | This file (`Project_memory.md`); doc generator scripts moved to `docs/requirements/tools/` |
+| 12 | 5 Nov 2026 | Review the whole project against requirement 2 (no code), then "fix all" | Built the missing plan items: Step 9 alarms + 7 dashboards, backup of training-data/lakehouse, deploy dry run, actions pinned to SHAs; Cognito threat protection recorded as not applicable; doc fixes (docs/08, 09, 11, 13, runbooks README, module READMEs, xlsx cells) |

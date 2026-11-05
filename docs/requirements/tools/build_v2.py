@@ -228,7 +228,7 @@ STATUS = {
     "Cognito identity provider (WBD Okta, OIDC/SAML)": "Built - SAML (okta_saml_metadata_url); groups -> custom:groups",
     "Cognito app client + hosted domain": "Built - confidential client for ALB authenticate-cognito (code flow)",
     "Cognito resource server + groups": "Not built - RBAC from Okta groups claim; ALB auth needs no custom scopes",
-    "S3 bucket - training data": "Built (versioned; no Object Lock)",
+    "S3 bucket - training data": "Built, off (enable_data_platform) - versioned, Object Lock (training_data_retention_days), AWS Backup",
     "S3 bucket - outputs": "Built as the 'results' bucket (runs/<run_id>/...)",
     "S3 bucket - SageMaker staging": "Not built - jobs read/write the results, training-data and models buckets",
     "S3 EventBridge notifications (landing bucket)": "Built (EventBridge on); refresh is scheduled or mmm.refresh event",
@@ -237,7 +237,7 @@ STATUS = {
     "RDS Proxy": "Built - IAM auth + TLS",
     "Service Quotas increase (Fargate vCPU)": "Manual request before load test",
     "IAM roles - ECS task roles": "Built: api, ui, migrate, platform-check",
-    "CloudWatch Logs data protection policy (optional)": "Built, off (enable_log_data_protection)",
+    "CloudWatch Logs data protection policy (optional)": "Built, on (enable_log_data_protection = true; set false if WBD already has an account policy)",
     "ALB target groups (ip) - ui and api": "Built - /healthz (ui), /api/health (api)",
     "Application Auto Scaling policies": "Built - CPU target 60% for api and ui (dev 1-2 / stg 2-4 + 2-3 / prd 3-10 + 2-6)",
     "Route 53 DNS records": "Built if route53_zone_id is set; otherwise WBD DNS adds the CNAME",
@@ -261,17 +261,17 @@ STATUS = {
     "SageMaker Studio domain (optional)": "Not built",
     "AWS Chatbot / Q Developer in chat apps (optional)": "Not built - SNS email",
     "CloudWatch Application Signals": "Built, off (enable_application_signals)",
-    "CloudWatch alarms": "Built: ALB/API, ECS, Aurora, Step Functions, Lambda; model thresholds checked by model-governance.yml",
-    "EventBridge rules -> SNS": "Built: GuardDuty High, ECS deployment failure, model package state; failures of runs via Step Functions alarms",
-    "CloudWatch dashboards": "Built - one platform dashboard",
+    "CloudWatch alarms": "Built: API 5xx, availability 99.5 %, health, what-if p95, optimization runtime (2 / 10 min), Step Functions failed + throttled, Lambda errors, Aurora CPU/ACU/connections/local storage/replica lag, cert expiry, model refresh overdue; thresholds checked by model-governance.yml",
+    "EventBridge rules -> SNS": "Built: GuardDuty High, ECS deployment failure, ECS service error, break-glass, backup job failed, model package state (incl. Rejected = failed thresholds)",
+    "CloudWatch dashboards": "Built: platform, api-ui, optimization, training, aurora, cost, genai",
     "IAM role + S3 backup bucket - Firehose": "Built, off (enable_splunk_shipping)",
     "Kinesis Data Firehose (to Splunk)": "Built, off (enable_splunk_shipping)",
     "IAM role - CloudWatch Logs subscription": "Built, off (enable_splunk_shipping)",
     "CloudWatch Logs subscription filters": "Built, off (enable_splunk_shipping)",
     "S3 bucket + IAM role - Synthetics (optional)": "Not built (gap)",
-    "CloudWatch Synthetics canary (optional)": "Not built (gap) - deploy smoke test instead",
+    "CloudWatch Synthetics canary (optional)": "Not built (gap) - deploy smoke test + optimization dry run instead",
     "AWS Backup vault": "Built (vault lock in prod)",
-    "AWS Backup plan + selection": "Built - Aurora, results, approved-worm, models (tag backup=true)",
+    "AWS Backup plan + selection": "Built - Aurora, results, approved-worm, models, training-data, lakehouse (tag backup=true; lakehouse cost to confirm)",
     "Cross-region backup copy (optional)": "Built, off (enable_cross_region_copy)",
     "SSM parameters - genai_enabled flag + token quotas": "Built - genai_enabled flag; token quotas enforced by the API",
     "Secrets Manager - LLM provider keys": "Built, off (enable_genai) - one per entry in llm_providers",
@@ -285,8 +285,8 @@ STATUS = {
     "Bedrock model access (optional)": "Not built",
     "S3 bucket - AI interaction logs": "Not built - API logs to CloudWatch (and Splunk)",
     "API task role update": "Built, off (enable_genai)",
-    "CloudWatch alarms - GenAI": "Built, off - gateway 5xx/latency",
-    "CloudWatch dashboard - GenAI": "Not built - platform dashboard",
+    "CloudWatch alarms - GenAI": "Built, off - gateway 4xx/5xx/latency, guardrail interventions, token quota 80 % per BU",
+    "CloudWatch dashboard - GenAI": "Built, off (enable_genai) - mmm-<env>-genai",
     "AWS Budgets - LLM cost alert": "Not built - account budget",
 }
 
@@ -307,6 +307,8 @@ DECISIONS = [
     ("MLflow replaced by SageMaker Model Registry?", "Yes; model-governance.yml: eval role rejects, approve role (env <env>-model-promotion) approves and publishes curves; rollback re-approves previous version", "No"),
     ("Results publisher DLQ?", "No DLQ - invoked synchronously by Step Functions with retries; failures alarm", "No"),
     ("Autoscaling signals?", "CPU target tracking (60%) for api and ui", "No"),
+    ("Cognito advanced security (threat protection) in prod?", "Not enabled - AWS threat protection does not cover federated (Okta) sign-in; risk-based checks and MFA stay in Okta", "No"),
+    ("Back up training-data and lakehouse?", "Yes, both in the daily AWS Backup plan (tag backup=true) with the data platform", "Lakehouse size / cost"),
 ]
 
 YELLOW = PatternFill("solid", fgColor="FFF2CC")
@@ -641,10 +643,12 @@ def build_docx():
         "Removed: rds, elasticache, sqs, edge (CloudFront), mwaa, data-trigger and bedrock modules; whatif/optimizer workers; "
         "genai-gateway service; MWAA DAG folder and data.yml.",
         "Pipelines: api-ci, ui-ci, optimizer-ci, training-ci, publisher-ci, deploy (promotion, migration, smoke, SSM image "
-        "pointers, Lambda alias, rollback), terraform, databricks (Asset Bundle), model-governance, repo-checks.",
+        "pointers, Lambda alias, optimization dry run in dev/staging, rollback), terraform, databricks (Asset Bundle), "
+        "model-governance, repo-checks. Every action is pinned to a commit SHA (Dependabot updates them).",
         "Not built (decision): SageMaker endpoint, Studio, SageMaker staging bucket, Cognito resource server, "
-        "API Gateway usage plans per BU, AI interaction-log bucket, GenAI dashboard, LLM / SageMaker budgets, publisher DLQ, "
-        "Synthetics canary, Chatbot.",
+        "Cognito threat protection (not available for federated sign-in), API Gateway usage plans per BU, "
+        "AI interaction-log bucket, LLM / SageMaker budgets, publisher DLQ, Synthetics canary, Chatbot.",
+        "Still open (gaps): SBOM, DAST before prod, cosign image signing, performance tests, CODEOWNERS.",
     ])
 
     h("11. Risks")

@@ -162,11 +162,15 @@ output "okta_app_settings" {
 
 # ------------------------------------------------------------------ Step 9 - Monitoring and logging
 output "monitoring" {
-  description = "Alert topic, alarms, event rules, dashboard and Splunk shipping."
+  description = "Alert topic, alarms, event rules, dashboards and Splunk shipping."
   value = {
-    alert_topic_arn     = module.monitoring.alert_topic_arn
-    dashboard           = module.monitoring.dashboard_name
-    alarms              = concat(module.monitoring.alarm_names, [module.optimization_sfn.alarm_name, module.publisher.alarm_name])
+    alert_topic_arn = module.monitoring.alert_topic_arn
+    dashboard       = module.monitoring.dashboard_name
+    dashboards      = module.monitoring.dashboard_names
+    alarms = concat(
+      module.monitoring.alarm_names, module.optimization_sfn.alarm_names, [module.publisher.alarm_name],
+      var.enable_data_platform ? module.refresh_sfn[0].alarm_names : [],
+    )
     event_rules         = module.monitoring.event_rule_names
     splunk_stream       = module.log_shipping.delivery_stream_name
     splunk_log_groups   = module.log_shipping.shipped_log_groups
@@ -194,6 +198,12 @@ output "github_environment_variables" {
       OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
       # deploy.yml writes the SageMaker image URIs here
       SAGEMAKER_IMAGE_PARAM_PREFIX = "/mmm/${local.env_short}/images"
+    },
+    local.is_prod ? {} : {
+      # deploy.yml post-release dry run (scripts/dry-run-optimization.sh)
+      RESULTS_BUCKET        = module.buckets["results"].bucket_name
+      MODELS_BUCKET         = module.buckets["models"].bucket_name
+      DRY_RUN_BUSINESS_UNIT = var.business_units[0]
     },
     var.enable_data_platform ? {
       MODEL_REFRESH_STATE_MACHINE_ARN = module.refresh_sfn[0].state_machine_arn
@@ -229,7 +239,7 @@ output "backup" {
     plan_id         = module.backup.plan_id
     backup_role_arn = module.backup.backup_role_arn
     selection_tag   = "${module.backup.selection_tag}=true"
-    backed_up       = concat(["aurora:${module.aurora.cluster_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}"])
+    backed_up       = concat(["aurora:${module.aurora.cluster_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}" if contains(keys(local.data_buckets), b)])
   }
 }
 
@@ -262,7 +272,7 @@ output "genai" {
     rest_api_id       = module.llm_gateway[0].rest_api_id
     proxy_function    = module.llm_gateway[0].proxy_function_name
     log_groups        = module.llm_gateway[0].log_group_names
-    alarms            = concat(module.llm_gateway[0].alarm_names, [module.guardrails[0].alarm_name])
+    alarms            = concat(module.llm_gateway[0].alarm_names, [module.guardrails[0].alarm_name], [for a in aws_cloudwatch_metric_alarm.genai_token_quota : a.alarm_name])
     guardrail_id      = module.guardrails[0].guardrail_id
     guardrail_version = module.guardrails[0].guardrail_version
     provider_secrets  = [for p in keys(var.llm_providers) : module.secrets.secret_names["llm/${p}"]]

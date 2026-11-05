@@ -87,15 +87,19 @@ Terraform ignores `task_definition` and `desired_count` on services.
 
 ### Step 9 – Monitoring (`monitoring.tf`)
 
-Alarms include `ui-no-healthy-targets`, `api-no-healthy-targets`, `api-5xx-rate`, `aurora-cpu`,
-`aurora-acu-max`, `whatif-p95`, `cert-expiry-alb`, optimization state machine **failed**, publisher
-**errors**, deployment/GuardDuty events. Dashboard `mmm-dev-platform`. Splunk when
-`enable_splunk_shipping = true`.
+Alarms include `ui-no-healthy-targets`, `api-no-healthy-targets`, `api-5xx-rate`, `availability`,
+`aurora-cpu`, `aurora-acu-max`, `aurora-connections`, `aurora-free-local-storage` (+ `aurora-replica-lag`
+in staging/prod), `whatif-p95`, `optimization-runtime-max`, `optimization-standard-p95`,
+`cert-expiry-alb`, optimization state machine **failed** / **throttled**, publisher **errors**,
+deployment/GuardDuty events; with the data platform `model-refresh-*` and `model-refresh-overdue`,
+with GenAI the gateway and token quota alarms. Dashboards `mmm-dev-platform`, `-api-ui`,
+`-optimization`, `-aurora`, `-cost` (+ `-training`, `-genai`). Splunk when `enable_splunk_shipping = true`.
 
 ### Step 10 – Backup (`backup.tf`)
 
 AWS Backup selects resources tagged `backup = true`: Aurora cluster, buckets `results`,
-`approved-worm`, `models`. Dev vault allows manual deletion of recovery points.
+`approved-worm`, `models`, and with the data platform `training-data` and `lakehouse`. Dev vault
+allows manual deletion of recovery points.
 
 ### Step 11 – CI/CD
 
@@ -327,6 +331,8 @@ Offline: `repo-checks` (actionlint, shellcheck, env sync). With GitHub: push rep
 includes `OPTIMIZATION_STATE_MACHINE_ARN`, `PUBLISHER_FUNCTION`, `APP_URL`, `AURORA_CLUSTER_ID`.
 
 Smoke test uses `APP_URL` from outputs (`scripts/smoke.sh` expects `/api/health` 200 and `/` → Cognito).
+After an optimizer or publisher release, `scripts/dry-run-optimization.sh` runs one `dry_run`
+execution (needs `RESULTS_BUCKET`, `MODELS_BUCKET`, `DRY_RUN_BUSINESS_UNIT` from the same output).
 
 ## Validate Step 13
 

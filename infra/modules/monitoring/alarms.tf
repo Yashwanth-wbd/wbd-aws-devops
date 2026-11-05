@@ -1,6 +1,12 @@
 locals {
   actions = [aws_sns_topic.alerts.arn]
 
+  # Decided on the map keys (known at plan time); the ARNs may only be known after apply.
+  has_optimization  = contains(keys(var.state_machine_arns), "optimization")
+  has_model_refresh = contains(keys(var.state_machine_arns), "model-refresh")
+  optimization_sm   = lookup(var.state_machine_arns, "optimization", "")
+  model_refresh_sm  = lookup(var.state_machine_arns, "model-refresh", "")
+
   # Simple single-metric alarms; anything with metric math is written out below.
   simple_alarms = merge(
     { for svc, tg in var.target_group_arn_suffixes : "${svc}-no-healthy-targets" => {
@@ -39,6 +45,76 @@ locals {
         threshold   = var.aurora_acu_percent
         operator    = "GreaterThanThreshold"
         missing     = "notBreaching"
+      }
+      # Temporary space for sorts and indexes; it grows with the ACU.
+      aurora-free-local-storage = {
+        description = "Aurora free local storage < ${var.aurora_free_local_storage_gib} GiB for 15 minutes - look for large sorts / temp files, raise aurora_min_acu"
+        namespace   = "AWS/RDS"
+        metric      = "FreeLocalStorage"
+        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        statistic   = "Minimum"
+        period      = 300
+        evaluations = 3
+        threshold   = var.aurora_free_local_storage_gib * 1073741824
+        operator    = "LessThanThreshold"
+        missing     = "notBreaching"
+      }
+    },
+    var.aurora_max_connections == null ? {} : {
+      aurora-connections = {
+        description = "Aurora connections > ${var.aurora_connections_percent}% of max_connections (${var.aurora_max_connections}) for 10 minutes - check the RDS Proxy pool and the API task count"
+        namespace   = "AWS/RDS"
+        metric      = "DatabaseConnections"
+        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        statistic   = "Maximum"
+        period      = 300
+        evaluations = 2
+        threshold   = floor(var.aurora_max_connections * var.aurora_connections_percent / 100)
+        operator    = "GreaterThanThreshold"
+        missing     = "notBreaching"
+      }
+    },
+    var.aurora_has_reader ? {
+      aurora-replica-lag = {
+        description = "Aurora reader lag > ${var.aurora_replica_lag_ms} ms for 10 minutes - reads may be stale; check writer load"
+        namespace   = "AWS/RDS"
+        metric      = "AuroraReplicaLag"
+        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id, Role = "READER" }
+        statistic   = "Maximum"
+        period      = 300
+        evaluations = 2
+        threshold   = var.aurora_replica_lag_ms
+        operator    = "GreaterThanThreshold"
+        missing     = "notBreaching"
+      }
+    } : {},
+    !local.has_optimization ? {} : {
+      optimization-runtime-max = {
+        description = "An optimization execution took > ${var.optimization_max_minutes} minutes (large-run limit) - check the SageMaker job size and optimizer_instance_type"
+        namespace   = "AWS/States"
+        metric      = "ExecutionTime"
+        dimensions  = { StateMachineArn = local.optimization_sm }
+        statistic   = "Maximum"
+        period      = 300
+        evaluations = 1
+        threshold   = var.optimization_max_minutes * 60000
+        operator    = "GreaterThanThreshold"
+        missing     = "notBreaching"
+      }
+    },
+    # Daily datapoints: alarm after model_refresh_overdue_days days in a row without a success.
+    !local.has_model_refresh || var.model_refresh_overdue_days == null ? {} : {
+      model-refresh-overdue = {
+        description = "No model refresh succeeded in ${coalesce(var.model_refresh_overdue_days, 0)} days - training data or models are stale (runbooks/model-refresh-failed.md)"
+        namespace   = "AWS/States"
+        metric      = "ExecutionsSucceeded"
+        dimensions  = { StateMachineArn = local.model_refresh_sm }
+        statistic   = "Sum"
+        period      = 86400
+        evaluations = coalesce(var.model_refresh_overdue_days, 1)
+        threshold   = 1
+        operator    = "LessThanThreshold"
+        missing     = "breaching"
       }
     },
     { for k, arn in var.certificate_arns : "cert-expiry-${k}" => {
@@ -118,6 +194,43 @@ resource "aws_cloudwatch_metric_alarm" "api_5xx_rate" {
   tags = local.tags
 }
 
+# Hourly share of ALB requests (UI + API) without a 5xx; quiet hours (< availability_min_requests) count as 100 %.
+resource "aws_cloudwatch_metric_alarm" "availability" {
+  alarm_name          = "${var.name_prefix}-availability"
+  alarm_description   = "Availability < ${var.availability_target_percent}% in the last hour (5xx from the targets or the ALB)"
+  evaluation_periods  = 1
+  threshold           = var.availability_target_percent
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.actions
+  ok_actions          = local.actions
+
+  metric_query {
+    id          = "availability"
+    expression  = "IF(requests >= ${var.availability_min_requests}, 100 - 100 * (FILL(target5xx, 0) + FILL(elb5xx, 0)) / requests, 100)"
+    label       = "Availability %"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = { requests = "RequestCount", target5xx = "HTTPCode_Target_5XX_Count", elb5xx = "HTTPCode_ELB_5XX_Count" }
+
+    content {
+      id = metric_query.key
+
+      metric {
+        namespace   = "AWS/ApplicationELB"
+        metric_name = metric_query.value
+        dimensions  = { LoadBalancer = var.alb_arn_suffix }
+        stat        = "Sum"
+        period      = 3600
+      }
+    }
+  }
+
+  tags = local.tags
+}
+
 # Published by the API, which runs the interactive what-if on the approved response curves
 # (Embedded Metric Format, see README "App metric contract").
 resource "aws_cloudwatch_metric_alarm" "whatif_latency" {
@@ -131,6 +244,28 @@ resource "aws_cloudwatch_metric_alarm" "whatif_latency" {
   evaluation_periods  = 5
   datapoints_to_alarm = 3
   threshold           = var.whatif_p95_ms
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.actions
+  ok_actions          = local.actions
+
+  tags = local.tags
+}
+
+# Published by the results publisher for every finished run (README "App metric contract").
+resource "aws_cloudwatch_metric_alarm" "optimization_standard" {
+  count = local.has_optimization ? 1 : 0
+
+  alarm_name          = "${var.name_prefix}-optimization-standard-p95"
+  alarm_description   = "Standard optimization runs p95 > ${var.optimization_standard_p95_seconds}s for 3 of 6 periods of 5 minutes"
+  namespace           = var.app_metric_namespace
+  metric_name         = "OptimizeDurationMs"
+  dimensions          = { Environment = var.environment, RunSize = "standard" }
+  extended_statistic  = "p95"
+  period              = 300
+  evaluation_periods  = 6
+  datapoints_to_alarm = 3
+  threshold           = var.optimization_standard_p95_seconds * 1000
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = local.actions

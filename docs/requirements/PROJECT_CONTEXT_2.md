@@ -141,6 +141,11 @@ The v1 defects D1–D4 are fixed (Trivy `version:`, drift skip without role, sko
 | Databricks credentials secret | Held by the EventBridge connection (OAuth client credentials) |
 | Autoscaling API on CPU/requests | CPU target tracking (60 %) for api and ui |
 | Data platform and GenAI | Built but **off** (`enable_data_platform`, `enable_genai` = false) |
+| Cognito advanced security (threat protection) in prod [ASK] | Not built – AWS threat protection does not cover federated (Okta) sign-in; risk checks and MFA stay in Okta |
+| Alarm "Lambda publisher DLQ not empty", separate SageMaker job failure alarm | Not needed – no DLQ; SageMaker job failures fail the state machine (`-failed`) |
+| Availability < 99.5 % in business hours | Hourly availability alarm over all hours |
+| Optimization runtime standard > 2 min / large > 10 min | `optimization-standard-p95` (app metric `OptimizeDurationMs`, `RunSize = standard`) and `optimization-runtime-max` (Step Functions `ExecutionTime` > 10 min) |
+| Training data stale | `model-refresh-overdue` (no successful refresh in 7 days) + refresh failure alarm; failed thresholds via the model package state event |
 
 ---
 
@@ -189,3 +194,9 @@ tflint, Checkov, actionlint, `sync-environments.ps1 -Check`.
    scripts, docs, `PROJECT_CONTEXT.md`); open points implemented with the defaults in section 6;
    xlsx/docx regenerated with an implementation-status column/section. Pushed to `main`
    (`89382f2`, `bf4a051`).
+3. 5 Nov 2026: review against `devops_plan_2.txt`; the missing plan items were built – Step 9 alarms
+   (availability, Aurora connections / local storage / replica lag, optimization runtime, Step
+   Functions throttling, model refresh overdue, LLM 4xx / latency, token quota) and dashboards
+   (platform, api-ui, optimization, training, aurora, cost, genai); Step 11 backup of `training-data`
+   and `lakehouse`; Step 12 post-release optimization dry run and actions pinned to commit SHAs.
+   Doc and xlsx corrections. Still open: SBOM, DAST, cosign, CODEOWNERS, performance tests.

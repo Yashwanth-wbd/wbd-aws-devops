@@ -54,3 +54,24 @@ module "llm_gateway" {
   alarm_topic_arn          = module.monitoring.alert_topic_arn
   permissions_boundary_arn = module.permission_boundary.policy_arn
 }
+
+# ------------------------------------------------------------------ Token quota (80 % of the daily quota per BU)
+# The API enforces the quota (SSM genai/token_quota/<bu>) and publishes GenAITokens with Embedded
+# Metric Format (dimensions Environment, BusinessUnit; modules/monitoring README "App metric contract").
+resource "aws_cloudwatch_metric_alarm" "genai_token_quota" {
+  for_each = var.enable_genai ? var.genai_token_quotas : {}
+
+  alarm_name          = "${local.name_prefix}-genai-tokens-${each.key}"
+  alarm_description   = "GenAI tokens of BU ${each.key} > 80% of the daily quota (${each.value}) - raise genai_token_quotas or check for misuse"
+  namespace           = "MMM"
+  metric_name         = "GenAITokens"
+  dimensions          = { Environment = var.environment, BusinessUnit = each.key }
+  statistic           = "Sum"
+  period              = 86400
+  evaluation_periods  = 1
+  threshold           = floor(each.value * 0.8)
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [module.monitoring.alert_topic_arn]
+  ok_actions          = [module.monitoring.alert_topic_arn]
+}

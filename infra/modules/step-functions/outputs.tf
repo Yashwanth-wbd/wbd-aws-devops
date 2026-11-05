@@ -22,3 +22,8 @@ output "alarm_name" {
   description = "Failed-execution alarm."
   value       = aws_cloudwatch_metric_alarm.failed.alarm_name
 }
+
+output "alarm_names" {
+  description = "Failed-execution and throttling alarms."
+  value       = [aws_cloudwatch_metric_alarm.failed.alarm_name, aws_cloudwatch_metric_alarm.throttled.alarm_name]
+}

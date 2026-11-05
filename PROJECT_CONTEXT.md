@@ -147,9 +147,9 @@ Mock-plan results on 5 Nov 2026 (resources to add):
 
 | Env | Default | All optional features on |
 |---|---|---|
-| dev | 287 | 411 |
-| staging | 303 | 429 |
-| prod | 303 | 431 |
+| dev | 297 | 430 |
+| staging | 314 | 449 |
+| prod | 314 | 451 |
 
 ---
 
@@ -194,7 +194,7 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 ### 5.3 Gaps (unchanged from v1 review, still open)
 
 CODEOWNERS (needs team names), DAST (ZAP), SBOM (Syft), image signing (cosign), dev cost
-scale-down, performance tests, post-deploy integration tests, more dashboards / availability alarm,
+scale-down, performance tests, post-deploy integration tests beyond the optimization dry run,
 Synthetics canary, business-continuity page, shared account decision.
 
 ### 5.4 Not in this repo but needed before a real deployment works
@@ -297,3 +297,6 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
    offline validation passed; pushed to `main` (`89382f2`), then CI guards for absent app folders
    and a shellcheck fix (`bf4a051`); all push workflows green. `Project_memory.md` (single
    file to attach to a new chat) and `docs/requirements/tools/` (doc generator scripts) added.
+4. 5 Nov 2026: review against `devops_plan_2.txt`, then the missing plan items were built: Step 9
+   alarms and dashboards, backup of `training-data` / `lakehouse`, post-release optimization dry run,
+   actions pinned to commit SHAs; doc and xlsx corrections. Details: `Project_memory.md` §5 and §12.

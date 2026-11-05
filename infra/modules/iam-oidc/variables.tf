@@ -112,6 +112,15 @@ variable "deploy_lambda_functions" {
   default     = ["results-publisher"]
 }
 
+variable "deploy_dry_run" {
+  description = "Let the deploy role start a dry-run execution (dryrun-*) of <name_prefix>-optimization after a release: write its input under runs/dryrun-*/ in the results bucket and list curves/ in the models bucket. null = off (prod)."
+  type = object({
+    results_bucket_arn = string
+    models_bucket_arn  = string
+  })
+  default = null
+}
+
 variable "enable_model_governance" {
   description = "Create gha-model-eval (main branch) and gha-model-approve (environment <env>-model-promotion) for the SageMaker Model Registry (data platform)."
   type        = bool

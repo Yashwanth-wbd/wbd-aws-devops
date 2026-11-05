@@ -124,3 +124,22 @@ resource "aws_cloudwatch_metric_alarm" "failed" {
 
   tags = local.tags
 }
+
+# StartExecution calls rejected by the account quota (planning-season peak; runbooks/scale-planning-season.md).
+resource "aws_cloudwatch_metric_alarm" "throttled" {
+  alarm_name          = "${local.full_name}-throttled"
+  alarm_description   = "${local.full_name}: executions were throttled - raise the Step Functions StartExecution quota or spread the runs"
+  namespace           = "AWS/States"
+  metric_name         = "ExecutionThrottled"
+  dimensions          = { StateMachineArn = aws_sfn_state_machine.this.arn }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [var.alarm_topic_arn]
+  ok_actions          = [var.alarm_topic_arn]
+
+  tags = local.tags
+}

@@ -101,7 +101,7 @@ must be seen in prod itself.
 | R8 | Dashboards and alerts live; on-call ready | Section 4.5 | staging, prod | EY DevOps | Open | |
 | R9 | Runbooks written; rollback practised | Runbooks for deploy, rollback, DB restore, ECS task stuck, secret/cert rotation, model rollback, break-glass ([docs/runbooks](runbooks/README.md)); app rollback by dispatch in staging ([docs/09 §6](09-cicd-pipelines.md#6-everyday-operations)) | staging | EY DevOps | Open | |
 | R10 | Access reviewed; test credentials rotated | Permission-set assignments reviewed with WBD Identity; no IAM users or access keys (`aws iam list-users`); test secrets rotated (`docs/05 §6`); break-glass login raises the alert | all | EY DevOps + WBD Identity | Open | |
-| R11 | Okta login, MFA, step-up MFA and business-unit isolation | [docs/04 §7](04-okta-mfa-app-login.md#7-validation-step-8); a user of one BU cannot read another BU's scenarios | staging, prod | app team + EY DevOps | Open | |
+| R11 | Okta login, MFA, step-up MFA and business-unit isolation | [docs/04 §8](04-okta-mfa-app-login.md#8-testing); a user of one BU cannot read another BU's scenarios | staging, prod | app team + EY DevOps | Open | |
 | R12 | AWS Well-Architected review; high-risk items closed | Well-Architected Tool workload for prod (security, reliability, cost) | prod | EY DevOps | Open | |
 | R13 | Cost controls in place | Budgets and anomaly monitor active; Fargate vCPU quota raised for the load-tested maximum | all | EY DevOps | Open | |
 | R14 | CAB change approved for go-live | WBD change ticket; its number is in the `vX.Y.Z` tag message | prod | EY delivery lead | Open | |

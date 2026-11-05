@@ -23,6 +23,7 @@ R = responsible, A = approves, C = consulted, I = informed.
 | When | Task | How | Evidence |
 |---|---|---|---|
 | Daily | Check alarms in ALARM and overnight alerts | `aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix mmm-prd`; dashboard `mmm-prd-platform` | – |
+| After every release (dev, staging) | Optimization dry run (automatic) | `deploy.yml` runs `scripts/dry-run-optimization.sh` when the optimizer or publisher changed; a failure rolls the release back | Release record, Actions log |
 | Nightly 03:00 UTC | Drift check (automatic) | `terraform.yml` schedule plans every environment; a red run means a change outside Terraform → [pipeline-failure.md](runbooks/pipeline-failure.md) | Actions history |
 | Nightly | Backups (automatic) | AWS Backup plan `mmm-<env>-daily`; alarm on failed backup jobs | Backup console |
 | Weekly (Mon) | Vulnerability fixes | Merge Dependabot PRs (**github-actions** and **pip** under `/scripts`, per [dependabot.yml](../.github/dependabot.yml)); triage ECR Inspector findings (`aws inspector2 list-findings --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"PREFIX","value":"mmm/"}],"severity":[{"comparison":"EQUALS","value":"CRITICAL"}]}'`); fixable Critical/High in prod images → release within 7 days (High 30 days) | PR links, release record |
@@ -40,25 +41,30 @@ R = responsible, A = approves, C = consulted, I = informed.
 
 ## 3. Alarm → runbook
 
-Platform alarms use prefix `mmm-<env>-`. Step Functions and Lambda add `-failed` / `-errors` per resource.
+Platform alarms use prefix `mmm-<env>-`. Each state machine adds `-failed` and `-throttled`, each
+Lambda `-errors`. Full list with thresholds: [monitoring README](../infra/modules/monitoring/README.md).
 
 | Alarm / alert | Runbook |
 |---|---|
-| `api-no-healthy-targets`, `ui-no-healthy-targets`, `api-5xx-rate`, EventBridge `ecs-deployment-failed`, `ecs-service-error` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [rollback.md](runbooks/rollback.md) |
+| `api-no-healthy-targets`, `ui-no-healthy-targets`, `api-5xx-rate`, `availability`, EventBridge `ecs-deployment-failed`, `ecs-service-error` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [rollback.md](runbooks/rollback.md) |
 | `whatif-p95` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [scale-planning-season.md](runbooks/scale-planning-season.md) |
-| `optimization-failed`, `model-refresh-failed` | Step Functions execution history; [docs/10 §9](10-data-platform-and-model-governance.md#9-enabling-verification-troubleshooting) for refresh |
-| `publisher-errors` (results Lambda) | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), optimization runbook in app docs |
-| `aurora-cpu`, `aurora-acu-max` | Raise `aurora_max_acu` / tune queries (PR); [db-restore.md](runbooks/db-restore.md) if data is affected |
+| `optimization-failed`, `results-publisher-errors`, `optimization-runtime-max`, `optimization-standard-p95` | [optimization-run-failed.md](runbooks/optimization-run-failed.md); runtime: [scale-planning-season.md](runbooks/scale-planning-season.md) (`optimizer_instance_type`) |
+| `optimization-throttled`, `model-refresh-throttled` | [scale-planning-season.md](runbooks/scale-planning-season.md) (Step Functions quota) |
+| `model-refresh-failed`, `model-refresh-overdue` | [model-refresh-failed.md](runbooks/model-refresh-failed.md) |
+| EventBridge `model-package-state` (version created / approved / rejected) | [model-rollback.md](runbooks/model-rollback.md); a rejection lists the failed thresholds |
+| `aurora-cpu`, `aurora-acu-max`, `aurora-connections`, `aurora-free-local-storage`, `aurora-replica-lag` | Raise `aurora_max_acu` / tune queries (PR); [db-restore.md](runbooks/db-restore.md) if data is affected |
 | `cert-expiry-alb` | [rotation.md](runbooks/rotation.md) |
-| `backup-job-failed` | [docs/08](08-backup-and-dr.md); re-run the job on demand |
+| EventBridge `backup-job-failed` | [docs/08](08-backup-and-dr.md); re-run the job on demand |
+| Budget email `mmm-<env>-monthly`, Cost Anomaly email | Cost dashboard `mmm-<env>-cost`; [scale-planning-season.md](runbooks/scale-planning-season.md) to scale back down |
 | `splunk-delivery`, `splunk-freshness` | HEC token / endpoint ([rotation.md](runbooks/rotation.md)); failed records in the log bucket |
-| `llm-gateway-5xx`, `genai-guardrail-interventions` | [genai.md](runbooks/genai.md) |
-| `guardduty-high`, `breakglass-used` | [security-incident.md](runbooks/security-incident.md), [break-glass.md](runbooks/break-glass.md) |
+| `llm-gateway-5xx`, `llm-gateway-4xx`, `llm-gateway-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>` | [genai.md](runbooks/genai.md) |
+| EventBridge `guardduty-high`, `breakglass-used` | [security-incident.md](runbooks/security-incident.md), [break-glass.md](runbooks/break-glass.md) |
 
-**On-call daily check (prod):** `describe-alarms` in ALARM; scan SNS topic subscriptions; open
-`mmm-prd-platform` dashboard (API 5xx, ECS tasks, Aurora ACU, Step Functions started/failed, Lambda
-errors, WAF). If Splunk shipping is on, spot-check freshness for `api`, `sfn-optimization`, and
-`publisher` log groups.
+**On-call daily check (prod):** `describe-alarms` in ALARM; scan SNS topic subscriptions; open the
+`mmm-prd-platform` dashboard (alarm list, requests and 5xx, ECS tasks, Aurora, Step Functions,
+Lambda, WAF), then `mmm-prd-api-ui`, `mmm-prd-optimization`, `mmm-prd-aurora`, `mmm-prd-cost`
+(and `-training`, `-genai` when those are on) as needed. If Splunk shipping is on, spot-check
+freshness for `api`, `sfn-optimization`, and `publisher` log groups.
 
 ## 4. Handover (knowledge transfer)
 
@@ -70,11 +76,11 @@ errors, WAF). If Splunk shipping is on, spot-check freshness for `api`, `sfn-opt
 | 2 | Terraform layout, modules, dev → sync → staging/prod, state | `infra/`, docs/03, environment READMEs | Small PR → plan → apply in dev |
 | 3 | Secrets, config, IAM model, OIDC | docs/03, 05, 06 | Fill a secret, read a parameter |
 | 4 | CI/CD and releases | docs/07, 09, `runbooks/deploy.md` | Cut an rc, promote, roll back by dispatch |
-| 5 | Monitoring, logging, Splunk, alarms | docs/09 §6, Step 9 README | Fire a test alarm, follow it to the runbook |
+| 5 | Monitoring, logging, Splunk, alarms | [monitoring README](../infra/modules/monitoring/README.md), §3 above | Fire a test alarm, follow it to the runbook |
 | 6 | Backup, restore, DR | docs/08, `runbooks/db-restore.md` | Point-in-time restore next to staging |
 | 7 | Data platform and model governance | docs/10, `runbooks/model-rollback.md` | On-demand model refresh, governance evaluate/promote drill |
 | 8 | GenAI (if Release 2 is live) | docs/12, `runbooks/genai.md` | Flag off / on |
-| 9 | Security operations | `runbooks/security-incident.md`, `break-glass.md` | Break-glass drill |
+| 9 | Security operations | `runbooks/security-incident.md`, `runbooks/break-glass.md` | Break-glass drill |
 | 10 | Shadowing → reverse shadowing | all runbooks | WBD engineer runs a release and an incident drill with EY watching |
 
 ### Handover checklist

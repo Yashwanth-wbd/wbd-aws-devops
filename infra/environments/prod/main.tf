@@ -69,6 +69,12 @@ module "iam_oidc" {
   deploy_lambda_functions       = [local.publisher_name]
   enable_model_governance       = var.enable_data_platform
 
+  # Post-release dry run of the optimization state machine (not in prod)
+  deploy_dry_run = local.is_prod ? null : {
+    results_bucket_arn = local.bucket_arns["results"]
+    models_bucket_arn  = local.bucket_arns["models"]
+  }
+
   state_bucket_name   = local.state_bucket_name
   state_kms_key_arn   = var.state_kms_key_arn
   secrets_kms_key_arn = module.kms.key_arns["secrets"]

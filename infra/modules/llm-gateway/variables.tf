@@ -101,6 +101,18 @@ variable "error_alarm_threshold" {
   default     = 5
 }
 
+variable "client_error_alarm_threshold" {
+  description = "4xx responses per 5 minutes that raise the alarm."
+  type        = number
+  default     = 20
+}
+
+variable "latency_p95_ms" {
+  description = "p95 gateway latency (ms) that raises the alarm."
+  type        = number
+  default     = 30000
+}
+
 variable "manage_account_logging_role" {
   description = "Set the account-level API Gateway CloudWatch role (false if WBD already manages it)."
   type        = bool

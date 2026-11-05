@@ -20,7 +20,7 @@ resource "aws_secretsmanager_secret" "this" {
   })
 }
 
-# Alphanumeric only: valid as an ElastiCache auth token and as an HTTP header value.
+# Alphanumeric only: valid in a PostgreSQL connection string and as an HTTP header value.
 resource "random_password" "this" {
   for_each = local.generated
 

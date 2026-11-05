@@ -1,6 +1,6 @@
 # step-functions
 
-One Standard Step Functions state machine with its role, logs and a failure alarm. The stack
+One Standard Step Functions state machine with its role, logs, and failure and throttling alarms. The stack
 passes the definition; the module adds the plumbing. Used for `optimization` and `model-refresh`.
 
 **Status:** implemented (v2 architecture).
@@ -13,6 +13,7 @@ passes the definition; the module adds the plumbing. Used for `optimization` and
 | `aws_iam_role` + inline policy | `role_policy_json` from the stack (SageMaker, Lambda, SSM, ...) plus log delivery and X-Ray. Permission boundary attached |
 | `aws_cloudwatch_log_group` `/aws/states/<prefix>-<name>` | KMS (`logs`), `log_retention_days` |
 | `aws_cloudwatch_metric_alarm` `<prefix>-<name>-failed` | `ExecutionsFailed + ExecutionsTimedOut + ExecutionsAborted > 0` → `alarm_topic_arn` |
+| `aws_cloudwatch_metric_alarm` `<prefix>-<name>-throttled` | `ExecutionThrottled > 0` in 5 minutes (StartExecution quota) → `alarm_topic_arn` |
 
 ## Inputs
 
@@ -22,4 +23,4 @@ passes the definition; the module adds the plumbing. Used for `optimization` and
 
 ## Outputs
 
-`state_machine_arn`, `state_machine_name`, `role_arn`, `log_group_name`, `alarm_name`.
+`state_machine_arn`, `state_machine_name`, `role_arn`, `log_group_name`, `alarm_name` (failed), `alarm_names` (failed, throttled).

@@ -3,6 +3,8 @@
 #   -> read the optimizer image from SSM -> SageMaker Processing job (.sync, private subnets)
 #   -> results-publisher Lambda (alias live) writes the summary to Aurora; on failure it marks the run failed.
 # Progress for the UI = execution status (DescribeExecution) + the run row in Aurora; no queue, no cache.
+# deploy.yml adds dry_run = true after a release in dev/staging (scripts/dry-run-optimization.sh):
+# the job gets DRY_RUN=true and the publisher dry_run, so neither writes a real run.
 locals {
   publisher_name = "results-publisher"
 
@@ -127,8 +129,14 @@ locals {
 
   optimization_definition = {
     Comment = "MMM full optimization run (${var.environment})"
-    StartAt = "GetOptimizerImage"
+    StartAt = "ApplyDefaults"
     States = {
+      ApplyDefaults = {
+        Type       = "Pass"
+        Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"dry_run\":false}'), $, false)" }
+        OutputPath = "$.args"
+        Next       = "GetOptimizerImage"
+      }
       GetOptimizerImage = {
         Type           = "Task"
         Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
@@ -148,6 +156,7 @@ locals {
             APP_ENV           = var.environment
             "RUN_ID.$"        = "$.run_id"
             "BUSINESS_UNIT.$" = "$.business_unit"
+            "DRY_RUN.$"       = "States.Format('{}', $.dry_run)"
           }
           ProcessingResources = {
             ClusterConfig = {
@@ -203,6 +212,7 @@ locals {
             "business_unit.$" = "$.business_unit"
             status            = "SUCCEEDED"
             "output_s3_uri.$" = "States.Format('s3://${module.buckets["results"].bucket_name}/runs/{}/output/', $.run_id)"
+            "dry_run.$"       = "$.dry_run"
           }
         }
         ResultPath = null
@@ -216,6 +226,7 @@ locals {
             "business_unit.$" = "$.business_unit"
             status            = "FAILED"
             "error.$"         = "$.error"
+            "dry_run.$"       = "$.dry_run"
           }
         }
         ResultPath = null
