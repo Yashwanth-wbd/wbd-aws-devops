@@ -309,6 +309,8 @@ DECISIONS = [
     ("Autoscaling signals?", "CPU target tracking (60%) for api and ui", "No"),
     ("Cognito advanced security (threat protection) in prod?", "Not enabled - AWS threat protection does not cover federated (Okta) sign-in; risk-based checks and MFA stay in Okta", "No"),
     ("Back up training-data and lakehouse?", "Yes, both in the daily AWS Backup plan (tag backup=true) with the data platform", "Lakehouse size / cost"),
+    ("SSM parameters for state machine ARNs, Databricks job ids, model package groups?", "Not created - ARNs in the API task env and GitHub variables; job id is the Terraform variable databricks_refresh_job_id; groups named mmm-<env>-<bu>", "No"),
+    ("How does the optimizer get the approved model?", "Approval in model-governance.yml publishes the approved response curves to models/curves/<bu>/; the optimizer reads that prefix", "No"),
 ]
 
 YELLOW = PatternFill("solid", fgColor="FFF2CC")

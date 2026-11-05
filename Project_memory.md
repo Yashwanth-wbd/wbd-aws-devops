@@ -79,6 +79,21 @@ old `bedrock` module. Modules deleted: `rds`, `elasticache`, `sqs`, `edge`, `mwa
 | Cognito advanced security (threat protection) in prod | Not built – AWS threat protection does not apply to federated (Okta) sign-in; risk checks and MFA stay in Okta |
 | Lambda publisher "DLQ not empty" alarm, separate SageMaker job alarm | Not needed – no DLQ (sync invoke); job failures fail the state machine (`-failed` alarm) |
 | Availability < 99.5 % "business hours" | Hourly alarm over all hours (CloudWatch cannot limit an alarm to business hours) |
+| SSM `/mmm/<env>/stepfunctions/{optimization_arn,model_refresh_arn}` | Not built – ARNs go to the API task env (`OPTIMIZATION_STATE_MACHINE_ARN`) and GitHub variables |
+| SSM `/mmm/<env>/databricks/job_ids` | Not built – only `databricks/host`; the job id is a Terraform variable used by the model-refresh state machine |
+| SSM `/mmm/<env>/sagemaker/model_package_group/<bu>` | Not built – group name is `mmm-<env>-<bu>` (Terraform output `model_package_groups`); image pointers are `/mmm/<env>/images/sagemaker-*` |
+| Evaluation states baseline → channel lift → title adjustment | One evaluation Processing job (`evaluate` argument); the three stages are inside the data scientists' code |
+| Optimizer reads the approved model from the registry | `model-governance.yml` publishes the approved curves to `models/curves/<bu>/` on approval; the optimizer reads that prefix |
+
+### 1.4 Slide services (`wbd_Presentation.pptx`) vs this repo
+
+Every AWS service on both slides is created by Terraform (data platform and GenAI parts built but
+off). **Not created by this repo:** ACM certificate (WBD issues it; `alb_certificate_arn`, expiry
+alarm), CloudTrail (WBD organization trail; boundary denies stopping it), IAM Identity Center (WBD
+baseline; break-glass alert only), Databricks compute in our VPC (WBD workspace; PrivateLink optional,
+off), Bedrock-hosted models (only Bedrock Guardrails; models via API Gateway to OpenAI / Anthropic /
+Google – Anthropic via Bedrock is an open question). The repo holds **DevOps code only** – no UI, API,
+Databricks or model code.
 
 ---
 
@@ -245,7 +260,24 @@ from the publisher) and `GenAITokens` (`BusinessUnit`, from the API) – see `in
   `apps/results-publisher`, and the Databricks bundle `data/databricks/`. Until then the CI jobs
   skip and there is nothing to deploy.
 - Real values (section 7), issued ACM certificate, WBD DNS record, Okta SAML apps.
-- Dependabot PR #1 (actions updates) was red only because of the missing app folders – rebase it on `main`.
+- Dependabot PRs open: #1 (10 GitHub Actions updates), #2 (2 Python updates in `scripts/`) – merge when green.
+
+### 6.4 How the app teams plug in (same repo, own folders)
+
+| Team | Folder | Pipeline | Must provide |
+|---|---|---|---|
+| Frontend | `apps/ui` | `ui-ci.yml` | Dockerfile (nginx, non-root), `/healthz` |
+| Backend (API, LangGraph, QA dashboard) | `apps/api` | `api-ci.yml` | Dockerfile, `/api/health`, Alembic migrations, PostgreSQL RLS per BU, StartExecution of the optimization, `GenAITokens` metric |
+| Data science – optimizer | `apps/sagemaker-optimizer` | `optimizer-ci.yml` | Processing image: reads `runs/<run_id>/input/` + `curves/<bu>/`, writes `runs/<run_id>/`, honours `DRY_RUN` |
+| Data science – training / evaluation | `apps/sagemaker-training` | `training-ci.yml` | Training image + `evaluate` argument writing `evaluation.json`; real limits in `data/model-thresholds.yaml` |
+| Results publisher | `apps/results-publisher` | `publisher-ci.yml` | Lambda writing to Aurora, honours `dry_run`, `OptimizeDurationMs` with `RunSize` |
+| Data engineering | `data/databricks/` | `databricks.yml` | Asset Bundle (Lakeflow Bronze → Gold, feature export) writing Parquet + metadata to `training-data/<bu>/<refresh_id>/` |
+
+DevOps owns `infra/`, `ecs/`, `.github/`, `scripts/`, `docs/` (protect with CODEOWNERS once team names
+are known). DevOps to-do with the teams: starter Dockerfile skeletons with health checks, dev access
+(read-only permission set, logs, ECS Exec in dev), seed curves for the dry run, weekly cross-team sync
+(env changes, quotas, cost), releases (main → dev, `-rc` → staging, `vX.Y.Z` → prod), model approvals,
+runbooks / KT to WBD (Release 1 in 8 weeks, Release 2 and handover by week 16 – `wbd_final.docx`).
 
 ---
 
@@ -384,3 +416,4 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 11 | 5 Nov 2026 | Keep the chat context in one file | This file (`Project_memory.md`); doc generator scripts moved to `docs/requirements/tools/` |
 | 12 | 5 Nov 2026 | Review the whole project against requirement 2 (no code), then "fix all" | Built the missing plan items: Step 9 alarms + 7 dashboards, backup of training-data/lakehouse, deploy dry run, actions pinned to SHAs; Cognito threat protection recorded as not applicable; doc fixes (docs/08, 09, 11, 13, runbooks README, module READMEs, xlsx cells); offline validation passed; pushed to `main` (`d52c7cf`), all workflows green |
 | 13 | 5 Nov 2026 | Confirm code, docs and this file are pushed | Local = `origin/main`, nothing uncommitted; Dependabot PRs for the pinned actions may be open – review and merge |
+| 14 | 5 Nov 2026 | Check the `_2` xlsx / plan / docx; second full review; slide-by-slide service check; DevOps-only confirmation; how to work with the app teams | `devops_plan_2.txt` status note (`1c92341`); sections 1.3 (3 SSM differences, evaluation, curves), 1.4 and 6.4 added; `PROJECT_CONTEXT_2.md` 4a updated; all pushed |

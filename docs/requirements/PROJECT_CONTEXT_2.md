@@ -146,6 +146,9 @@ The v1 defects D1–D4 are fixed (Trivy `version:`, drift skip without role, sko
 | Availability < 99.5 % in business hours | Hourly availability alarm over all hours |
 | Optimization runtime standard > 2 min / large > 10 min | `optimization-standard-p95` (app metric `OptimizeDurationMs`, `RunSize = standard`) and `optimization-runtime-max` (Step Functions `ExecutionTime` > 10 min) |
 | Training data stale | `model-refresh-overdue` (no successful refresh in 7 days) + refresh failure alarm; failed thresholds via the model package state event |
+| SSM `stepfunctions/*`, `databricks/job_ids`, `sagemaker/model_package_group/<bu>` | Not built – state machine ARNs in the API task env and GitHub variables; job id = `databricks_refresh_job_id`; group name `mmm-<env>-<bu>`; image pointers `/mmm/<env>/images/sagemaker-*` |
+| Evaluation states baseline → channel lift → title adjustment | One evaluation Processing job; the three stages are inside the data scientists' code |
+| Optimizer loads the latest Approved package | Approval (`model-governance.yml`) publishes the curves to `models/curves/<bu>/`; the optimizer reads that prefix |
 
 ---
 
