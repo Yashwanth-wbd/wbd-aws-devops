@@ -5,8 +5,8 @@ closes; everything needed to continue (what is built, decisions, how we work, ch
 learned, next steps) is in this file.
 
 Last updated: 5 Nov 2026 – requirement 2 (v2 architecture from `wbd_Presentation.pptx`)
-implemented, validated and pushed to `main` (`89382f2`, `bf4a051`, `9504793`); all GitHub
-workflows green.
+implemented, reviewed against the plan and the slides, gaps fixed, validated and pushed to `main`
+(latest `35b8a47` plus this update); all GitHub workflows green.
 
 ---
 
@@ -34,7 +34,7 @@ At the end of every session ask the agent to **update this file** (sections 1, 6
 |---|---|
 | What | DevOps for the WBD Media-Mix-Modeling (MMM) platform: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App, data-engineering and model code belong to the WBD / EY teams – nothing app-side is in this repo. |
 | Project folder (source of truth) | `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
-| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Latest: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `9504793` context. All push workflows green. |
+| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files. All push workflows green. Check the latest with `git log --oneline -5`. |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset: `gh auth login --web --scopes repo,workflow` |
 | Requirement documents (`docs/requirements/`) | **`wbd_Presentation.pptx`** (v2 target architecture – the one implemented), `devops_plan_2.txt` (v2 plan + implementation status), `aws_resource_list_2.xlsx` (v2 resources per env + "Implemented" column + `decisions` sheet), `wbd_mmm_ecs_final_2.docx` (v2 design doc + implemented defaults), `PROJECT_CONTEXT_2.md` (v2 planning context, section 4a = where the build differs from the plan). v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
@@ -443,4 +443,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 12 | 5 Nov 2026 | Review the whole project against requirement 2 (no code), then "fix all" | Built the missing plan items: Step 9 alarms + 7 dashboards, backup of training-data/lakehouse, deploy dry run, actions pinned to SHAs; Cognito threat protection recorded as not applicable; doc fixes (docs/08, 09, 11, 13, runbooks README, module READMEs, xlsx cells); offline validation passed; pushed to `main` (`d52c7cf`), all workflows green |
 | 13 | 5 Nov 2026 | Confirm code, docs and this file are pushed | Local = `origin/main`, nothing uncommitted; Dependabot PRs for the pinned actions may be open – review and merge |
 | 14 | 5 Nov 2026 | Check the `_2` xlsx / plan / docx; second full review; slide-by-slide service check; DevOps-only confirmation; how to work with the app teams | `devops_plan_2.txt` status note (`1c92341`); sections 1.3 (3 SSM differences, evaluation, curves), 1.4 and 6.4 added; `PROJECT_CONTEXT_2.md` 4a updated; all pushed (`87f3b2f`) |
-| 15 | 5 Nov 2026 | Chat lost on reinstall? Which approach (v1 or v2)? How to work without AWS admin on the VDI | Chat history is local to the machine – continue by attaching this file; recommended v2 (client deck, managed services); section 6.5 (access without admin) added and pushed |
+| 15 | 5 Nov 2026 | Chat lost on reinstall? Which approach (v1 or v2)? How to work without AWS admin on the VDI | Chat history is local to the machine – continue by attaching this file; recommended v2 (client deck, managed services); section 6.5 (access without admin) added and pushed (`29ee523`); Office lock files ignored (`35b8a47`) |
+| 16 | 5 Nov 2026 | Full project re-read; refresh this file's header | "Last updated" and key commits in section 1 updated and pushed |
