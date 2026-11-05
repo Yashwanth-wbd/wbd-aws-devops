@@ -1,8 +1,8 @@
 # WBD MMM DevOps – Project Context and Continuation Guide
 
-This file is the memory of the project. Chat sessions are lost when the VDI closes, so everything
-needed to continue is written here. **Attach this file (plus `docs/requirements/devops_plan_2.txt`)
-to a new chat to resume.**
+> **To start a new chat, attach [`Project_memory.md`](Project_memory.md)** – the single file with
+> everything in this document plus the working rules, chat history, lessons learned and the process
+> for the next requirement. This file is kept as the technical reference other docs link to.
 
 Last updated: 5 Nov 2026 (v2 architecture from `wbd_Presentation.pptx` implemented and validated
 offline; pushed to `main` as `89382f2` + `bf4a051`).
@@ -11,7 +11,7 @@ offline; pushed to `main` as `89382f2` + `bf4a051`).
 
 ## 0. How to resume in a new chat
 
-Paste this to the AI agent, with this file and `devops_plan_2.txt` attached:
+Preferred: attach `Project_memory.md` and use the prompt in its section 0. Otherwise paste this:
 
 > I'm continuing the WBD MMM DevOps project. Read `PROJECT_CONTEXT.md` in the project root first:
 > it lists what is done, the decisions taken, the open gaps and the next steps. The project is at
@@ -172,7 +172,7 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 
 ## 5. Open issues and gaps
 
-### 5.1 Still to run before committing
+### 5.1 Validation and CI status
 
 - Done on 5 Nov 2026: fmt, validate-modules, mock plan (all envs), `sync-environments.ps1 -Check`,
   tflint, Checkov (0 failed, accepted skips have a reason comment), actionlint, secret scan – all clean.
@@ -271,7 +271,7 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 9. Order of work once the values arrive
 
-1. Run the remaining checks (5.1) and commit the v2 changes (when the user asks).
+1. (Done) v2 validated and pushed.
 2. Fill dev values (section 6) – `terraform.tfvars`, `infra/bootstrap/dev.tfvars`, `backend.tf`.
 3. `aws configure sso` for dev (`docs/02`); `aws sts get-caller-identity`.
 4. Bootstrap state; copy bucket and `state_kms_key_arn` into `backend.tf` / tfvars.
@@ -295,4 +295,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 3. 5 Nov 2026: v2 requirement (`wbd_Presentation.pptx`) reviewed, plan and `_2` documents written,
    then v2 implemented: services removed / added as listed in 1.2 and 4, D1–D4 fixed, docs rewritten,
    offline validation passed; pushed to `main` (`89382f2`), then CI guards for absent app folders
-   and a shellcheck fix (`bf4a051`); all push workflows green.
+   and a shellcheck fix (`bf4a051`); all push workflows green. `Project_memory.md` (single
+   file to attach to a new chat) and `docs/requirements/tools/` (doc generator scripts) added.
