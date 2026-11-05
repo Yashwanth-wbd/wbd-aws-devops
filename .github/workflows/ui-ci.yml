@@ -1,6 +1,7 @@
 # Web UI container (ECS service "ui" behind the ALB, port 8080, health check /healthz).
 # PR and main: install, lint, tests, build, dependency + image scan.
 # main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
+# Skipped while apps/ui is absent (the app team has not added the code yet).
 name: ui-ci
 
 on:
@@ -29,7 +30,22 @@ env:
   NODE_VERSION: "22"
 
 jobs:
+  present:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      yes: ${{ steps.check.outputs.yes }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: check
+        run: |
+          if [ -d "$APP_DIR" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::$APP_DIR not found - CI skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+
   test:
+    needs: present
+    if: needs.present.outputs.yes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

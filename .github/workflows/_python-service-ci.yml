@@ -2,6 +2,7 @@
 # PR and main: lint, type-check, tests with a coverage gate, dependency + image scan.
 # main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
 # build_image = false (Lambda code): tests and dependency audit only; deploy.yml zips the code.
+# Skipped while app_dir is absent (the app team has not added the code yet).
 name: python-service-ci
 
 on:
@@ -31,7 +32,24 @@ permissions:
   contents: read
 
 jobs:
+  present:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      yes: ${{ steps.check.outputs.yes }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: check
+        env:
+          APP_DIR: ${{ inputs.app_dir }}
+        run: |
+          if [ -d "$APP_DIR" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::$APP_DIR not found - CI skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+
   test:
+    needs: present
+    if: needs.present.outputs.yes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:

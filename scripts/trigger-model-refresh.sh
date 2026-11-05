@@ -25,7 +25,7 @@ if [ "$business_unit" = all ]; then
   # One schedule per business unit, named mmm-<env_short>-refresh-<bu>.
   mapfile -t units < <(aws scheduler list-schedules --group-name "mmm-$short-model-refresh" \
     --query 'Schedules[].Name' --output text | tr '\t' '\n' | sed "s/^mmm-$short-refresh-//")
-  [ "${#units[@]}" -gt 0 ] && [ -n "${units[0]}" ] || die "no schedules in group mmm-$short-model-refresh"
+  if [ "${#units[@]}" -eq 0 ] || [ -z "${units[0]}" ]; then die "no schedules in group mmm-$short-model-refresh"; fi
 else
   units=("$business_unit")
 fi

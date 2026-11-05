@@ -66,7 +66,9 @@ jobs:
     steps:
       - id: r
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_NAME: ${{ github.event.workflow_run.name }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           IN_ENV: ${{ inputs.environment }}
@@ -83,7 +85,12 @@ jobs:
             workflow_run)
               environment=dev commit="$RUN_SHA" version="sha-${RUN_SHA::7}"
               components="${RUN_NAME%-ci}"
-              [ "$components" = api ] && migrations=true ;;
+              [ "$components" = api ] && migrations=true
+              tested=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" \
+                --jq '[.jobs[] | select((.name | endswith("test")) and .conclusion == "success")] | length')
+              if [ "$tested" = 0 ]; then
+                echo "::notice::$RUN_NAME built nothing (app folder absent) - nothing to deploy"; components=""
+              fi ;;
             push)
               commit="$GITHUB_SHA" version="$REF_NAME" components=all migrations=true promote=true
               if   [[ "$REF_NAME" =~ $rc  ]]; then environment=staging
@@ -107,6 +114,7 @@ jobs:
 
   deploy:
     needs: resolve
+    if: needs.resolve.outputs.components != ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment:
