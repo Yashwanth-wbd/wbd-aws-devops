@@ -5,8 +5,8 @@ closes; everything needed to continue (what is built, decisions, how we work, ch
 learned, next steps) is in this file.
 
 Last updated: 6 Nov 2026 – requirement 3 (v3 architecture from `wbd_Presentation_3.pptx`)
-implemented and validated offline; **not committed yet** (v2 is on `main`, latest `35b8a47` plus
-memory updates). Commit / push when the user asks.
+implemented, validated offline and **pushed to `main`** (`59333f0` plus this memory update);
+push workflows `repo-checks` and `terraform` green.
 
 ---
 
@@ -34,11 +34,11 @@ At the end of every session ask the agent to **update this file** (sections 1, 6
 |---|---|
 | What | DevOps for the WBD Media-Mix-Modeling (MMM) platform: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App, data-engineering and model code belong to the WBD / EY teams – nothing app-side is in this repo. |
 | Project folder (source of truth) | `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
-| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files. All push workflows green. Check the latest with `git log --oneline -5`. |
+| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files, `63ba74c` client questions v2, **`59333f0` v3 implementation**. All push workflows green. Check the latest with `git log --oneline -5`. |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset: `gh auth login --web --scopes repo,workflow` |
 | Requirement documents (`docs/requirements/`) | **`wbd_Presentation_3.pptx`** (v3 target architecture – the one implemented), `devops_plan_3.txt` (v3 plan + implementation status + where the build differs), `aws_resource_list_3.xlsx` (v3 resources per env + column H "v3 implementation" + `removed_vs_v2` and `decisions` sheets), `wbd_mmm_ecs_final_3.docx` (v3 design doc + implemented defaults), `PROJECT_CONTEXT_3.md` (v3 planning context, section 4a = where the build differs from the plan), **`devops_3_client_question.xlsx`** (what WBD must provide – section 7). v2 kept for history: `wbd_Presentation.pptx`, `devops_plan_2.txt`, `aws_resource_list_2.xlsx`, `wbd_mmm_ecs_final_2.docx`, `PROJECT_CONTEXT_2.md`, `devops_2_client_question.xlsx`. v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
-| Status | **v3 implemented with placeholder values and validated offline; not committed yet.** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
+| Status | **v3 implemented with placeholder values, validated offline, pushed (`59333f0`).** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
 
 ### 1.1 v3 architecture in one paragraph
 
@@ -435,12 +435,13 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 11. Next steps
 
-### 11.0 Right now (after session 19)
+### 11.0 Right now (after session 20)
 
-1. **Commit and push v3 when the user asks** (one commit is fine: "v3: Okta OIDC, RDS PostgreSQL, run
-   queue, write-back, drift monitor"); new `.sh` files: none in v3. Then watch the push workflows
-   (terraform plan matrix, repo-checks, actionlint) and fix anything red.
-2. Send `devops_3_client_question.xlsx` to WBD.
+1. (Done) v3 pushed (`59333f0`); `repo-checks` and `terraform` green.
+2. `gh` CLI login expired on the VDI (the push still worked): run `gh auth login --web --scopes repo,workflow`
+   before using `gh` / `setup-github.ps1`. Without it, run status is readable via
+   `https://api.github.com/repos/Yashwanth-wbd/wbd-aws-devops/actions/runs?head_sha=<sha>` (public repo).
+3. Send `devops_3_client_question.xlsx` to WBD; fill values as they arrive (section 11.2).
 
 ### 11.1 Process for the next requirement (requirement 4)
 
@@ -499,4 +500,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 16 | 5 Nov 2026 | Full project re-read; refresh this file's header | "Last updated" and key commits in section 1 updated and pushed (`ed26c99`) |
 | 17 | 5 Nov 2026 | What must the client provide before starting (only client-owned values), as an Excel | `docs/requirements/devops_2_client_question.xlsx` (44 inputs + 8 decisions) and its generator; section 7 and `docs/01` point to it; `docs/01` pinning row fixed; pushed |
 | 18 | 6 Nov 2026 | Full walkthrough (no code); new requirement `wbd_Presentation_3.pptx` – plan and architecture only | `devops_plan_3.txt`, `PROJECT_CONTEXT_3.md`, `aws_resource_list_3.xlsx`, `wbd_mmm_ecs_final_3.docx`, `tools/build_v3.py` |
-| 19 | 6 Nov 2026 | Implement requirement 3 (remove what is not needed, add new services, pipelines too) so the project is ready before the client values arrive | v3 implemented (sections 1.1, 1.2, 2, 5): Cognito + Aurora removed; Okta OIDC at the ALB, `rds`, `run-queue`, write-back, model monitor + drift alarms, governance baseline + `approval.json`; `deploy.yml`, `terraform.yml`, `model-governance.yml`, smoke / dry run / platform check; docs 00–13, runbooks (3 new), `data/README.md`; bugs found and fixed by the mock plan (dashboard conditional) and in `mock-plan.ps1` (stderr); all offline checks clean; `_3` files updated + `devops_3_client_question.xlsx`. **Not committed** |
+| 19 | 6 Nov 2026 | Implement requirement 3 (remove what is not needed, add new services, pipelines too) so the project is ready before the client values arrive | v3 implemented (sections 1.1, 1.2, 2, 5): Cognito + Aurora removed; Okta OIDC at the ALB, `rds`, `run-queue`, write-back, model monitor + drift alarms, governance baseline + `approval.json`; `deploy.yml`, `terraform.yml`, `model-governance.yml`, smoke / dry run / platform check; docs 00–13, runbooks (3 new), `data/README.md`; bugs found and fixed by the mock plan (dashboard conditional) and in `mock-plan.ps1` (stderr); all offline checks clean; `_3` files updated + `devops_3_client_question.xlsx` |
+| 20 | 6 Nov 2026 | Push to Git; confirm this file is current and everything is pushed | `59333f0` pushed to `main`, workflows green; records updated to "pushed" and pushed; local = `origin/main` |

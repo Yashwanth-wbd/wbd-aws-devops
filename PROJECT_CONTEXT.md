@@ -5,7 +5,7 @@
 > for the next requirement. This file is kept as the technical reference other docs link to.
 
 Last updated: 6 Nov 2026 (v3 architecture from `wbd_Presentation_3.pptx` implemented and validated
-offline, not committed yet; v2 is on `main` as `89382f2` + `bf4a051`).
+offline, pushed to `main` as `59333f0`; v2 was `89382f2` + `bf4a051`).
 
 ---
 
@@ -295,7 +295,7 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 9. Order of work once the values arrive
 
-1. (Done) v2 validated and pushed; v3 implemented and validated offline (commit when asked).
+1. (Done) v2 validated and pushed; v3 implemented, validated offline and pushed (`59333f0`).
 2. Fill dev values (section 6) – `terraform.tfvars`, `infra/bootstrap/dev.tfvars`, `backend.tf`.
 3. `aws configure sso` for dev (`docs/02`); `aws sts get-caller-identity`.
 4. Bootstrap state; copy bucket and `state_kms_key_arn` into `backend.tf` / tfvars.
@@ -329,4 +329,4 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 5. 6 Nov 2026: v3 requirement (`wbd_Presentation_3.pptx`) reviewed, `_3` documents written, then v3
    implemented as listed in 1.2: Okta OIDC at the ALB, RDS PostgreSQL, SQS run queue + dispatcher,
    Databricks write-back, model monitor + drift alarms, governance baseline + approval record,
-   pipeline and script updates, docs and runbooks. Validated offline; not committed yet.
+   pipeline and script updates, docs and runbooks. Validated offline; pushed (`59333f0`), workflows green.

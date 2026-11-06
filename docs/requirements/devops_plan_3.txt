@@ -21,7 +21,7 @@
 > **Status (6 Nov 2026):** **implemented with placeholder values and validated offline** (fmt,
 > validate of 24 modules, tflint, Checkov 0 failed, actionlint, shellcheck, secret scan, thresholds
 > check, mock plan of all 3 envs: dev 311 / 459, staging 326 / 476, prod 326 / 478 resources to add,
-> default / all features on). Nothing applied to AWS; not committed yet. The [ASK] / [ASM] defaults
+> default / all features on). Nothing applied to AWS; pushed to `main` (`59333f0`). The [ASK] / [ASM] defaults
 > below are what was built.
 >
 > **Built differently from this plan (simpler):**

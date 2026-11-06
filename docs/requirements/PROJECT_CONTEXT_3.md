@@ -6,7 +6,7 @@ pushed to `main`. This file describes the **v3 target** from the updated client 
 
 Status (6 Nov 2026): **implemented with placeholder values and validated offline** (mock plan:
 dev 311 / 459, staging 326 / 476, prod 326 / 478 resources to add, default / all features on).
-Nothing applied to AWS; not committed yet. Where the build differs from this plan: section 4a.
+Nothing applied to AWS; pushed to `main` (`59333f0`). Where the build differs from this plan: section 4a.
 
 ---
 
@@ -161,4 +161,4 @@ Each step: `terraform fmt/validate`, `validate-modules.ps1`, `sync-environments.
    PostgreSQL, run queue + dispatcher, write-back, model monitor, governance baseline + approval
    record, pipelines, scripts, docs, runbooks, `devops_3_client_question.xlsx`. Offline validation
    passed (all tools clean; mock plan counts in the status line). `_3` xlsx/docx regenerated with an
-   implementation column. Not committed.
+   implementation column. Pushed to `main` (`59333f0`).
