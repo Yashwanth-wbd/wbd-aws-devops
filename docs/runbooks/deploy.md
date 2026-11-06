@@ -25,7 +25,7 @@ green in staging, no open SEV1/SEV2.
 
 1. `git tag -a v1.4.0 -m "CHG0012345 MMM release 1.4.0" <same commit> && git push origin v1.4.0`
 2. A WBD approver (not the tagger) approves the `prod` environment.
-3. The run: Aurora cluster snapshot `mmm-prd-predeploy-v1-4-0-<run>` → migration task → ECS services →
+3. The run: RDS DB snapshot `mmm-prd-predeploy-v1-4-0-<run>` → migration task → ECS services →
    SageMaker pointers → publisher → smoke test → release record.
 4. Watch for 30 minutes: dashboard `mmm-prd-platform`, alarms, `/ecs/mmm-prd/api` errors.
 5. Close the change ticket with the release record (version, digests, task-definition revisions, approvers).

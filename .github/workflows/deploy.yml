@@ -13,9 +13,9 @@
 # The state machines read the image parameters at the start of every execution, so running jobs
 # are never changed. A component whose app folder is not in the commit is skipped.
 #
-# One job per run does everything after the approval gate: promote images -> (prod) Aurora snapshot ->
+# One job per run does everything after the approval gate: promote images -> (prod) RDS snapshot ->
 # migration -> ECS -> smoke test -> SageMaker image pointers -> publisher -> optimization dry run
-# (dev/staging) -> release record.
+# through the run queue (dev/staging) -> release record.
 # Any failure rolls every changed component back.
 name: deploy
 
@@ -247,15 +247,15 @@ jobs:
           done
           column -t "$STATE/services.tsv" "$STATE/pointers.tsv" || true
 
-      - name: Aurora snapshot before migration (prod)
+      - name: RDS snapshot before migration (prod)
         if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(env.COMPONENTS, 'api')
         env:
-          AURORA_CLUSTER_ID: ${{ vars.AURORA_CLUSTER_ID }}
+          DB_INSTANCE_ID: ${{ vars.DB_INSTANCE_ID }}
         run: |
           id="$PREFIX-predeploy-${VERSION//./-}-${GITHUB_RUN_ID}"
-          aws rds create-db-cluster-snapshot --db-cluster-identifier "${AURORA_CLUSTER_ID:-$PREFIX-aurora}" --db-cluster-snapshot-identifier "$id" \
+          aws rds create-db-snapshot --db-instance-identifier "${DB_INSTANCE_ID:-$PREFIX-postgres}" --db-snapshot-identifier "$id" \
             --tags "Key=release,Value=$VERSION" "Key=github_run,Value=$GITHUB_RUN_ID" > /dev/null
-          aws rds wait db-cluster-snapshot-available --db-cluster-snapshot-identifier "$id"
+          aws rds wait db-snapshot-available --db-snapshot-identifier "$id"
           echo "SNAPSHOT=$id" >> "$GITHUB_ENV"
 
       - name: Database migration
@@ -308,12 +308,13 @@ jobs:
           needs.resolve.outputs.environment != 'prod' && vars.SMOKE_DRY_RUN != 'false' &&
           (contains(env.COMPONENTS, 'optimizer') || contains(env.COMPONENTS, 'publisher'))
         env:
+          QUEUE_URL: ${{ vars.OPTIMIZATION_QUEUE_URL }}
           STATE_MACHINE: ${{ vars.OPTIMIZATION_STATE_MACHINE_ARN }}
           RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
           MODELS_BUCKET: ${{ vars.MODELS_BUCKET }}
           BUSINESS_UNIT: ${{ vars.DRY_RUN_BUSINESS_UNIT }}
         run: |
-          scripts/dry-run-optimization.sh "$STATE_MACHINE" "$RESULTS_BUCKET" "$MODELS_BUCKET" "$BUSINESS_UNIT" \
+          scripts/dry-run-optimization.sh "$QUEUE_URL" "$STATE_MACHINE" "$RESULTS_BUCKET" "$MODELS_BUCKET" "$BUSINESS_UNIT" \
             "$SSM_PREFIX/images/sagemaker-optimizer"
 
       # ---------------------------------------------------------------- rollback
@@ -357,7 +358,7 @@ jobs:
             --rawfile pointers <(cat "$STATE/pointers.tsv" 2>/dev/null || true) \
             --rawfile lambda <(tr -d '\n' < "$STATE/lambda.tsv" 2>/dev/null || true) '
             { environment: $env, version: $version, commit: $commit, outcome: $outcome,
-              triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, aurora_snapshot: $snapshot, run: $run,
+              triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, db_snapshot: $snapshot, run: $run,
               images:   [$digests  | split("\n")[] | select(length > 0) | split("\t") | { repository: .[0], digest: .[1] }],
               services: [$deployed | split("\n")[] | select(length > 0) | split("\t") | { service: .[0], previous: .[1], deployed: .[2] }],
               sagemaker_images: [$pointers | split("\n")[] | select(length > 0) | split("\t") | { parameter: .[0], deployed: .[1], previous: .[2] }],

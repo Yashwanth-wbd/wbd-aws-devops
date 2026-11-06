@@ -33,10 +33,10 @@ log groups ──subscription filter──> Firehose mmm-<env>-splunk ──HTTP
 |---|---|---|
 | `api`, `ui`, `migrate` | `/ecs/mmm-dev/<service>` | App logs with `run_id` |
 | `ecs-exec` | `/ecs/mmm-dev/exec-audit` | Audit: commands typed in ECS Exec |
-| `aurora-postgres` | `/aws/rds/cluster/mmm-dev-aurora/postgresql` | Audit: pgaudit, connections, errors |
+| `rds-postgres` | `/aws/rds/instance/mmm-dev-postgres/postgresql` | Audit: pgaudit, connections, errors |
 | `waf` | `aws-waf-logs-mmm-dev` | Security: regional WAF on the ALB |
-| `sfn-optimization`, `sfn-model-refresh` | `/aws/states/mmm-dev-<name>` | Run orchestration (model refresh with the data platform) |
-| `publisher` | `/aws/lambda/mmm-dev-results-publisher` | Results written to Aurora per `run_id` |
+| `sfn-optimization`, `sfn-model-refresh`, `sfn-model-monitor` | `/aws/states/mmm-dev-<name>` | Run orchestration (model refresh and drift monitor with the data platform) |
+| `publisher` | `/aws/lambda/mmm-dev-results-publisher` | Results written to PostgreSQL per `run_id` |
 | `sagemaker-jobs`, `sagemaker-train` | `/aws/sagemaker/ProcessingJobs`, `/aws/sagemaker/TrainingJobs` | Optimizer / evaluation and training job logs |
 | `llm-*` | LLM gateway proxy and access logs | Only with GenAI |
 | `vpc-flow` | `/aws/vpc/mmm-dev/flow-logs` | Only with `ship_vpc_flow_logs = true` (high volume and Splunk licence cost) |

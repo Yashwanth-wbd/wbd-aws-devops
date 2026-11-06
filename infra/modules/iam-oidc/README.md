@@ -12,11 +12,11 @@ pipeline roles. Background: [docs/03-github-oidc.md](../../../docs/03-github-oid
 | OIDC provider | `token.actions.githubusercontent.com` | – | – |
 | Role | `mmm-dev-gha-plan` | `environment:dev`, `pull_request` (off in prod), `ref:refs/heads/main` (nightly drift check) | `ReadOnlyAccess` + write the state lock file + state KMS + read `mmm/<env>/*` secret values (needed to refresh generated secrets) |
 | Role | `mmm-dev-gha-apply` | `environment:dev` | `AdministratorAccess`, capped by the permission boundary |
-| Role | `mmm-dev-gha-deploy` | `environment:dev` | Register task definitions, update `mmm-dev-*` services, run the `mmm-dev-migrate` task, pass `mmm-dev-task-*` / `mmm-dev-ecs-task-exec` roles to ECS, read migration logs, prod pre-migration Aurora cluster snapshot (`cluster:<prefix>-aurora`), read / write the SageMaker image pointers `/mmm/<env_short>/images/*`, and publish versions / move the `live` alias of `deploy_lambda_functions` (results publisher). With `deploy_dry_run` (dev, staging): start / describe `dryrun-*` executions of `<prefix>-optimization`, write `runs/dryrun-*` in the results bucket, list `curves/` in the models bucket |
+| Role | `mmm-dev-gha-deploy` | `environment:dev` | Register task definitions, update `mmm-dev-*` services, run the `mmm-dev-migrate` task, pass `mmm-dev-task-*` / `mmm-dev-ecs-task-exec` roles to ECS, read migration logs, prod pre-migration RDS snapshot (`db:<prefix>-postgres`), read / write the SageMaker image pointers `/mmm/<env_short>/images/*`, and publish versions / move the `live` alias of `deploy_lambda_functions` (results publisher). With `deploy_dry_run` (dev, staging): send the dry-run request to the run queue `<prefix>-optimization-requests` (SQS key), describe the `dryrun-*` execution of `<prefix>-optimization`, write `runs/dryrun-*` in the results bucket, list `curves/` in the models bucket |
 | Role | `mmm-dev-gha-ecr-push` | `environment:dev`, `ref:refs/heads/main` (dev only) | Push/pull `mmm/*` repositories in this account |
 | Role | `mmm-dev-gha-ecr-read` | the next environment (dev → `staging`, staging → `prod`) | Pull `mmm/*` to copy images forward |
 | Role (`enable_model_governance`) | `mmm-dev-gha-model-eval` | `ref:refs/heads/main` (hourly evaluation) | Read the Model Registry groups `<prefix>-*` and the evaluation reports; set a model package to **Rejected** only; tag it |
-| Role (`enable_model_governance`) | `mmm-dev-gha-model-approve` | `environment:dev-model-promotion` (WBD model approver) | Same, plus set **Approved** and publish the approved response curves to `models/curves/*` |
+| Role (`enable_model_governance`) | `mmm-dev-gha-model-approve` | `environment:dev-model-promotion` (WBD model approver) | Same, plus set **Approved**, publish the approved response curves to `models/curves/*` and the drift baseline to `models/baseline/*`, and write `models/evaluation/*/approval.json` |
 
 Subjects are always `repo:<github_org>/<github_repo>:...`, so no other repository can use
 these roles. Every role has the permission boundary and a 1-hour session limit.
@@ -41,7 +41,9 @@ GitHub Actions (`terraform.yml`).
 
 The v2 architecture changed the deploy policy (Aurora snapshot, SSM image pointers, Lambda release
 instead of the frontend / CloudFront / MWAA statements) and added the model governance roles. Apply
-this once with the SSO `DevOps` profile before the first pipeline run.
+this once with the SSO `DevOps` profile before the first pipeline run. v3 changed it again (RDS
+instance snapshot instead of the Aurora cluster snapshot; the dry run sends to the run queue instead
+of starting the state machine) - same one-off apply with the SSO profile.
 
 ## Inputs
 
@@ -60,7 +62,7 @@ this once with the SSO `DevOps` profile before the first pipeline run.
 | `state_bucket_name`, `state_kms_key_arn` | string | – | From `infra/bootstrap` |
 | `secrets_kms_key_arn`, `s3_kms_key_arn`, `ecr_kms_key_arn` | string | – | From the kms module |
 | `deploy_lambda_functions` | list(string) | `["results-publisher"]` | Function names (without prefix) the deploy role may release |
-| `deploy_dry_run` | object({ results_bucket_arn, models_bucket_arn }) | `null` | Post-release optimization dry run by the deploy role (the stacks set it in dev and staging) |
+| `deploy_dry_run` | object({ results_bucket_arn, models_bucket_arn, sqs_kms_key_arn }) | `null` | Post-release optimization dry run through the run queue by the deploy role (the stacks set it in dev and staging) |
 | `enable_model_governance` | bool | `false` | Create `gha-model-eval` / `gha-model-approve` (= `enable_data_platform`) |
 | `max_session_duration` | number | `3600` | Seconds |
 

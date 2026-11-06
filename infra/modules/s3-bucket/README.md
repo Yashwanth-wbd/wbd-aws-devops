@@ -25,6 +25,7 @@ One hardened, reusable S3 bucket. The environment stack calls it once per purpos
 | Object Lock (WORM) | `object_lock = { mode, days }` | `approved-worm`: GOVERNANCE in dev/staging, COMPLIANCE in prod, 2555 days (7 years); `training-data` (training snapshots, `training_data_retention_days`). It can only be turned on when the bucket is **created**. |
 | Glacier transition | `glacier_transition_days` | `landing`: 365 days; `training-data`: 180 days; objects are kept, never expired |
 | Expiry | `expiration_days` | `exports`: 30 days |
+| Prefix expiry | `prefix_expiration_days` | `lakehouse`: `monitoring/` 90 days (drift-check feature exports) |
 | EventBridge events | `enable_eventbridge` | `landing`: object events on the default bus (no rule consumes them yet; ready for a data-arrival trigger) |
 | Extra policy | `additional_policy_json` | Optional, e.g. a cross-account read |
 | Cross-region replication | `replication = { destination_bucket_arn, destination_kms_key_arn, permissions_boundary_arn }` | Not used for now: Step 12 uses the AWS Backup cross-region copy instead (docs/08 section 2). Turn it on for `results` / `approved-worm` only if WBD needs RPO in minutes |
@@ -53,6 +54,7 @@ on, in the DR region.
 | `additional_kms_key_arns` | list(string) | `[]` (landing: the per-BU keys, Step 13) |
 | `object_lock` | object | `null` |
 | `expiration_days` / `glacier_transition_days` | number | `null` |
+| `prefix_expiration_days` | map(number) | `{}` |
 | `noncurrent_version_days` | number | `90` |
 | `enable_eventbridge` | bool | `false` |
 | `additional_policy_json` | string | `""` |

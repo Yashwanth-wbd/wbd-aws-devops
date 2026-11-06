@@ -25,7 +25,7 @@ The VPC CIDR is split into eight equal blocks. For the dev placeholder `10.40.0.
 | private-app | `10.40.0.0/22` | `10.40.4.0/22` | `10.40.8.0/22` | NAT gateway | ECS tasks, SageMaker jobs, Lambda functions |
 | (spare) | `10.40.12.0/22` | | | – | 4th AZ / growth |
 | public | `10.40.16.0/24` | `10.40.17.0/24` | `10.40.18.0/24` | Internet gateway | ALB, NAT only |
-| private-data | `10.40.20.0/24` | `10.40.21.0/24` | `10.40.22.0/24` | **none** | Aurora, RDS Proxy |
+| private-data | `10.40.20.0/24` | `10.40.21.0/24` | `10.40.22.0/24` | **none** | RDS PostgreSQL, RDS Proxy |
 | private-endpoint | `10.40.24.0/24` | `10.40.25.0/24` | `10.40.26.0/24` | **none** | Interface endpoints, resolver, TGW attachment |
 | (spare) | `10.40.28.0/22` | | | – | growth |
 
@@ -53,7 +53,7 @@ If WBD sends all internet traffic through a central egress firewall, set
   layers are stored in S3, so image pulls do not go through NAT.
 - **Interface endpoints (`interface_endpoints`):** `ecr.api`, `ecr.dkr`, `sts`, `secretsmanager`,
   `ssm`, `ssmmessages` (ECS Exec), `kms`, `logs`, `monitoring`, `xray`, `states` (Step Functions),
-  `sagemaker.api`. With GenAI (`additional_interface_endpoints`): `execute-api`, `bedrock-runtime`.
+  `sagemaker.api`, `sqs` (optimization run queue). With GenAI (`additional_interface_endpoints`): `execute-api`, `bedrock-runtime`.
   - They sit in the endpoint subnets with private DNS, so the AWS SDK uses them automatically.
   - Cost is about USD 7.3 per endpoint per AZ per month, so around USD 175 a month in dev (12 endpoints × 2 AZs).
 
@@ -64,15 +64,15 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | SG | Inbound | Outbound | Attached in |
 |---|---|---|---|
 | `endpoints` | 443 from the VPC CIDR | – | this module |
-| `alb` | 443 and 80 (redirect) from each `alb_ingress_cidrs` entry | app port → `api`, web port → `ui`, 443 → anywhere (Cognito token exchange) | ALB |
+| `alb` | 443 and 80 (redirect) from each `alb_ingress_cidrs` entry | app port → `api`, web port → `ui`, 443 → anywhere (Okta token and user info calls) | ALB |
 | `api` | app port (`8080`) from `alb` | 443 → anywhere (AWS APIs, ALB signing keys) | API service |
 | `ui` | web port (`ui_port`, `8080`) from `alb` | 443 → `endpoints`, 443 → S3 prefix list | UI service |
 | `tasks` | none | 443 → anywhere | platform-check and DB bootstrap tasks |
 | `data_clients` | none | 5432 → `rds_proxy`, 443 → `endpoints`, 443 → S3 prefix list | API, publisher Lambda, **migration task** |
-| `rds_proxy` | 5432 from `data_clients` | 5432 → `rds` | Aurora |
-| `rds` | 5432 from `rds_proxy` | – | Aurora |
+| `rds_proxy` | 5432 from `data_clients` | 5432 → `rds` | RDS Proxy |
+| `rds` | 5432 from `rds_proxy` | – | RDS PostgreSQL instance |
 | `sagemaker` | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | SageMaker jobs (no internet) |
-| `lambda` | none | 443 → `endpoints`, 443 → S3 prefix list | results-publisher Lambda |
+| `lambda` | none | 443 → `endpoints`, 443 → S3 prefix list | results-publisher and run-dispatcher Lambdas |
 | `genai` (optional) | none | 443 → anywhere (approved LLM providers) | LLM gateway proxy Lambda |
 | `resolver` (optional) | – | 53 TCP/UDP → each WBD DNS IP | this module |
 
@@ -112,7 +112,7 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `availability_zone_ids` | list(string) | – | 2 (dev) or 3 (staging/prod) AZ IDs |
 | `enable_nat_gateway` | bool | `true` | false when WBD central egress is used |
 | `single_nat_gateway` | bool | `false` | true in dev |
-| `interface_endpoints` | list(string) | 12 services above | Interface endpoint suffixes |
+| `interface_endpoints` | list(string) | 13 services above | Interface endpoint suffixes |
 | `app_port` | number | `8080` | API container port |
 | `ui_port` | number | `8080` | UI container port |
 | `alb_ingress_cidrs` | list(string) | `["0.0.0.0/0"]` | Ranges allowed to reach the ALB |

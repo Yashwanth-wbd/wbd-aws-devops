@@ -11,7 +11,7 @@ governance, or GenAI. Practise each in staging (Release 1 gate R9).
 | SageMaker optimizer / training image | `deploy.yml` dispatch with previous tag, or restore previous SSM values | 2–5 min |
 | Results publisher | `scripts/lambda-release.sh switch mmm-<env>-results-publisher <version>` (version from release record) | 1–2 min |
 | Infrastructure | Revert the PR, merge, approve the apply | 15–30 min |
-| Database data | Aurora point-in-time restore ([db-restore.md](db-restore.md)) | 30–60 min |
+| Database data | RDS point-in-time restore ([db-restore.md](db-restore.md)) | 30–60 min |
 | Model curves (governance) | `model-governance.yml` `rollback` action ([model-rollback.md](model-rollback.md)) | 5 min + approval |
 | GenAI | Flag off ([genai.md](genai.md)) | 5 min |
 
@@ -64,8 +64,9 @@ scripts/lambda-release.sh switch mmm-$E-results-publisher <previous-version>
 
 ## Infrastructure
 
-`git revert <merge commit>` → PR → plan shows the reverse change → merge → approvals. For Aurora
-or buckets, read the plan carefully: never accept an unintended cluster replace – stop and escalate.
+`git revert <merge commit>` → PR → plan shows the reverse change → merge → approvals. For the RDS
+instance, the run queue or buckets, read the plan carefully: never accept an unintended replace of
+the DB instance or the queues – stop and escalate.
 
 ## Verify
 

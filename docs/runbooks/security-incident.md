@@ -19,7 +19,8 @@ GuardDuty HIGH, suspected data exposure, leaked credentials, unknown IAM activit
 | Situation | Containment |
 |---|---|
 | Compromised ECS task | Isolate: replace its SGs with an empty SG or stop the task after capturing evidence; redeploy from a known-good image digest |
-| Leaked app secret (Git, logs, ticket) | Rotate it now ([rotation.md](rotation.md)), then remove it from Git history |
+| Leaked app secret (Git, logs, ticket) | Rotate it now ([rotation.md](rotation.md)), then remove it from Git history. Okta ALB client secret: WBD Identity revokes it in Okta, new secret + apply ([rotation.md](rotation.md#okta-alb-client-secret)) |
+| Compromised planner account | WBD Identity suspends the Okta user and clears its sessions; the `mmm-session` cookie ends at `session_hours` at the latest |
 | Leaked / misused IAM role session | Revoke sessions on the role; check CloudTrail |
 | Suspicious engineer access | WBD Identity disables the Okta user / removes the permission-set assignment |
 | Data exposure via the app | GenAI: [genai.md](genai.md); WAF: block IP / pattern on the regional web ACL (`mmm-<env>-alb`, then PR) |
@@ -28,7 +29,7 @@ GuardDuty HIGH, suspected data exposure, leaked credentials, unknown IAM activit
 ## 2. Investigate (with security)
 
 - CloudTrail for the principal and time window; VPC flow logs; ALB and WAF logs (log bucket / Splunk);
-  ECS Exec audit; Aurora PostgreSQL logs (`/aws/rds/cluster/mmm-<env_short>-aurora/postgresql` or
+  ECS Exec audit; RDS PostgreSQL logs (`/aws/rds/instance/mmm-<env_short>-postgres/postgresql` or
   `terraform output monitoring.splunk_log_groups`).
 - Image provenance: release record (digest) and Trivy / Inspector for that digest.
 

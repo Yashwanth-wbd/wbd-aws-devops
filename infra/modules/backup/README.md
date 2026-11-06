@@ -24,10 +24,10 @@ AWS Backup for the data that cannot be rebuilt from code: the RDS database and t
 
 | Data | Protection |
 |---|---|
-| Aurora PostgreSQL | **Native PITR** (`backup_retention_days`; restore to any second) **plus** AWS Backup daily cluster snapshots (`backup = true` tag), copied to the DR region in prod. `deploy.yml` also takes a manual cluster snapshot before every prod migration |
+| RDS PostgreSQL | **Native PITR** (`backup_retention_days`; restore to any second) **plus** AWS Backup daily instance snapshots (`backup = true` tag), copied to the DR region in prod. `deploy.yml` also takes a manual DB snapshot before every prod migration |
 | S3 `results`, `approved-worm`, `models` | Versioning for accidental overwrite or delete. AWS Backup daily for loss of the bucket or the account; Object Lock on `approved-worm` |
 | SageMaker Model Registry | Metadata only; artifacts and evaluation reports are in the `models` bucket (backed up). Groups are re-created by Terraform |
-| In-flight optimization runs | Not backed up: a failed or lost execution is re-started from the API (the run row in Aurora keeps its input) |
+| In-flight optimization runs | Not backed up: a failed or lost execution is re-started from the API (the run row in PostgreSQL keeps its input). Queued requests live in SQS (4 days) and the DLQ (14 days) |
 | Infrastructure | Terraform code and state (versioned state bucket) |
 | Secrets | Secrets Manager. Generated secrets are re-created by Terraform; WBD-issued ones are re-requested |
 

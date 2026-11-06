@@ -1,7 +1,7 @@
 # step-functions
 
 One Standard Step Functions state machine with its role, logs, and failure and throttling alarms. The stack
-passes the definition; the module adds the plumbing. Used for `optimization` and `model-refresh`.
+passes the definition; the module adds the plumbing. Used for `optimization`, `model-refresh` and `model-monitor`.
 
 **Status:** implemented (v2 architecture).
 

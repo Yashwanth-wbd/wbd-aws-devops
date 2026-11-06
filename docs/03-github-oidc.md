@@ -30,7 +30,7 @@ In **each** AWS account:
 | IAM OIDC identity provider | URL `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` |
 | `mmm-<env>-gha-plan` | Read-only + read Terraform state. Used by `terraform plan` on pull requests |
 | `mmm-<env>-gha-apply` | Terraform apply (bounded by the permission boundary) |
-| `mmm-<env>-gha-deploy` | ECS rolling deploy (`api`, `ui`), run the `migrate` task, prod pre-migration Aurora cluster snapshot, read/write SageMaker image pointers `/mmm/<env_short>/images/*`, Lambda release (results publisher `live` alias) |
+| `mmm-<env>-gha-deploy` | ECS rolling deploy (`api`, `ui`), run the `migrate` task, prod pre-migration RDS DB snapshot, read/write SageMaker image pointers `/mmm/<env_short>/images/*`, Lambda release (results publisher `live` alias), dry-run request to the run queue (dev, staging) |
 | `mmm-<env>-gha-ecr-push` | Push images to **this account's** ECR registry. In dev it is used by CI builds; in staging and prod it receives the image copied during promotion |
 | `mmm-<env>-gha-ecr-read` (dev and staging) | Pull images from this account's ECR, used as the copy source when promoting to the next environment |
 | `mmm-<env>-gha-model-eval` (with data platform) | Read SageMaker Model Registry, evaluation objects in S3, tag packages, **Reject** failed versions; trust **`ref:refs/heads/main`** only |

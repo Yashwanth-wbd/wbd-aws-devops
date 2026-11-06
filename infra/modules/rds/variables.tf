@@ -1,6 +1,6 @@
 # ------------------------------------------------------------------ Placement
 variable "name_prefix" {
-  description = "Resource name prefix, e.g. mmm-dev. The cluster is <name_prefix>-aurora."
+  description = "Resource name prefix, e.g. mmm-dev. The DB instance is <name_prefix>-postgres."
   type        = string
 }
 
@@ -10,7 +10,7 @@ variable "subnet_ids" {
 }
 
 variable "db_security_group_id" {
-  description = "Security group of the cluster (network module, rds)."
+  description = "Security group of the DB instance (network module, rds)."
   type        = string
 }
 
@@ -19,39 +19,45 @@ variable "proxy_security_group_id" {
   type        = string
 }
 
-# ------------------------------------------------------------------ Engine and capacity
+# ------------------------------------------------------------------ Engine and size
 variable "engine_version" {
-  description = "Aurora PostgreSQL version (major.minor); minor upgrades are applied in the maintenance window."
+  description = "PostgreSQL version (major.minor); minor upgrades are applied in the maintenance window."
   type        = string
   default     = "16.6"
 }
 
-variable "min_acu" {
-  description = "Serverless v2 minimum capacity (ACU, 0.5 steps)."
-  type        = number
-  default     = 0.5
-}
-
-variable "max_acu" {
-  description = "Serverless v2 maximum capacity (ACU)."
-  type        = number
-  default     = 8
+variable "instance_class" {
+  description = "DB instance class, e.g. db.t4g.medium (dev), db.r6g.large (staging), db.r6g.xlarge (prod)."
+  type        = string
+  default     = "db.r6g.large"
 
   validation {
-    condition     = var.max_acu >= 1 && var.max_acu <= 256
-    error_message = "max_acu must be between 1 and 256."
+    condition     = can(regex("^db\\.", var.instance_class))
+    error_message = "instance_class must start with db."
   }
 }
 
-variable "instance_count" {
-  description = "Cluster instances: 1 = writer only (dev), 2 = writer + reader in another AZ for failover (staging/prod)."
+variable "allocated_storage" {
+  description = "Initial gp3 storage in GiB."
   type        = number
-  default     = 2
+  default     = 100
 
   validation {
-    condition     = var.instance_count >= 1 && var.instance_count <= 3
-    error_message = "instance_count must be 1, 2 or 3."
+    condition     = var.allocated_storage >= 20
+    error_message = "allocated_storage must be at least 20 GiB."
   }
+}
+
+variable "max_allocated_storage" {
+  description = "Storage autoscaling ceiling in GiB (must be larger than allocated_storage)."
+  type        = number
+  default     = 500
+}
+
+variable "multi_az" {
+  description = "Standby in a second AZ with automatic failover (staging/prod)."
+  type        = bool
+  default     = true
 }
 
 variable "db_name" {
@@ -77,6 +83,11 @@ variable "backup_retention_days" {
   description = "Automated backup / point-in-time-recovery window (1-35)."
   type        = number
   default     = 35
+
+  validation {
+    condition     = var.backup_retention_days >= 1 && var.backup_retention_days <= 35
+    error_message = "backup_retention_days must be between 1 and 35."
+  }
 }
 
 variable "apply_immediately" {
@@ -97,7 +108,7 @@ variable "secrets_kms_key_arn" {
 }
 
 variable "logs_kms_key_arn" {
-  description = "KMS key for the PostgreSQL log group (kms module, purpose logs)."
+  description = "KMS key for the PostgreSQL log groups (kms module, purpose logs)."
   type        = string
 }
 
@@ -130,8 +141,8 @@ variable "tags" {
   default     = {}
 }
 
-variable "cluster_tags" {
-  description = "Extra tags on the cluster only, e.g. { backup = \"true\" } for AWS Backup selection."
+variable "instance_tags" {
+  description = "Extra tags on the DB instance only, e.g. { backup = \"true\" } for AWS Backup selection."
   type        = map(string)
   default     = {}
 }

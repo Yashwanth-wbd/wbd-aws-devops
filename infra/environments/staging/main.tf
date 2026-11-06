@@ -40,7 +40,7 @@ module "kms" {
   name_prefix = local.name_prefix
 
   # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (guardrail, LLM secrets)
-  purposes              = concat(["rds", "s3", "logs", "secrets", "ecr", "sagemaker"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
+  purposes              = concat(["rds", "s3", "logs", "secrets", "ecr", "sagemaker", "sqs"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
   logs_service_purposes = ["logs"]
 }
 
@@ -69,10 +69,11 @@ module "iam_oidc" {
   deploy_lambda_functions       = [local.publisher_name]
   enable_model_governance       = var.enable_data_platform
 
-  # Post-release dry run of the optimization state machine (not in prod)
+  # Post-release dry run through the run queue (not in prod)
   deploy_dry_run = local.is_prod ? null : {
     results_bucket_arn = local.bucket_arns["results"]
     models_bucket_arn  = local.bucket_arns["models"]
+    sqs_kms_key_arn    = module.kms.key_arns["sqs"]
   }
 
   state_bucket_name   = local.state_bucket_name
@@ -128,13 +129,14 @@ module "network" {
 # ================================================================== Step 5 - Secrets and configuration
 locals {
   # Secret values never come from variables; they are filled out-of-band by DevOps
-  # (docs/05-secrets-and-config.md). The Aurora admin secret is managed by RDS itself.
+  # (docs/05-secrets-and-config.md). The RDS admin secret is managed by RDS itself.
   secrets = merge(
     {
-      "api/db"      = { description = "App DB connection {host, port, dbname, username, password} - filled after the first migration" }
-      "rds/proxy"   = { description = "App DB user {username, password} for RDS Proxy (never the admin user)" }
-      "rds/migrate" = { description = "Migration DB user {username, password} for RDS Proxy (schema owner, used only by the migrate task)" }
-      "splunk/hec"  = { description = "Splunk HEC token from the WBD Splunk team" }
+      "api/db"          = { description = "App DB connection {host, port, dbname, username, password} - filled after the first migration" }
+      "rds/proxy"       = { description = "App DB user {username, password} for RDS Proxy (never the admin user)" }
+      "rds/migrate"     = { description = "Migration DB user {username, password} for RDS Proxy (schema owner, used only by the migrate task)" }
+      "splunk/hec"      = { description = "Splunk HEC token from the WBD Splunk team" }
+      "okta/alb-client" = { description = "Okta OIDC app client secret {\"client_secret\": \"...\"} from the WBD Identity team - read by Terraform for the ALB sign-in" }
     },
     { for v in var.third_party_vendors : "thirdparty/${v}" => { description = "${v} API credentials from WBD data owners" } },
     # Step 14: one API key per approved external LLM provider, read only by the LLM gateway proxy
@@ -143,11 +145,10 @@ locals {
 
   parameters = merge(
     {
-      "genai_enabled"        = { value = tostring(var.genai_enabled), description = "GenAI feature flag (Release 2)" }
-      "cognito/user_pool_id" = { value = module.cognito.user_pool_id, description = "Cognito user pool (WBD Okta federation) - ALB sign-in" }
-      "cognito/client_id"    = { value = module.cognito.client_id, description = "Cognito app client used by the ALB" }
-      "cognito/domain"       = { value = module.cognito.domain_prefix, description = "Cognito hosted domain prefix (logout URL)" }
-      "databricks/host"      = { value = var.databricks_host, description = "Databricks workspace URL" }
+      "genai_enabled"                    = { value = tostring(var.genai_enabled), description = "GenAI feature flag (Release 2)" }
+      "okta/issuer"                      = { value = local.okta_issuer, description = "WBD Okta issuer of the ALB sign-in" }
+      "databricks/host"                  = { value = var.databricks_host, description = "Databricks workspace URL" }
+      "optimization/max_concurrent_runs" = { value = tostring(var.max_concurrent_runs), description = "Optimization runs allowed at the same time - read by the run dispatcher" }
     },
     { for bu, q in var.genai_token_quotas : "genai/token_quota/${bu}" => { value = tostring(q), description = "Daily GenAI token quota for BU ${bu}" } },
   )
@@ -191,6 +192,7 @@ locals {
       object_lock             = null
       enable_eventbridge      = true
       enabled                 = true
+      prefix_expiration_days  = {}
     }
     # Run evidence: optimization inputs/outputs, solver logs (written by the SageMaker job)
     results = {
@@ -199,6 +201,7 @@ locals {
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = true
+      prefix_expiration_days  = {}
     }
     approved-worm = {
       glacier_transition_days = null
@@ -206,6 +209,7 @@ locals {
       object_lock             = { mode = var.approved_worm_lock_mode, days = var.approved_worm_retention_days }
       enable_eventbridge      = false
       enabled                 = true
+      prefix_expiration_days  = {}
     }
     exports = {
       glacier_transition_days = null
@@ -213,6 +217,7 @@ locals {
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = true
+      prefix_expiration_days  = {}
     }
     # Approved response curves (curves/<bu>/), model artifacts (artifacts/) and evaluation reports (evaluation/)
     models = {
@@ -221,6 +226,7 @@ locals {
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = true
+      prefix_expiration_days  = {}
     }
     # Step 13: training snapshots - immutable, so every model version can be reproduced
     training-data = {
@@ -229,14 +235,16 @@ locals {
       object_lock             = { mode = var.approved_worm_lock_mode, days = var.training_data_retention_days }
       enable_eventbridge      = false
       enabled                 = var.enable_data_platform
+      prefix_expiration_days  = {}
     }
-    # Step 13: Delta tables (bronze/silver/gold) managed by Unity Catalog
+    # Step 13: Delta tables (bronze/silver/gold) managed by Unity Catalog; monitoring/ = drift-check feature exports
     lakehouse = {
       glacier_transition_days = null
       expiration_days         = null
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = var.enable_data_platform
+      prefix_expiration_days  = { "monitoring/" = 90 }
     }
   }
   data_buckets = { for k, v in local.all_data_buckets : k => v if v.enabled }
@@ -255,6 +263,7 @@ module "buckets" {
   object_lock             = each.value.object_lock
   glacier_transition_days = each.value.glacier_transition_days
   expiration_days         = each.value.expiration_days
+  prefix_expiration_days  = each.value.prefix_expiration_days
   noncurrent_version_days = 90
   enable_eventbridge      = each.value.enable_eventbridge
   component               = "data"
@@ -263,21 +272,22 @@ module "buckets" {
   tags                    = contains(local.backed_up_buckets, each.key) ? { backup = "true" } : {}
 }
 
-# Aurora PostgreSQL Serverless v2: scales with load, IAM auth through RDS Proxy.
-module "aurora" {
-  source = "../../modules/aurora"
+# RDS for PostgreSQL (one instance, Multi-AZ in staging/prod), IAM auth through RDS Proxy.
+module "rds" {
+  source = "../../modules/rds"
 
   name_prefix             = local.name_prefix
   subnet_ids              = module.network.private_data_subnet_ids
   db_security_group_id    = module.network.security_group_ids["rds"]
   proxy_security_group_id = module.network.security_group_ids["rds_proxy"]
 
-  engine_version = var.aurora_engine_version
-  min_acu        = var.aurora_min_acu
-  max_acu        = var.aurora_max_acu
+  engine_version        = var.rds_engine_version
+  instance_class        = var.rds_instance_class
+  allocated_storage     = var.rds_allocated_storage
+  max_allocated_storage = var.rds_max_allocated_storage
+  multi_az              = var.rds_multi_az
 
-  # dev: writer only, 7-day PITR, can be deleted; staging/prod: writer + reader in another AZ
-  instance_count        = var.environment == "dev" ? 1 : 2
+  # dev: 7-day PITR, can be deleted; staging/prod: longer PITR; prod: deletion protection
   deletion_protection   = local.is_prod
   backup_retention_days = { dev = 7, staging = 14, prod = 35 }[var.environment]
   apply_immediately     = var.environment == "dev"
@@ -291,5 +301,5 @@ module "aurora" {
   proxy_user_secret_arns = [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]]
 
   # Step 10: selected by the AWS Backup plan
-  cluster_tags = { backup = "true" }
+  instance_tags = { backup = "true" }
 }

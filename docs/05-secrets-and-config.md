@@ -4,13 +4,13 @@
 
 | Kind of value | Store | Examples | Why |
 |---|---|---|---|
-| Passwords, tokens, keys | **AWS Secrets Manager** (KMS key `alias/mmm-<env>-secrets`) | DB app user, Splunk HEC token, third-party API keys, LLM provider keys | Encrypted, audited, rotatable, injected into ECS at start |
-| Non-secret runtime settings | **SSM Parameter Store** (`String`, or `SecureString` if sensitive) | `genai_enabled`, Cognito pool/client/domain, Databricks host, GenAI quotas | Change via Terraform tfvars + apply |
+| Passwords, tokens, keys | **AWS Secrets Manager** (KMS key `alias/mmm-<env>-secrets`) | DB app user, Okta OIDC client secret (ALB), Splunk HEC token, third-party API keys, LLM provider keys | Encrypted, audited, rotatable, injected into ECS at start |
+| Non-secret runtime settings | **SSM Parameter Store** (`String`, or `SecureString` if sensitive) | `genai_enabled`, Okta issuer, run concurrency limit, Databricks host, GenAI quotas | Change via Terraform tfvars + apply |
 | Non-secret pipeline settings | **GitHub Environment variables** | role ARNs, region, cluster name, subnet IDs, `APP_URL` | Not secret; scoped per environment |
 | Pipeline secrets | **GitHub Environment secrets** (rare) | `SONAR_TOKEN` if SonarQube is used | Only for third-party tools that cannot use OIDC |
 | AWS credentials for pipelines | **none stored** | – | GitHub OIDC gives temporary credentials |
 | Databricks SP secret (model refresh) | **EventBridge connection** auth (managed secret ARN on the connection) | OAuth client secret for `databricks_sp_client_id` | Terraform creates placeholder `set-out-of-band`; DevOps updates once |
-| Aurora admin password | **RDS-managed secret** (Secrets Manager, auto-rotated) | `rds!cluster-…` | Nobody ever sees it |
+| RDS admin password | **RDS-managed secret** (Secrets Manager, auto-rotated) | `rds!db-…` | Nobody ever sees it |
 
 **Never:** in Git, in Docker images, in plain task-definition `environment`, in Terraform
 variables or tfvars (for secret **values**), in GitHub variables, in logs.
@@ -24,6 +24,7 @@ All paths use prefix **`mmm/<env_short>/`** (for example `mmm/dev/api/db` in the
 | `mmm/<env>/api/db` | `{host, port, dbname, username, password}` | DevOps after first migration / bootstrap | API (`migrate` uses `rds/migrate`) |
 | `mmm/<env>/rds/proxy` | app DB user `{username, password}` (never the admin) | DevOps after first migration | RDS Proxy (app user) |
 | `mmm/<env>/rds/migrate` | migration DB user `{username, password}` (schema owner) | DevOps at first-time DB setup | Migrate task (via RDS Proxy + IAM auth) |
+| `mmm/<env>/okta/alb-client` | `{"client_secret":"..."}` of the Okta OIDC Web app (`okta_client_id`) | DevOps from WBD Identity, before `okta_sign_in_enabled = true` | Terraform (data source, only with `okta_sign_in_enabled`) → ALB listener `authenticate-oidc` |
 | `mmm/<env>/splunk/hec` | `{"hec_token":"..."}` (Firehose requires this key name) | DevOps from WBD Splunk team | Firehose (when `enable_splunk_shipping`) |
 | `mmm/<env>/thirdparty/<vendor>` | Vendor-specific JSON (e.g. API keys) | DevOps from WBD data owners | API / batch jobs as wired by the app |
 | `mmm/<env>/llm/<provider>` | `{"api_key":"..."}` (only when `enable_genai`) | DevOps from WBD / vendor | LLM gateway proxy Lambda |
@@ -36,9 +37,8 @@ entry, and **no** MWAA connection secrets in v2.
 | Parameter | Example | Set from | Read by |
 |---|---|---|---|
 | `/mmm/<env>/genai_enabled` | `false` | tfvars `genai_enabled` | API |
-| `/mmm/<env>/cognito/user_pool_id` | `us-east-1_…` | Cognito module | API |
-| `/mmm/<env>/cognito/client_id` | ALB OAuth client ID | Cognito module | API |
-| `/mmm/<env>/cognito/domain` | `wbd-mmm-dev` | Cognito module | API / UI |
+| `/mmm/<env>/okta/issuer` | `https://wbd.okta.com/oauth2/default` | tfvars `okta_issuer` | API (also env `OKTA_ISSUER`) |
+| `/mmm/<env>/optimization/max_concurrent_runs` | `5` | tfvars `max_concurrent_runs` (change it there, not in the console) | Run dispatcher Lambda (each batch) |
 | `/mmm/<env>/databricks/host` | `https://dbc-….cloud.databricks.com` | tfvars `databricks_host` | Platform jobs / diagnostics |
 | `/mmm/<env>/genai/token_quota/<bu>` | `1000000` | tfvars `genai_token_quotas` | LLM gateway (Release 2) |
 
@@ -82,8 +82,8 @@ flowchart LR
   td[Task definition 'secrets' block lists ARNs only] --> exec
 ```
 
-Example API task secrets (from Terraform): `GENAI_ENABLED`, `COGNITO_USER_POOL_ID`,
-`COGNITO_CLIENT_ID` from SSM; DB credentials from Secrets Manager when wired after bootstrap.
+Example API task secrets (from Terraform): `GENAI_ENABLED` from SSM; DB credentials from Secrets
+Manager when wired after bootstrap. Plain environment: `OKTA_ISSUER`, `OPTIMIZATION_QUEUE_URL`.
 
 - The **execution role** may read only the secrets listed for that service.
 - The **task role** (the app's own identity) gets no Secrets Manager access unless the app
@@ -122,7 +122,8 @@ aws ssm get-parameter --name /mmm/dev/genai_enabled --query Parameter.Value
 
 | Secret | Rotation |
 |---|---|
-| RDS admin (Aurora) | Automatic (RDS-managed) |
+| RDS admin | Automatic (RDS-managed) |
+| Okta ALB client secret | When WBD Identity rotates it: `put-secret-value` on `okta/alb-client`, then `terraform apply` (the listener gets the new value; [runbooks/rotation.md](runbooks/rotation.md)) |
 | App / migrate DB users | Manual or rotation Lambda follow-up; update Secrets Manager and redeploy |
 | Splunk / third-party / LLM keys | When the issuer rotates; update the secret and force a new deployment |
 | Databricks connection OAuth secret | WBD rotates SP secret; re-run `aws events update-connection` with the new `ClientSecret` |
@@ -133,6 +134,6 @@ aws ssm get-parameter --name /mmm/dev/genai_enabled --query Parameter.Value
   Locally, run `.\scripts\secret-scan.ps1` (Trivy).
 - **Checkov** fails on hard-coded credentials in Terraform.
 - **CloudWatch Logs data-protection policy** masks credentials and personal data in logs.
-- **Terraform state** may reference secret metadata; the state bucket is KMS-encrypted,
+- **Terraform state** may reference secret metadata, and holds the Okta ALB client secret (the listener needs it); the state bucket is KMS-encrypted,
   versioned, has public access blocked, and only the `gha-plan` / `gha-apply` roles and the
   DevOps permission set can read it.

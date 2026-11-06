@@ -13,14 +13,15 @@ then run the sync.** Only `backend.tf`, `terraform.tfvars` and this README belon
 | Account / prefix | `wbd-mmm-dev`, `mmm-dev` | `wbd-mmm-stage`, `mmm-stg` |
 | AZs / NAT | 2 / 1 shared | **3 / one per AZ** |
 | VPC | `10.40.0.0/19` | `10.40.32.0/19` (placeholder) |
-| Aurora | 1 instance, 0.5–4 ACU, 7-day PITR | **2 instances**, 0.5–16 ACU, 14-day PITR |
+| RDS PostgreSQL | `db.t4g.medium`, Single-AZ, 50–200 GiB, 7-day PITR | `db.r6g.large`, **Multi-AZ**, 100–500 GiB, 14-day PITR |
 | ECS min–max | api 1–2, ui 1–2 | api 2–4, ui 2–3 |
 | ECR | builds land here (`sha-*`, 30 kept) | release candidates only (`vX.Y.Z-rcN`), copied from dev |
 | OIDC roles | `ecr-push` also trusts `main`; `ecr-read` trusts `staging` | `ecr-push` trusts `staging` only; `ecr-read` trusts `prod` |
 | Backups | 7 days, recovery points deletable | **14 days, manual deletion denied** |
 | Logs | 30 days | 90 days |
 | GitHub Environment | no reviewers | **EY delivery lead approves** |
-| Okta SAML | own Okta app (`terraform output okta_app_settings`) | own app for staging |
+| Run queue | `max_concurrent_runs = 5` | `max_concurrent_runs = 20` |
+| Okta OIDC | own Okta app (`terraform output okta_app_settings`) | own app for staging (own `okta_client_id`, own `okta/alb-client` secret) |
 | Data platform (`enable_data_platform`) | bundles from `main` via `databricks.yml` | same workflow on manual dispatch / tags `v*` only; model promotion needs `staging-model-promotion` |
 
 First `terraform plan` on an empty account: run `.\scripts\mock-plan.ps1 -Environment staging` for
@@ -41,14 +42,14 @@ the current resource count (includes the third AZ and backup vault deny policy).
 
    Put the values in `backend.tf` and `state_kms_key_arn` in `terraform.tfvars`.
 3. **Replace the placeholders** in `terraform.tfvars` (every `# add actual value`). The ACM
-   certificate for `app_domain_name` in the workload region and the staging Okta SAML app must exist first.
+   certificate for `app_domain_name` in the workload region and the staging Okta OIDC app must exist first (or keep `okta_sign_in_enabled = false` for the first apply).
 4. **First apply from a laptop.** The pipeline roles don't exist yet:
 
    ```powershell
    cd infra\environments\staging
    terraform init
    terraform plan -out=stg.tfplan
-   terraform apply stg.tfplan           # allow 30–40 min (Aurora, ALB)
+   terraform apply stg.tfplan           # allow 30–40 min (RDS Multi-AZ, ALB)
    ```
 
 5. **Database setup:** set `enable_db_bootstrap = true`, apply, and run
@@ -79,8 +80,8 @@ From now on staging changes only through the pipeline. A merge to `main` applies
 cd infra\environments\staging
 terraform plan -detailed-exitcode                      # exit 0 = no changes after the first apply
 aws ec2 describe-nat-gateways --filter Name=tag:Environment,Values=stg --query "NatGateways[].SubnetId" # 3
-$cid = (terraform output -json aurora | ConvertFrom-Json).cluster_identifier
-aws rds describe-db-clusters --db-cluster-identifier $cid --query "DBClusters[0].[Status,BackupRetentionPeriod,DeletionProtection]"
+$db = (terraform output -json rds | ConvertFrom-Json).instance_identifier
+aws rds describe-db-instances --db-instance-identifier $db --query "DBInstances[0].[DBInstanceStatus,MultiAZ,BackupRetentionPeriod,DeletionProtection]"
 aws backup get-backup-vault-access-policy --backup-vault-name mmm-stg-vault                                # Deny DeleteRecoveryPoint
 Invoke-Expression (terraform output -raw platform_check_run_command)                                       # log ends with PLATFORM CHECK PASSED
 ```

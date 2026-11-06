@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs inside the mmm-<env>-platform-check ECS task (aws-cli image) and proves, from the
 # private-app subnets, that the task reaches every platform dependency:
-#   STS, Step Functions and SSM through VPC endpoints, S3 through the gateway endpoint (TLS),
-#   the Aurora RDS Proxy (5432) through the security groups, and the public front door.
+#   STS, Step Functions, SQS and SSM through VPC endpoints, S3 through the gateway endpoint (TLS),
+#   the RDS Proxy (5432) through the security groups, and the public front door.
 # Start it with the command printed by: terraform output platform_check_run_command
 set -euo pipefail
 
@@ -19,6 +19,10 @@ echo "put / head / delete OK (encryption shown above must be aws:kms)"
 echo "== Optimization state machine (states endpoint)"
 aws stepfunctions describe-state-machine --state-machine-arn "$OPTIMIZATION_STATE_MACHINE_ARN" --query status --output text
 
+echo "== Optimization run queue (sqs endpoint)"
+aws sqs get-queue-attributes --queue-url "$OPTIMIZATION_QUEUE_URL" \
+  --attribute-names ApproximateNumberOfMessages KmsMasterKeyId --query 'Attributes.ApproximateNumberOfMessages' --output text
+
 echo "== SageMaker image pointers (ssm endpoint)"
 IFS=, read -ra params <<< "$IMAGE_PARAMETER_NAMES"
 for p in "${params[@]}"; do
@@ -29,7 +33,7 @@ for p in "${params[@]}"; do
   esac
 done
 
-echo "== Aurora RDS Proxy ($DB_HOST:5432)"
+echo "== RDS Proxy ($DB_HOST:5432)"
 timeout 5 bash -c "</dev/tcp/$DB_HOST/5432" && echo "reachable"
 
 echo "== Front door ($APP_URL)"

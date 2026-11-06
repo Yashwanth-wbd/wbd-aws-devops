@@ -1,7 +1,8 @@
 # ================================================================== Step 7 - ECS compute
 # Two long-running services behind the ALB: ui (web app) and api (REST + interactive what-if on
-# the approved response curves). Full optimization runs are not done in ECS: the API starts the
-# optimization state machine (optimization.tf), which runs a SageMaker Processing job.
+# the approved response curves). Full optimization runs are not done in ECS: the API puts a request
+# on the run queue (run-queue.tf); the dispatcher starts the optimization state machine
+# (optimization.tf) when a slot is free, which runs a SageMaker Processing job.
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -18,7 +19,7 @@ locals {
   }[var.environment]
 
   # rds-db:connect resource for a DB user through RDS Proxy (IAM auth)
-  proxy_dbuser_arn = "arn:${local.partition}:rds-db:${var.aws_region}:${local.account_id}:dbuser:${module.aurora.proxy_resource_id}"
+  proxy_dbuser_arn = "arn:${local.partition}:rds-db:${var.aws_region}:${local.account_id}:dbuser:${module.rds.proxy_resource_id}"
   ssm_path_arn     = "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}/*"
 
   # Built from the name, so modules that trust the API role do not depend on the service module.
@@ -30,18 +31,16 @@ locals {
   common_env = {
     APP_ENV        = var.environment
     AWS_REGION     = var.aws_region
-    DB_HOST        = module.aurora.proxy_endpoint
+    DB_HOST        = module.rds.proxy_endpoint
     DB_PORT        = "5432"
-    DB_NAME        = module.aurora.db_name
+    DB_NAME        = module.rds.db_name
     RESULTS_BUCKET = module.buckets["results"].bucket_name
     SSM_PREFIX     = "/mmm/${local.env_short}"
   }
 
   # Injected at task start by the execution role (ARNs only in the task definition)
   api_secrets = {
-    GENAI_ENABLED        = module.secrets.parameter_arns["genai_enabled"]
-    COGNITO_USER_POOL_ID = module.secrets.parameter_arns["cognito/user_pool_id"]
-    COGNITO_CLIENT_ID    = module.secrets.parameter_arns["cognito/client_id"]
+    GENAI_ENABLED = module.secrets.parameter_arns["genai_enabled"]
   }
 
   # Seed revisions: placeholders so Terraform can create the services before the first real
@@ -84,11 +83,18 @@ data "aws_iam_policy_document" "task_api" {
     resources = [local.bucket_arns["models"], "${local.bucket_arns["models"]}/curves/*"]
   }
 
-  # Full optimization: start / watch / cancel a run; progress comes from the execution status.
+  # Full optimization: queue a run (the dispatcher starts it), then watch / cancel it; progress comes
+  # from the execution status (execution name = run_id).
   statement {
-    sid       = "StartOptimization"
-    actions   = ["states:StartExecution"]
-    resources = [module.optimization_sfn.state_machine_arn]
+    sid       = "QueueOptimization"
+    actions   = ["sqs:SendMessage", "sqs:GetQueueAttributes"]
+    resources = [module.run_queue.queue_arn]
+  }
+
+  statement {
+    sid       = "QueueKey"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [module.kms.key_arns["sqs"]]
   }
 
   statement {
@@ -214,6 +220,12 @@ data "aws_iam_policy_document" "task_platform_check" {
     actions   = ["ssm:GetParameter"]
     resources = [for p in aws_ssm_parameter.sagemaker_image : p.arn]
   }
+
+  statement {
+    sid       = "DescribeRunQueue"
+    actions   = ["sqs:GetQueueAttributes"]
+    resources = [module.run_queue.queue_arn]
+  }
 }
 
 # ------------------------------------------------------------------ Services
@@ -241,8 +253,10 @@ module "svc_api" {
     APPROVED_BUCKET                = module.buckets["approved-worm"].bucket_name
     DB_USER                        = "mmm_app"
     OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
-    # The API verifies the x-amzn-oidc-data header: signer must be this ALB
-    ALB_ARN = module.alb.alb_arn
+    OPTIMIZATION_QUEUE_URL         = module.run_queue.queue_url
+    # The API verifies the x-amzn-oidc-data header: signer must be this ALB, users come from this Okta
+    ALB_ARN     = module.alb.alb_arn
+    OKTA_ISSUER = local.okta_issuer
   }, var.enable_genai ? { LLM_GATEWAY_URL = module.llm_gateway[0].invoke_url } : {})
   secrets            = local.api_secrets
   log_retention_days = var.log_retention_days
@@ -278,7 +292,7 @@ module "svc_ui" {
   environment = {
     APP_ENV       = var.environment
     API_BASE_PATH = "/api"
-    LOGOUT_URL    = module.cognito.logout_url
+    LOGOUT_URL    = local.okta_logout_url
   }
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]
@@ -349,6 +363,7 @@ module "task_platform_check" {
   environment = merge(local.common_env, {
     HOME                           = "/tmp"
     OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
+    OPTIMIZATION_QUEUE_URL         = module.run_queue.queue_url
     IMAGE_PARAMETER_NAMES          = join(",", [for p in aws_ssm_parameter.sagemaker_image : p.name])
     APP_URL                        = local.app_url
   })

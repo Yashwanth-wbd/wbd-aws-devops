@@ -22,72 +22,70 @@ locals {
       missing     = "breaching"
     } },
     {
-      aurora-cpu = {
-        description = "Aurora CPU > ${var.aurora_cpu_percent}% for 15 minutes"
+      rds-cpu = {
+        description = "RDS CPU > ${var.rds_cpu_percent}% for 15 minutes - check slow queries (Performance Insights) or move to a larger rds_instance_class"
         namespace   = "AWS/RDS"
         metric      = "CPUUtilization"
-        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
         statistic   = "Average"
         period      = 300
         evaluations = 3
-        threshold   = var.aurora_cpu_percent
+        threshold   = var.rds_cpu_percent
         operator    = "GreaterThanThreshold"
         missing     = "notBreaching"
       }
-      aurora-acu-max = {
-        description = "Aurora Serverless at > ${var.aurora_acu_percent}% of its maximum ACU for 15 minutes - raise aurora_max_acu"
+      # Storage autoscaling grows the volume up to rds_max_allocated_storage; this fires when it is close.
+      rds-free-storage = {
+        description = "RDS free storage < ${var.rds_free_storage_gib} GiB for 15 minutes - autoscaling may be at rds_max_allocated_storage; raise it"
         namespace   = "AWS/RDS"
-        metric      = "ACUUtilization"
-        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
-        statistic   = "Average"
-        period      = 300
-        evaluations = 3
-        threshold   = var.aurora_acu_percent
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-      # Temporary space for sorts and indexes; it grows with the ACU.
-      aurora-free-local-storage = {
-        description = "Aurora free local storage < ${var.aurora_free_local_storage_gib} GiB for 15 minutes - look for large sorts / temp files, raise aurora_min_acu"
-        namespace   = "AWS/RDS"
-        metric      = "FreeLocalStorage"
-        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        metric      = "FreeStorageSpace"
+        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
         statistic   = "Minimum"
         period      = 300
         evaluations = 3
-        threshold   = var.aurora_free_local_storage_gib * 1073741824
+        threshold   = var.rds_free_storage_gib * 1073741824
         operator    = "LessThanThreshold"
         missing     = "notBreaching"
       }
+      rds-read-latency = {
+        description = "RDS read latency > ${var.rds_latency_ms} ms for 15 minutes - check IOPS / slow queries"
+        namespace   = "AWS/RDS"
+        metric      = "ReadLatency"
+        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
+        statistic   = "Average"
+        period      = 300
+        evaluations = 3
+        threshold   = var.rds_latency_ms / 1000
+        operator    = "GreaterThanThreshold"
+        missing     = "notBreaching"
+      }
+      rds-write-latency = {
+        description = "RDS write latency > ${var.rds_latency_ms} ms for 15 minutes - check IOPS / large writes"
+        namespace   = "AWS/RDS"
+        metric      = "WriteLatency"
+        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
+        statistic   = "Average"
+        period      = 300
+        evaluations = 3
+        threshold   = var.rds_latency_ms / 1000
+        operator    = "GreaterThanThreshold"
+        missing     = "notBreaching"
+      }
     },
-    var.aurora_max_connections == null ? {} : {
-      aurora-connections = {
-        description = "Aurora connections > ${var.aurora_connections_percent}% of max_connections (${var.aurora_max_connections}) for 10 minutes - check the RDS Proxy pool and the API task count"
+    var.rds_max_connections == null ? {} : {
+      rds-connections = {
+        description = "RDS connections > ${var.rds_connections_percent}% of max_connections (${coalesce(var.rds_max_connections, 0)}) for 10 minutes - check the RDS Proxy pool and the API task count"
         namespace   = "AWS/RDS"
         metric      = "DatabaseConnections"
-        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id }
+        dimensions  = { DBInstanceIdentifier = var.rds_instance_id }
         statistic   = "Maximum"
         period      = 300
         evaluations = 2
-        threshold   = floor(var.aurora_max_connections * var.aurora_connections_percent / 100)
+        threshold   = floor(coalesce(var.rds_max_connections, 0) * var.rds_connections_percent / 100)
         operator    = "GreaterThanThreshold"
         missing     = "notBreaching"
       }
     },
-    var.aurora_has_reader ? {
-      aurora-replica-lag = {
-        description = "Aurora reader lag > ${var.aurora_replica_lag_ms} ms for 10 minutes - reads may be stale; check writer load"
-        namespace   = "AWS/RDS"
-        metric      = "AuroraReplicaLag"
-        dimensions  = { DBClusterIdentifier = var.aurora_cluster_id, Role = "READER" }
-        statistic   = "Maximum"
-        period      = 300
-        evaluations = 2
-        threshold   = var.aurora_replica_lag_ms
-        operator    = "GreaterThanThreshold"
-        missing     = "notBreaching"
-      }
-    } : {},
     !local.has_optimization ? {} : {
       optimization-runtime-max = {
         description = "An optimization execution took > ${var.optimization_max_minutes} minutes (large-run limit) - check the SageMaker job size and optimizer_instance_type"

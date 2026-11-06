@@ -18,7 +18,7 @@ Two switches:
 
 ```mermaid
 flowchart LR
-  user[Planner] --> alb[ALB + Cognito] --> api[ECS api]
+  user[Planner] --> alb[ALB + Okta OIDC] --> api[ECS api]
   api -->|SigV4 IAM| apigw[Private API Gateway<br/>execute-api VPCE]
   apigw --> lambda[Lambda mmm-&lt;env&gt;-llm-gateway]
   lambda -->|ApplyGuardrail| gr[Bedrock guardrail]

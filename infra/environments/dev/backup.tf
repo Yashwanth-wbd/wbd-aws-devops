@@ -1,6 +1,6 @@
 # ================================================================== Step 10 - Backup and DR
 locals {
-  # Aurora is selected through cluster_tags in module "aurora"; these buckets through their tags.
+  # The RDS instance is selected through instance_tags in module "rds"; these buckets through their tags.
   # training-data and lakehouse exist only with the data platform. Object Lock protects training-data
   # from deletion, the backup also covers a lost bucket or key (restore into a new bucket).
   # WBD to confirm the lakehouse backup size / cost; drop it from this list to exclude it.

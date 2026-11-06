@@ -24,7 +24,7 @@ output "private_app_subnet_ids" {
 }
 
 output "private_data_subnet_ids" {
-  description = "Private-data subnets (Aurora, RDS Proxy); no internet route."
+  description = "Private-data subnets (RDS PostgreSQL, RDS Proxy); no internet route."
   value       = [for az in local.azs : aws_subnet.data[az].id]
 }
 

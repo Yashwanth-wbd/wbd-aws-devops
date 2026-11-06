@@ -6,7 +6,8 @@ supplies a value, update it everywhere it appears, set its status to **Received*
 `terraform plan` for the affected environment.
 
 The client-facing version of this list (only what WBD must provide, with dev / staging / prod
-columns to fill) is `docs/requirements/devops_2_client_question.xlsx`.
+columns to fill) is `docs/requirements/devops_3_client_question.xlsx` (requirement 3: Okta OIDC, RDS
+sizing, run limits, write-back, drift; the `_2` workbook is kept for history).
 
 ```powershell
 # list every remaining placeholder
@@ -76,7 +77,8 @@ git grep -n -A1 "add actual value"
 | Operations owner after handover, RACI, hypercare length | proposal in `docs/13` (4 weeks hypercare) | `docs/13-operations-and-handover.md` | WBD Ops / EY delivery lead | Open (Step 15) |
 | Splunk HEC token | none in Git – stored in Secrets Manager | `mmm/<env>/splunk/hec` | WBD Splunk | Open |
 | Object Lock retention for approved scenarios | `2555` days (7 years), GOVERNANCE in dev/staging, COMPLIANCE in prod | S3 module | WBD Legal / Audit | Open |
-| Aurora Serverless v2 ACU range per env | dev 0.5–4 (1 instance); staging 0.5–16 (2); prod 1–32 (2) | env tfvars `aurora_min_acu`, `aurora_max_acu` | WBD / EY sizing | Open |
+| RDS PostgreSQL instance class, storage and Multi-AZ per env | dev `db.t4g.medium` 50–200 GiB Single-AZ; staging `db.r6g.large` 100–500 GiB Multi-AZ; prod `db.r6g.xlarge` 200–1000 GiB Multi-AZ | env tfvars `rds_instance_class`, `rds_allocated_storage`, `rds_max_allocated_storage`, `rds_multi_az` | WBD / EY sizing | Open |
+| Concurrent optimization runs (soft limit) and maximum queue wait | `max_concurrent_runs` 5 / 20 / 50; `max_queue_wait_minutes = 30` | env tfvars, SSM `/mmm/<env>/optimization/max_concurrent_runs` | WBD planners / EY | Open |
 | ECS task counts per env (min–max, CPU autoscaling) | api 1–2 / 2–4 / 3–10; ui 1–2 / 2–3 / 2–6 | `ecs.tf` `local.ecs_sizing` | EY load test / WBD | Open |
 | Log retention staging / prod | 90 / 365 days (CloudWatch), flow logs 90 / 365 | env tfvars | WBD Security / Audit | Open |
 | Platform-check task in prod | `enable_platform_check_task = true` for go-live, then `false` | prod tfvars | EY | Open |
@@ -95,14 +97,16 @@ git grep -n -A1 "add actual value"
 | App domain name per environment | dev `mmm-dev.example.wbd.com`; staging/prod WBD to provide | env tfvars `app_domain_name` | WBD DNS | Open |
 | DNS: Route 53 zone in account or CNAME from WBD | `route53_zone_id = null` → use `terraform output dns_records_for_wbd` | `frontdoor.tf` | WBD DNS | Open |
 | ACM certificate in **workload region** for `app_domain_name` | `alb_certificate_arn` | `alb` module HTTPS listener | WBD DNS / PKI | Open |
-| Okta SAML app metadata URL per environment | dev `https://wbd.okta.com/app/exk…/sso/saml/metadata` | env tfvars `okta_saml_metadata_url` | WBD Identity | Open |
-| Cognito hosted domain prefix (globally unique per region) | dev `wbd-mmm-dev` | env tfvars `cognito_domain_prefix` | EY / WBD | Open |
+| Okta authorization server (issuer) per environment | `https://wbd.okta.com/oauth2/default` | env tfvars `okta_issuer` | WBD Identity | Open |
+| Okta OIDC Web app client ID per environment | dev `0oa00000000000000000` | env tfvars `okta_client_id` | WBD Identity | Open |
+| Okta OIDC client secret | none in Git – Secrets Manager `mmm/<env>/okta/alb-client` (`{"client_secret": "..."}`), then `okta_sign_in_enabled = true` | `frontdoor.tf` (ALB listener) | WBD Identity | Open |
 | ALB session length (hours) | `12` | env tfvars `session_hours` | WBD Identity | Open |
-| Okta SAML ACS URL + audience (from Terraform after apply) | `terraform output okta_app_settings` | Okta SAML app configuration | WBD Identity | Open – WBD enters values Terraform prints |
-| SAML group attribute name | `groups` (maps to Cognito `custom:groups`) | Okta app + `cognito` module | WBD Identity | Open |
+| Okta OIDC redirect and sign-out URIs (from Terraform after apply) | `terraform output okta_app_settings` (`<app>/oauth2/idpresponse`, `<app>/`) | Okta OIDC app configuration | WBD Identity | Open – WBD enters values Terraform prints |
+| Groups claim in the ID token / user info | `groups`, filter "Starts with `mmm-`" (forwarded by the ALB in `x-amzn-oidc-data`) | Okta app + API | WBD Identity | Open |
+| Okta logout: is `client_id` accepted on `/v1/logout`? (the ALB does not give the app the ID token for `id_token_hint`) | `LOGOUT_URL` with `client_id` + `post_logout_redirect_uri` | UI env `LOGOUT_URL` | WBD Identity | Open |
 | Okta group names → BU + role | see `docs/04-okta-mfa-app-login.md` | Okta group membership | WBD Identity | Open |
 | Egress to PyPI through NAT (one-time DB bootstrap) or a WBD package mirror | – | `scripts/db-bootstrap.py` | WBD Network | Open |
-| Internet-facing or internal-only app? | internet-facing public ALB + regional WAF + Cognito/Okta | `alb`, `waf-regional` | WBD Security | Open |
+| Internet-facing or internal-only app? | internet-facing public ALB + regional WAF + Okta OIDC at the ALB | `alb`, `waf-regional` | WBD Security | Open |
 
 ## Data and AI
 
@@ -114,6 +118,8 @@ git grep -n -A1 "add actual value"
 | Databricks service principal client ID (model-refresh Step Functions) | dev `…00000000c001` | tfvars `databricks_sp_client_id`, EventBridge connection | WBD Databricks | Open |
 | Databricks service principal OAuth secret (model refresh) | not in Git – set on EventBridge connection `<prefix>-databricks` | `aws events update-connection` ([docs/05](05-secrets-and-config.md)) | WBD Databricks | Open |
 | Databricks refresh job ID (Lakeflow / jobs API) | `0` until job exists | tfvars `databricks_refresh_job_id` | WBD Data / EY | Open |
+| Databricks write-back job ID (predictions and lift to Gold after registration) | `0` until job exists | tfvars `databricks_writeback_job_id` | WBD Data / EY | Open |
+| Drift check: metric, threshold per BU, schedule, auto-refresh on drift | score 0–1, `0.2`; daily `cron(0 7 * * ? *)`, off (`enable_model_monitor_schedule = false`); `auto_refresh_on_drift = false` | tfvars, `data/model-thresholds.yaml` `drift.threshold` | WBD Data science | Open |
 | Databricks deploy SP client ID (Asset Bundle only) | WBD to provide | GitHub Environment `DATABRICKS_CLIENT_ID` via `setup-github.ps1 -DatabricksClientId` | WBD Databricks | Open |
 | Third-party vendors needing API keys | `adstra`, `inscape` | env tfvars `third_party_vendors` | WBD Data owners | Open |
 | Source feed delivery method (S3 / SFTP / API) | S3 drop to landing bucket | landing bucket policy | WBD Data owners | Open |

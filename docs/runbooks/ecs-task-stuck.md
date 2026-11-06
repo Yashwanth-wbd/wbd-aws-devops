@@ -22,7 +22,7 @@ aws ecs describe-tasks --cluster $P-ecs --tasks <task arn> \
 | `CannotPullContainerError` | Image tag missing in this ECR, or no route to ECR / S3 endpoints | Check the tag exists; check endpoints `mmm-<env>-vpce-ecr-*` are `available` |
 | `ResourceInitializationError: unable to pull secrets` | Secret empty / deleted, or KMS / endpoint problem | `aws secretsmanager describe-secret --secret-id mmm/<env>/<name>`; fill it (docs/05 §5) |
 | Tasks start, then `Essential container exited` (exit 1) | App crash at start (config, DB unreachable) | Read `/ecs/mmm-<env>/<service>`; roll back ([rollback.md](rollback.md)) |
-| `Task failed ELB health checks` | App not answering `/api/health` or `/healthz` within the grace period | App logs; check Aurora proxy; roll back |
+| `Task failed ELB health checks` | App not answering `/api/health` or `/healthz` within the grace period | App logs; check the RDS Proxy (`describe-db-proxy-targets`); roll back |
 | `OutOfMemoryError: Container killed` | Memory limit too low | Raise `memory` in `ecs.tf` (PR) |
 | `unable to place a task … capacity` / Spot interruptions | Fargate capacity or quota | Wait / retry; check quotas ([scale-planning-season.md](scale-planning-season.md)) |
 | Deployment `IN_PROGRESS` for > 30 min | New tasks keep failing; circuit breaker | Fix cause above; or roll back to the previous revision now |

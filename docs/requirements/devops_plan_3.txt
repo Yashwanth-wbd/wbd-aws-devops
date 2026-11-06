@@ -1,0 +1,355 @@
+# PROMPT v3 — Build the WBD MMM AWS Platform (Infra + CI/CD) — Hybrid Lakehouse + MLOps, Okta SSO, RDS, SQS dispatch
+
+> **Version 3** of the build prompt, rewritten for the client architecture in
+> `wbd_Presentation_3.pptx` (2 slides: "supports auto ML activities" and "supports optimization and
+> explainable planning"). v2 (`devops_plan_2.txt`, from `wbd_Presentation.pptx`) is **implemented in the
+> repo**; this file lists what v3 changes on top of that build. Everything not changed by the v3 deck is
+> carried over from v2 as built (including the simpler defaults recorded in `PROJECT_CONTEXT_2.md` §4a).
+>
+> **How to use this file:** give this entire document to an AI coding agent (or follow it yourself).
+    10|> Section A lists what changed vs v2; the steps below are the full v3 build, with **(v3)** marking
+> every step that changes the existing code. Implement the steps **in order**; each step has a
+> **Validate** gate — do not proceed until it passes.
+>
+> **Scope:** DevOps only — **do NOT write application, model or data-pipeline code** (the developers
+> own `apps/api`, `apps/ui`, `apps/results-publisher`; the data scientists own the SageMaker training /
+> evaluation / drift / optimization code; the data engineers own the Databricks Lakeflow jobs incl. the
+> new write-back job). This prompt builds everything that **provisions, secures, runs and deploys** their work.
+>
+> Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
+    20|>
+> **Status (6 Nov 2026):** **implemented with placeholder values and validated offline** (fmt,
+> validate of 24 modules, tflint, Checkov 0 failed, actionlint, shellcheck, secret scan, thresholds
+> check, mock plan of all 3 envs: dev 311 / 459, staging 326 / 476, prod 326 / 478 resources to add,
+> default / all features on). Nothing applied to AWS; not committed yet. The [ASK] / [ASM] defaults
+> below are what was built.
+>
+> **Built differently from this plan (simpler):**
+> - One module **`modules/run-queue`** holds the queue, DLQ, dispatcher Lambda (code in the module)
+>   and its alarms, instead of separate `modules/sqs` and `modules/run-dispatcher`.
+> - Okta secret name is fixed (`mmm/<env>/okta/alb-client`, no `okta_client_secret_name` variable);
+>   **`okta_sign_in_enabled`** (default `false`) keeps the ALB at 503 until the secret holds the value,
+>   and drives GitHub variable `SMOKE_CHECK_LOGIN`.
+> - Drift check runs **daily** (`cron(0 7 * * ? *)`) instead of weekly; still off
+>   (`enable_model_monitor_schedule = false`) until the first approved baseline.
+> - Client inputs for v3 are in `devops_3_client_question.xlsx` (49 inputs, 12 decisions).
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+Execute exactly ONE numbered step at a time. Do NOT start the next step until the user explicitly
+confirms the current step is validated.
+    30|
+After completing a step you MUST:
+1. Create only the files/resources for **that single step**.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands**, (c) any Git/AWS inputs to set.
+3. **WAIT** for the user to run the commands and confirm ("validated" / "passed").
+4. Only then begin the next step.
+
+Never batch steps. If a validation fails, fix only the current step. If anything is ambiguous, ask.
+
+---
+    40|
+## A. What changed vs v2 (summary)
+
+Slide-by-slide comparison of `wbd_Presentation_3.pptx` with `wbd_Presentation.pptx`:
+
+| # | Area | v2 (built in the repo) | v3 (new client architecture) |
+|---|---|---|---|
+| 1 | App sign-in (slide 2) | Amazon Cognito user pool federated to WBD Okta (SAML); ALB `authenticate-cognito` | **"SSO / Authentication – Okta, Enterprise Identity Provider"** – **no Cognito**. ALB signs users in **directly with Okta (OIDC)**: listener action `authenticate-oidc` [ASM; ASK OIDC app per env] |
+| 2 | Database (slide 2) | Aurora PostgreSQL Serverless v2 + RDS Proxy | **RDS PostgreSQL** (plans, runs, allocations) – DB instance, Multi-AZ in stg/prd, RDS Proxy kept [ASM] |
+| 3 | Run requests (slide 2) | API → `states:StartExecution` directly; throttling = Step Functions retries + app limit (Q2) | **API → Amazon SQS → Lambda "message dispatcher" → Step Functions (async)**. The queue buffers 50–150 planners; the dispatcher starts executions only while fewer than *N* runs are active |
+    50|| 4 | Model results (slide 1) | Evaluation results stay in S3 (`models/evaluation/…`) and the registry | **"Model predictions, lift & evaluation results written back to the corresponding data"** (arrow Step Functions ↔ Gold layer): after evaluation, the refresh state machine runs a **Databricks write-back job** that merges them into per-BU Gold tables |
+| 5 | Registry (slide 1) | SageMaker Registry + S3: approved models and response curves | **+ model drift monitoring**: scheduled drift check per BU (SageMaker Processing job), drift metrics + alarm, optional auto-refresh [ASK] |
+| 6 | Wording | "auto ML training"; API "with LangGraph and QA dashboard" | "auto ML activities"; API "with LangGraph **tools** + QA dashboard" – no DevOps impact |
+
+**Unchanged from v2 (as built):** Terraform modules + per-env stacks, GitHub Actions via OIDC, ECR per
+environment with digest promotion, ECS Fargate `ui` + `api` (+ `migrate`), public ALB + regional WAF +
+ACM + Route 53/WBD DNS, Step Functions optimization state machine → SageMaker Processing job → S3 run
+evidence (`results` bucket) → results-publisher Lambda, EventBridge Scheduler / `mmm.refresh` → model-refresh
+    60|state machine → Databricks Lakeflow job → SageMaker training → evaluation → Model Registry
+(`PendingManualApproval`) → `model-governance.yml` approval → curves in `models/curves/<bu>/`, Release 2
+GenAI (private API Gateway + proxy Lambda + Bedrock Guardrails, off), KMS, Secrets Manager + SSM, VPC
+layout, CloudWatch + CloudTrail, AWS Backup, budgets, naming/tagging, branching and release tags.
+
+**Removed vs v2:** Cognito user pool, SAML identity provider, app client + hosted domain, SSM
+`cognito/*` parameters, ALB `authenticate-cognito` action; Aurora cluster, cluster parameter group,
+Serverless v2 ACU settings and ACU alarm; `states:StartExecution` on the API task role.
+
+---
+    70|
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Change the built v2 WBD MMM platform to the v3 architecture.
+The application (UI + API) runs on **Amazon ECS on Fargate**; optimization and model training run on
+**Amazon SageMaker**, orchestrated by **AWS Step Functions**; optimization requests are **buffered in
+Amazon SQS** and dispatched by a **Lambda**; data engineering runs on **Databricks on AWS** with
+**Delta Lake on S3**; planners sign in with **WBD Okta**.
+
+**Golden rules (apply to every step):**
+1. **Everything is Terraform**, run from GitHub Actions via OIDC. Exceptions: the one-time state bootstrap and the first apply per account — run with SSO.
+    80|2. **No secrets in Git, images or Terraform variables.** Runtime secrets live in Secrets Manager / SSM. (v3: the ALB needs the Okta OIDC client secret in its listener configuration – Terraform reads it from Secrets Manager, so it is only in the encrypted state file [ASK].)
+3. **Modularize**: reusable modules in `infra/modules/`, thin stacks in `infra/environments/{dev,staging,prod}/`; edit dev, then `scripts/sync-environments.ps1`.
+4. **Build order: dev → prove it works → staging (same code) → prod (same code).**
+5. **Validate after every step.**
+6. **Naming:** `mmm-<env>-<component>` (env = `dev|stg|prd`). **Tags:** `Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component`.
+7. **SageMaker jobs, Lambda functions and ECS tasks run inside the VPC** (private subnets, no public IP), with KMS on volumes, queues and outputs.
+8. **Remove what v3 drops** (Cognito, Aurora) – no leftover modules, variables, outputs, docs or runbooks.
+
+---
+    90|
+## 1. Final target stack
+
+`Terraform · GitHub Actions (OIDC) · ECR · ECS on Fargate (UI + API) + ALB · Route 53 · AWS WAF
+(regional) · ACM · WBD Okta (OIDC at the ALB) · RDS for PostgreSQL (+ RDS Proxy) · Amazon SQS (+ DLQ) ·
+AWS Lambda (message dispatcher, results publisher) · AWS Step Functions · Amazon SageMaker (processing,
+training, Model Registry, drift checks) · S3 (landing, Delta Lake, training data, models/response
+curves/drift reports, results, exports, approved WORM, logs) · KMS · Secrets Manager + Parameter Store ·
+Amazon EventBridge (+ Scheduler) · Databricks on AWS (Lakeflow Jobs, Unity Catalog, Delta Lake) ·
+Amazon API Gateway (LLM gateway) · Amazon Bedrock Guardrails · CloudWatch + CloudTrail (+ Splunk via
+Firehose) · AWS Backup.`
+   100|
+**Prescribed stack (slide footer, unchanged):** React + TypeScript · Python / FastAPI · scikit-learn /
+XGBoost / LangGraph · SciPy · RDS PostgreSQL + Databricks / S3 · ECS · AWS recommended.
+
+**Two flows (from the v3 slides):**
+- **Auto ML activities (slide 1):** scheduled / manual / app-triggered refresh → EventBridge → Step Functions (wait / retry) → Databricks Lakeflow Jobs: ingestion from S3 into the Databricks catalog → Bronze (raw) → Silver (cleansed, validated) → Gold (per-BU modeling tables, adstock & saturation) → Feature Export (plans, runs, allocations) → immutable Parquet + metadata in the S3 training-data bucket → **SageMaker model training** (multi-stage) → **evaluation** (baseline → channel lift → title adjustment) → **model registration** → SageMaker Registry + S3 (approved models + response curves) → **(v3) model predictions, lift and evaluation results written back to the Gold layer** → **(v3) model drift monitoring** per BU on a schedule.
+- **Optimization and explainable planning (slide 2):** planner (upload inventory, choose objective, run & compare) → DNS/WAF → ALB (HTTPS) → **(v3) Okta sign-in** → ECS UI → ECS API (FastAPI + LangGraph tools + QA dashboard) ↔ **(v3) RDS PostgreSQL** (plans, runs, allocations). API → **(v3) SQS → Lambda message dispatcher** → Step Functions (async) → SageMaker job for optimization & decision (Model Summarizer · Optimizer · Simulation) reading the approved model (SageMaker Registry) + approved response curves (S3) → S3 outputs (full run evidence) → Lambda results publisher → RDS PostgreSQL. API → Amazon API Gateway → OpenAI / Anthropic / Google models, with Bedrock Guardrails. Sized for **50–150 concurrent planners**.
+
+**Control plane (both slides, unchanged):** Data lineage & observability · Code repository · Security (RBAC, SSO/MFA) · Amazon Bedrock for GenAI capabilities · Privacy & GenAI guardrails.
+**Security + network:** IAM role assumption · IAM Identity Center · KMS · Secrets Manager · Security groups · VPC routes. **Operations:** CloudWatch metrics · CloudTrail · Terraform · CI/CD.
+   110|
+---
+
+## 2. Prerequisite tools (unchanged)
+
+Terraform ≥ 1.10, AWS CLI v2, Git, GitHub CLI, jq, tflint, Checkov, Trivy, actionlint, Databricks CLI
+(bundles), Node 22 + uv / Python 3.12. Docker optional (CI builds images). Corporate proxy: set
+`NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE`.
+
+---
+   120|
+## 3. Access & inputs to request (ASK the client)
+
+Everything in v2 §3 and `devops_2_client_question.xlsx` still applies, **except** the Cognito items.
+**New or changed for v3:**
+- **Okta (replaces Cognito):** one **OIDC web app per environment** (WBD Identity team) with sign-in redirect URI `https://<app-name>/oauth2/idpresponse`, sign-out redirect `https://<app-name>/`; issuer URL (org or custom authorization server), client ID, client secret (stored by WBD/DevOps in Secrets Manager `mmm/<env>/okta/alb-client`); a **`groups` claim** in the ID token with the `mmm-bu-*` / `mmm-role-*` groups; MFA policy on the app; session length. [ASK: OIDC at the ALB vs SAML – the ALB only supports OIDC directly.]
+- **RDS PostgreSQL:** engine version (16.x [ASM]), instance classes per env, storage size, Multi-AZ DB instance vs Multi-AZ DB cluster (two readable standbys), read replica for reporting yes/no, backup retention, maintenance window.
+- **Run queue:** maximum concurrent optimization runs per environment (bound by the SageMaker Processing quota), fairness per BU or per user, how long a run may wait in the queue before it is failed.
+- **Write-back:** which results go back to Databricks (predictions, lift, evaluation metrics – every candidate or only approved models), target Gold tables per BU, owner of the write-back job (data engineers [ASM]).
+- **Model drift:** what drift means for MMM (feature/data drift, prediction vs actuals, response-curve stability), check frequency, thresholds per BU, whether drift above threshold should **start a refresh automatically** or only alert.
+   130|
+---
+
+## 4. GitHub branching strategy (unchanged)
+
+Trunk-based: `main` protected. Merge to `main` → dev (`sha-<7>`); tag `vX.Y.Z-rcN` → staging (EY lead
+approves); tag `vX.Y.Z` → prod (WBD approver + change ticket). Databricks bundle: `main` → dev, dispatch
+→ staging / prod. Image tags immutable; release record keeps tag + task-def revision + digests + SSM
+image pointers + Lambda versions.
+
+---
+   140|
+## 5. Repository & folder structure (v3 changes)
+
+```
+infra/modules/
+├── cognito/              # REMOVE (v3)
+├── aurora/               # REPLACE with rds/ (v3) – DB instance, parameter group, RDS Proxy
+├── rds/                  # NEW again (v3) – start from the v1 module in git history, add the v2 proxy/IAM-auth settings
+├── sqs/                  # NEW again (v3) – queue + DLQ + KMS + policy (start from the v1 module in git history)
+├── alb/                  # CHANGE (v3) – authenticate-oidc (Okta) instead of authenticate-cognito
+   150|├── lambda-function/      # REUSE (v3) – also the message dispatcher (+ SQS event source mapping)
+├── run-dispatcher/       # NEW (v3) [ASM] – dispatcher Lambda code (DevOps-owned plumbing, like llm-gateway/lambda)
+├── network/              # CHANGE (v3) – sqs interface endpoint, dispatcher SG, "rds" SG naming
+├── kms/                  # CHANGE (v3) – purpose sqs again
+├── monitoring/           # CHANGE (v3) – RDS alarms instead of Aurora, queue + dispatcher + drift alarms, dashboards
+├── backup/               # CHANGE (v3) – RDS instance instead of Aurora cluster
+├── databricks-access/    # CHANGE (v3) – Unity Catalog role reads models/evaluation/ (write-back) and writes lakehouse monitoring/
+└── (all other modules unchanged)
+infra/environments/<env>/
+├── frontdoor.tf          # CHANGE – Okta OIDC on the ALB, no Cognito
+   160|├── main.tf               # CHANGE – rds instead of aurora; okta/alb-client secret; sqs key
+├── ecs.tf                # CHANGE – API task role sqs:SendMessage; env OPTIMIZATION_QUEUE_URL; no COGNITO_*
+├── optimization.tf       # CHANGE – SQS queue + DLQ + dispatcher Lambda in front of the state machine
+├── data.tf               # CHANGE – write-back state(s) in model-refresh; model-monitor state machine + schedules
+├── monitoring.tf / backup.tf / outputs.tf / variables.tf / tfvars  # CHANGE accordingly
+ecs/<env>/api.json, ui.json   # CHANGE – env names (no Cognito IDs; queue URL)
+.github/workflows/deploy.yml  # CHANGE – RDS snapshot instead of Aurora snapshot; dry run through the queue
+scripts/                      # CHANGE – dry-run-optimization.sh (SQS), platform-check.sh (SQS, RDS), smoke.sh (Okta redirect)
+docs/ + docs/runbooks/        # CHANGE – 04 (Okta), 05, 06, 08 (RDS), 09, 10 (write-back, drift); runbooks okta-outage, db-restore (RDS), optimization-run-failed (queue/DLQ), new model-drift
+```
+   170|
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION
+
+### Step 0 — Prereqs & access (unchanged)
+- Tools (§2), AWS CLI SSO for dev. **Validate:** `aws sts get-caller-identity`; `terraform version` ≥ 1.10.
+
+### Step 1 — Bootstrap the Terraform state backend (unchanged)
+- `infra/bootstrap/`: state bucket (versioned, KMS, TLS-only), KMS key, S3 native lock file.
+   180|
+### Step 2 — Module changes (v3)
+- Delete `modules/cognito` and `modules/aurora`. Add `modules/rds`, `modules/sqs`, `modules/run-dispatcher` (each with a README). Adjust `alb`, `network`, `kms`, `monitoring`, `backup`, `databricks-access`.
+- **Validate:** `terraform fmt -recursive` clean; `scripts/validate-modules.ps1` passes; no references to `cognito` / `aurora` remain (`git grep -n -i "cognito\|aurora"` only in history docs).
+
+### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets (v3: small change)
+- **KMS** purposes: `rds`, `s3`, `logs`, `secrets`, `ecr`, `sagemaker`, **`sqs` (v3)**, `genai` (R2), per-BU `s3-<bu>` with the data platform.
+- **permission-boundary** also covers the dispatcher Lambda role and the model-monitor state machine role.
+- **iam-oidc**: `gha-deploy` – RDS `CreateDBSnapshot` / `DescribeDBSnapshots` instead of the Aurora cluster snapshot actions; `lambda:UpdateFunctionCode` / alias on the dispatcher only if it is shipped by `deploy.yml` (default: shipped by Terraform, see Step 9).
+   190|- **Validate:** plan shows the `sqs` key; no Aurora actions in the deploy role.
+
+### Step 4 — Networking (v3: small change)
+- Subnets unchanged (private-app now also holds the dispatcher Lambda; private-data holds the RDS instance).
+- **Interface endpoints:** add **`sqs`** (API → queue and dispatcher → queue stay private). Others unchanged (ECR api/dkr, STS, Secrets Manager, SSM, SSM Messages, KMS, Logs, Monitoring, X-Ray, states, sagemaker.api; R2 execute-api, bedrock-runtime).
+- **Security groups:** rename/repurpose the Aurora SG to **`rds`** (DB traffic only from RDS Proxy); RDS Proxy (from API, migrate, publisher); **dispatcher Lambda** (no inbound; egress 443 to endpoints) [ASM: reuse the `lambda` SG]. ALB, UI, API, SageMaker, endpoints unchanged. The ALB SG must allow **egress 443 to Okta** (token endpoint) – via the internet gateway (ALB is public).
+- **Validate:** a test task reaches SQS through the endpoint; data subnets have no internet route.
+
+### Step 5 — Secrets, configuration and identity settings (v3)
+   200|- **Secrets Manager:** add **`mmm/<env>/okta/alb-client`** (`{"client_secret": "..."}`, filled by WBD Identity / DevOps before the front-door apply). Keep `api/db`, `rds/proxy`, `rds/migrate`, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`. DB master password RDS-managed with rotation.
+- **SSM:** remove `/mmm/<env>/cognito/*`. Add **`/mmm/<env>/optimization/max_concurrent_runs`** (read by the dispatcher at every batch; dev 5, stg 20, prd 50 [ASM], ≤ SageMaker Processing quota) and **`/mmm/<env>/okta/issuer`** (non-secret, for the API's token checks). Keep `genai_enabled`, `databricks/host`, `images/sagemaker-*`, GenAI token quotas.
+- **Validate:** secret scan clean; the ALB plan reads the Okta secret through a data source (never a tfvars value).
+
+### Step 6 — Data & storage (ECR, S3, RDS PostgreSQL) (v3)
+- **ecr** unchanged: `mmm/api`, `mmm/ui`, `mmm/sagemaker-optimizer`, `mmm/sagemaker-training`.
+- **s3-bucket** unchanged set (`landing`, `lakehouse`, `training-data`, `models`, `results`, `exports`, `approved-worm`, `logs`). New prefixes (no new buckets): `models/monitoring/<bu>/<date>/` (drift reports), `models/baseline/<bu>/` (baseline of the approved model, published on approval), `lakehouse/monitoring/<bu>/<date>/` (latest features exported for drift checks, 90-day expiry rule on the prefix) [ASM].
+- **rds (replaces aurora):** RDS for PostgreSQL 16.x [ASK], gp3 storage with autoscaling, KMS (`rds`), IAM database authentication, parameter group (`rds.force_ssl=1`, pgaudit, `log_min_duration_statement`), Performance Insights, Enhanced Monitoring, CloudWatch log exports (postgresql, upgrade), **Multi-AZ in staging/prod**, deletion protection + final snapshot in prod, automated backups 7 / 14 / 35 days, RDS-managed master password. Sizing [ASM]: dev `db.t4g.medium` single-AZ 50 GB; staging `db.r6g.large` Multi-AZ 100 GB; prod `db.r6g.xlarge` Multi-AZ 200 GB (+ optional read replica [ASK]).
+   210|- **RDS Proxy** kept (IAM auth, TLS) for ECS tasks and the publisher Lambda; DB users `mmm_app`, `mmm_migrator`, `mmm_admin` and `scripts/db-bootstrap.py` unchanged.
+- **Validate:** test task connects through the proxy (TLS, IAM auth); `rds.force_ssl` on; Multi-AZ in staging/prod; buckets unchanged.
+
+### Step 7 — ECS compute (UI + API) and ALB (v3: small change)
+- Cluster, services, autoscaling unchanged (api 1–2 / 2–4 / 3–10, ui 1–2 / 2–3 / 2–6, CPU 60 %).
+- **API task role:** replace `states:StartExecution` with **`sqs:SendMessage` on the run queue** (+ `kms:GenerateDataKey` on the `sqs` key); keep `states:DescribeExecution` / `StopExecution` / `GetExecutionHistory` for progress and cancel; models curves read, results read/write input, exports, approved-worm, SSM read unchanged.
+- **API task env:** add `OPTIMIZATION_QUEUE_URL`, `OKTA_ISSUER`; keep `OPTIMIZATION_STATE_MACHINE_ARN` (progress), `ALB_ARN` (the API checks the ALB-signed `x-amzn-oidc-data` header); remove `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`.
+- **UI task env:** `LOGOUT_URL` → Okta sign-out URL (`<issuer>/v1/logout?…post_logout_redirect_uri=https://<app>/`) [ASM].
+- **Validate:** UI and API healthy; `/api/*` reaches the API; a bad image rolls back.
+   220|
+### Step 8 — Edge & login (Route 53, WAF, ACM, Okta) (v3)
+- **waf-regional**, **ACM**, **Route 53 / WBD DNS** unchanged.
+- **alb:** HTTPS listener rules use **`authenticate-oidc`** with the WBD Okta app: `issuer`, `authorization_endpoint`, `token_endpoint`, `user_info_endpoint` (from the Okta discovery document), `client_id`, `client_secret` (Secrets Manager data source), `scope = "openid profile email groups"`, `session_timeout = session_hours`, `on_unauthenticated_request = authenticate` for `/*`, `deny` (401) for `/api/*`; `/api/health` stays open. HTTP → HTTPS redirect unchanged.
+- **Remove** the Cognito module, user pool, domain, client, SAML IdP, the `okta_saml_metadata_url` / `cognito_domain_prefix` variables and the SSM `cognito/*` parameters.
+- **Outputs:** `okta_app_settings` becomes the OIDC values for WBD Identity (redirect URI `https://<app>/oauth2/idpresponse`, sign-out redirect, required `groups` claim); `dns_records_for_wbd` unchanged.
+- **RBAC:** the API reads the Okta `groups` claim from the ALB header and maps `mmm-bu-*` / `mmm-role-*` to BU + role; PostgreSQL row-level security per BU (backend team).
+- **Alternative [ASK]:** app-level OIDC (Authorization Code + PKCE in the UI, JWT validation in the API) – no client secret at the ALB, but auth code in both apps. Default = ALB `authenticate-oidc` (no auth code in the UI, same pattern as v2).
+- **Validate:** login through Okta + MFA; unauthenticated `/` is redirected to Okta; unauthenticated `/api/x` returns 401; the API receives the `groups` claim; WAF blocks a test SQLi; one BU can't see another BU's data.
+   230|
+### Step 9 — Optimization engine (SQS + dispatcher Lambda + Step Functions + SageMaker + publisher) (v3)
+- **sqs** `mmm-<env>-optimization-requests` (**Standard** queue [ASM] – duplicates are harmless because the execution name is the `run_id`): SSE-KMS (`sqs` key), visibility timeout 6 × dispatcher timeout, retention 4 days, long polling, queue policy = API task role send + dispatcher consume + TLS-only; **DLQ** `…-dlq` with `maxReceiveCount = 10` [ASM], retention 14 days.
+- **Message contract (API → queue):** `{"run_id", "business_unit", "input_s3_uri", "requested_by", "dry_run": false}`. The API writes the run row with status `QUEUED` before sending.
+- **lambda-function** `mmm-<env>-run-dispatcher` (DevOps-owned code in `modules/run-dispatcher` [ASM], no business logic, no DB access): SQS event source mapping (batch size 10, **maximum concurrency 2**, `ReportBatchItemFailures`); per batch it reads `max_concurrent_runs` from SSM, counts RUNNING executions of the optimization state machine, and for each message either calls `StartExecution` (name = `run_id`; `ExecutionAlreadyExists` = success) or returns it as a batch-item failure so SQS re-delivers it after the visibility timeout. Role: `sqs:ReceiveMessage/DeleteMessage/GetQueueAttributes`, `states:StartExecution` + `ListExecutions` on the optimization state machine, `ssm:GetParameter`, `cloudwatch:PutMetricData` (namespace `MMM/Optimization`), KMS decrypt; in the VPC (private-app, `lambda` SG); logs (KMS, retention); reserved concurrency 2.
+- **Alternative [ASK]:** EventBridge Pipes (SQS → Step Functions) instead of the Lambda – no code, but no concurrency gate; the slide shows a Lambda, so Lambda is the default.
+- **step-functions** `mmm-<env>-optimization`: unchanged definition (ApplyDefaults → GetOptimizerImage → RunOptimizer `createProcessingJob.sync` → PublishResult / PublishFailure); now started by the dispatcher instead of the API.
+- **sagemaker** run role, **results-publisher** Lambda (`live` alias, sync invoke with retries, no DLQ), SSM image pointers: unchanged; the publisher writes to **RDS PostgreSQL** through RDS Proxy.
+   240|- **Cancel:** the API marks a queued run `CANCELLED`; once the run has started, the API calls `StopExecution` (the dispatcher has no DB access, so a cancelled run may still start and is then stopped) [ASM].
+- **Queue wait limit:** the dispatcher deletes messages older than `max_queue_wait_minutes` (default 30 [ASM]) without starting them and publishes metric `ExpiredRunRequests` (alarm > 0); the API shows "timed out in queue" for runs still `QUEUED` after that time [ASK].
+- **Validate:** 20 messages with `max_concurrent_runs = 5` → never more than 5 RUNNING executions, all 20 finish; the same `run_id` twice → one execution; a malformed message lands in the DLQ and alarms; the publisher writes the run to RDS; a failed job marks the run failed and alerts.
+
+### Step 10 — Monitoring & logging (v3)
+- **Alarms (changed / new):** RDS `CPUUtilization` > 80 %, `FreeStorageSpace` < 10 %, `DatabaseConnections` > 80 % of max, `ReadLatency` / `WriteLatency`, replica lag (if a read replica is built) – replace the Aurora ACU / local storage / replica-lag alarms; **SQS `ApproximateAgeOfOldestMessage` > 15 min**, **DLQ `ApproximateNumberOfMessagesVisible` > 0**, **dispatcher Lambda errors / throttles**; **model drift** per BU (metric `ModelDrift`, threshold per BU) and **model-monitor state machine failed**. All v2 alarms otherwise unchanged (API 5xx, availability, health, what-if p95, optimization runtime, Step Functions failed/throttled, publisher errors, cert expiry, model refresh overdue, GenAI).
+- **Dashboards:** `aurora` → **`rds`**; `optimization` adds queue depth / age, DLQ, dispatcher; `training` adds write-back job runs and drift per BU.
+- **Logs:** dispatcher Lambda and model-monitor state machine log groups (KMS, retention) → Splunk subscription when enabled.
+- **Validate:** a test message in the DLQ alarms; one `run_id` is traceable API → SQS → dispatcher → Step Functions → SageMaker → publisher → RDS.
+   250|
+### Step 11 — Backup & DR (v3: small change)
+- **backup:** AWS Backup selection = **RDS DB instance** (instead of the Aurora cluster) + `results`, `approved-worm`, `models`, `training-data`, `lakehouse`; RDS automated backups / PITR 7 / 14 / 35 days; vault lock and cross-region copy in prod (if WBD approves). SQS holds no state worth backing up (runs are re-requested from the API) [ASM].
+- **Validate:** point-in-time restore of the RDS instance in staging; RPO/RTO documented (Multi-AZ failover ~1–2 min).
+
+### Step 12 — CI/CD pipelines + GitHub Environments/variables (v3)
+- `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci`, `terraform`, `databricks`, `model-governance`, `repo-checks`: unchanged.
+- **`deploy.yml`:** prod pre-migration snapshot = `aws rds create-db-snapshot` on the DB instance (`DB_INSTANCE_ID`) instead of the Aurora cluster snapshot; the dev/staging **optimization dry run goes through the queue** (`scripts/dry-run-optimization.sh` sends a `dry_run` message and waits for the execution) so the dispatcher is tested on every release; smoke test checks the **Okta** redirect instead of Cognito.
+- **Dispatcher code:** shipped by Terraform from `modules/run-dispatcher` (DevOps code, changes with infra PRs) [ASM]; no new app pipeline.
+   260|- **`model-governance.yml`:** on promote also publishes `models/baseline/<bu>/` (drift baseline of the approved version) next to `models/curves/<bu>/`, and writes `approval.json` into the version's evaluation prefix (for the write-back job) [ASM].
+- **GitHub Environment variables:** replace `AURORA_CLUSTER_ID` with **`DB_INSTANCE_ID`**; add **`OPTIMIZATION_QUEUE_URL`**; keep the rest (`AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_PUSH_ROLE_ARN, TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, ECR_REGISTRY, ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, PUBLISHER_FUNCTION, OPTIMIZATION_STATE_MACHINE_ARN, SAGEMAKER_IMAGE_PARAM_PREFIX, GENAI_ENABLED`, data platform `MODEL_REFRESH_STATE_MACHINE_ARN, DATABRICKS_HOST, DATABRICKS_CLIENT_ID`, dev/staging `RESULTS_BUCKET, MODELS_BUCKET, DRY_RUN_BUSINESS_UNIT`, staging/prod `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY`).
+- **Validate:** merge to main auto-deploys to dev incl. the queued dry run; prod takes an RDS snapshot before the migration; rollback tested in staging.
+
+### Step 13 — Promote the platform to staging then prod (unchanged)
+- Same modules; sizing (RDS class / Multi-AZ, `max_concurrent_runs`, SageMaker instance types / quotas, task counts), AZ count, approvals, vault lock, cross-region copy differ.
+
+### Step 14 — Data & ML platform (Databricks + Delta Lake + SageMaker training + registry + write-back + drift) (v3)
+   270|> Everything here stays behind `enable_data_platform`. The data team never hand-deploys to prod; a **named WBD approver** authorizes model promotion.
+- **Unchanged from v2:** Unity Catalog role (two-phase), PrivateLink (optional, off), per-BU KMS keys, EventBridge connection (Databricks OAuth), training/evaluation roles, model package groups `mmm-<env>-<bu>`, EventBridge Scheduler per BU + `mmm.refresh` rule, `model-governance.yml` thresholds + approval.
+- **(v3) Write-back – `mmm-<env>-model-refresh` gets new states after `RegisterModel`:** `StartDatabricksWriteback` (HTTP Task `jobs/run-now`, job id `databricks_writeback_job_id`, parameters `business_unit`, `refresh_id`, `results_uri = s3://<models>/evaluation/<bu>/<refresh_id>/`, `model_package_arn`) → `WaitForWriteback` / `GetWritebackRun` (poll `runs/get`, same retry pattern) → `WritebackDone` (Choice) → success; a failed write-back **fails the execution and alarms** but does not delete the registered model [ASM].
+- **Evaluation contract (data scientists):** the evaluation job writes, under `models/evaluation/<bu>/<refresh_id>/`: `evaluation.json` (metrics), `curves/`, **`predictions/`** (Parquet), **`lift/`** (Parquet, channel lift and title adjustment) and a `manifest.json` (row counts, code version, training job, snapshot URI).
+- **Write-back job (data engineers):** Lakeflow job in the bundle that MERGEs `predictions/` and `lift/` + metrics into per-BU Gold tables (e.g. `gold.<bu>_model_results`) keyed by `refresh_id` and model package version; reads `approval.json` (written by `model-governance.yml`) so Gold shows each version's approval status; a daily Databricks schedule refreshes the status [ASM / ASK every candidate vs approved only].
+- **databricks-access:** Unity Catalog role gets **read** on `models/evaluation/*` (external location, read-only) and **write** on `lakehouse/monitoring/*`.
+- **(v3) Model drift monitoring – new state machine `mmm-<env>-model-monitor` (Standard), one EventBridge Scheduler schedule per BU** (default weekly, mid-way between refreshes, `enable_model_monitor_schedule = false` until thresholds are agreed [ASM]):
+   280|  1. `StartDatabricksExport` – the feature-export job (`databricks_refresh_job_id`) with `purpose = monitor` writes the latest Gold features to `lakehouse/monitoring/<bu>/<date>/` (not immutable, 90-day expiry) [ASM];
+  2. `GetTrainingImage` → `CheckDrift` – SageMaker Processing job (training image, argument **`drift`**) reads the approved baseline `models/baseline/<bu>/` + approved curves + the new features, writes `models/monitoring/<bu>/<date>/drift.json` and publishes CloudWatch metric `ModelDrift` (dimensions `BusinessUnit`, `Check`) [ASM: data scientists own the drift code];
+  3. `DriftDecision` (Choice on the job output) → if drift > threshold and `auto_refresh_on_drift = true` → `PutEvents` `mmm.refresh` for that BU; otherwise end. Default `auto_refresh_on_drift = false` (alert only) [ASK].
+  - Role: HTTP Task to Databricks via the connection, SageMaker Processing jobs `mmm-<env>-drift-*`, `iam:PassRole` (training role, which gets `cloudwatch:PutMetricData` in namespace `MMM/Models` and read on `lakehouse/monitoring/*`), `events:PutEvents` on the default bus (source `mmm.refresh`).
+  - **SageMaker Model Monitor (managed)** is built for endpoints / batch transform; there is no endpoint here, so the drift check is a Processing job with the data scientists' code (they may use the Model Monitor container image) [ASM].
+- **Thresholds:** `data/model-thresholds.yaml` gets a `drift:` section per BU (used by the drift job and the alarm threshold variable `model_drift_threshold`).
+- **Validate:** a refresh registers a model and the write-back job lands predictions/lift in Gold (dev workspace); a scheduled drift check writes `drift.json` and the metric; a forced high drift raises the alarm (and starts a refresh when `auto_refresh_on_drift = true`); approving a model publishes curves + baseline.
+
+---
+   290|
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2
+
+Unchanged: Release 1 (Steps 0–14) live in dev → staging → prod, readiness checklist (§11) passed,
+parallel run + UAT signed off, WBD approves Release 2 (approved LLM providers, token capacity,
+data-egress approval for external models).
+
+---
+
+### Step 15 — Release 2: GenAI (unchanged)
+   300|- LangGraph tools inside `mmm-api`; private API Gateway + proxy Lambda (one for all providers) to OpenAI / Anthropic / Google; Bedrock Guardrail (`ApplyGuardrail`) on every prompt and answer; per-BU token quotas enforced by the API; all behind `enable_genai`.
+
+### Step 16 — Handover & ongoing operations (v3)
+- Runbooks changed: `cognito-idp-outage` → **`okta-outage`** (ALB cannot reach Okta / Okta down / client secret rotated), `db-restore` (RDS PITR + Multi-AZ failover), `optimization-run-failed` (+ queue backlog, DLQ redrive with `aws sqs start-message-move-task`), `scale-planning-season` (+ `max_concurrent_runs`, SageMaker quota, RDS class), `rotation` (+ Okta client secret).
+- New runbooks: **`model-drift`** (read `drift.json`, decide refresh / rollback), **`write-back-failed`** (re-run the Databricks job for a `refresh_id`).
+- Ongoing: monthly image patching, weekly vulnerability fixes, nightly drift (Terraform), quarterly access + restore tests, RDS minor-version upgrades in the maintenance window.
+
+---
+
+   310|## 7. Environment variables — quick reference (v3)
+
+**GitHub (per Environment, non-secret):** see Step 12 (`DB_INSTANCE_ID`, `OPTIMIZATION_QUEUE_URL` new; `AURORA_CLUSTER_ID` removed). **No AWS keys, no app secrets.**
+**Secrets Manager:** `mmm/<env>/api/db`, `rds/proxy`, `rds/migrate`, **`okta/alb-client`**, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`; Databricks OAuth secret on the EventBridge connection.
+**SSM:** `/mmm/<env>/genai_enabled`, `databricks/host`, `images/sagemaker-*`, **`optimization/max_concurrent_runs`**, **`okta/issuer`**, `genai/token_quota/<bu>`.
+**ECS API task env (IaC, non-secret):** `APP_ENV, AWS_REGION, DB_HOST, DB_PORT, DB_NAME, DB_USER, RESULTS_BUCKET, MODELS_BUCKET, EXPORTS_BUCKET, APPROVED_BUCKET, SSM_PREFIX, OPTIMIZATION_QUEUE_URL, OPTIMIZATION_STATE_MACHINE_ARN, ALB_ARN, OKTA_ISSUER` (+ `LLM_GATEWAY_URL` in R2).
+
+---
+
+## 8. Security, authorization & OIDC (v3)
+   320|
+- Keyless CI/CD (GitHub OIDC → per-env roles bound to `repo:<org>/<repo>:environment:<env>`).
+- Engineers: IAM Identity Center + permission sets. **App users: WBD Okta (OIDC at the ALB, MFA in Okta) → `groups` claim → app RBAC → PostgreSQL RLS per BU.** The Okta client secret lives in Secrets Manager and in the encrypted Terraform state only; rotate it with the `rotation` runbook.
+- Workloads: per-service ECS task roles, dispatcher and publisher Lambda roles, per-state-machine roles, per-job SageMaker roles — all with the permission boundary. Only the API can send to the run queue; only the dispatcher can start optimization executions.
+- Encryption: KMS everywhere (RDS, S3, SQS, logs, secrets, SageMaker); TLS 1.2+ (ALB, RDS `force_ssl`, SQS policy `aws:SecureTransport`, API Gateway). WORM for approved scenarios and training data.
+- Pipeline gates unchanged (secret scan, SAST, Trivy, Checkov, actionlint; gaps: SBOM, DAST, cosign).
+
+---
+
+## 9. Deployment strategy & rollback (v3)
+   330|
+- ECS (UI, API): rolling update + circuit breaker. DB: Alembic migrations as a one-off task; expand-then-contract; **RDS DB snapshot** before prod migrations.
+- Optimizer / training images: SSM pointer; publisher: Lambda alias; dispatcher: Terraform (revert PR + apply).
+- Queue: draining is not needed for a release – queued runs start on the image that is live when they are dispatched [ASM].
+- Models: approve / re-approve previous version (also republishes the drift baseline). Data jobs (incl. write-back): bundle redeploy.
+- Infra: revert PR + apply. GenAI: flag off. **Practise every rollback in staging.**
+
+---
+
+   340|## 10. Release tagging — unchanged (`sha-<7>` dev, `vX.Y.Z-rcN` staging, `vX.Y.Z` prod).
+
+---
+
+## 11. Per-step validation checklist (v3 additions)
+
+Everything from v2 plus: Okta sign-in + MFA + `groups` claim per env; RDS Multi-AZ failover test in
+staging; queue load test (150 planners submitting within minutes → runs start at most
+`max_concurrent_runs` at a time, none lost, DLQ empty); write-back visible in Gold; drift alarm test;
+performance test 50 / 100 / 150 planners (what-if p95, optimization queue wait + runtime).
+   350|
+---
+
+## 12. Order-of-operations summary
+
+**Remove Cognito + Aurora → add rds / sqs / run-dispatcher modules → dev: KMS (sqs) → network (sqs
+endpoint) → secrets (Okta) → RDS PostgreSQL + Proxy → ALB Okta OIDC → API task role/env → SQS + dispatcher
+in front of the optimization state machine → monitoring → backup → deploy.yml / scripts → staging → prod →
+data platform: write-back states + model-monitor state machine + schedules → 🚦 RELEASE 1 → Release 2 GenAI
+(unchanged) → handover (updated runbooks).** One step at a time; validate each; keep all three
+environments on identical code.

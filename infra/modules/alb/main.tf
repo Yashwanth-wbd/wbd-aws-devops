@@ -6,7 +6,11 @@ locals {
     api = { port = var.app_port, health_check_path = var.health_check_path }
   }
 
-  auth = var.cognito == null ? [] : [var.cognito]
+  auth = var.oidc == null ? [] : [var.oidc]
+
+  # No sign-in configured: answer 503 instead of serving the app unauthenticated.
+  closed         = var.oidc == null && !var.allow_unauthenticated
+  closed_message = "MMM sign-in is not configured yet."
 }
 
 resource "aws_lb" "this" {
@@ -75,7 +79,7 @@ resource "aws_lb_listener" "http" {
   tags = local.tags
 }
 
-# Everything that is not /api/* is the UI; a browser without a session is sent to Cognito (WBD SSO).
+# Everything that is not /api/* is the UI; a browser without a session is sent to WBD Okta (SSO + MFA).
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
   port              = 443
@@ -87,25 +91,46 @@ resource "aws_lb_listener" "https" {
     for_each = local.auth
 
     content {
-      type  = "authenticate-cognito"
+      type  = "authenticate-oidc"
       order = 1
 
-      authenticate_cognito {
-        user_pool_arn              = default_action.value.user_pool_arn
-        user_pool_client_id        = default_action.value.client_id
-        user_pool_domain           = default_action.value.domain_prefix
+      authenticate_oidc {
+        issuer                     = default_action.value.issuer
+        authorization_endpoint     = default_action.value.authorization_endpoint
+        token_endpoint             = default_action.value.token_endpoint
+        user_info_endpoint         = default_action.value.user_info_endpoint
+        client_id                  = default_action.value.client_id
+        client_secret              = var.oidc_client_secret
         on_unauthenticated_request = "authenticate"
-        scope                      = "openid email profile"
+        scope                      = default_action.value.scope
         session_cookie_name        = "mmm-session"
         session_timeout            = default_action.value.session_seconds
       }
     }
   }
 
-  default_action {
-    type             = "forward"
-    order            = 2
-    target_group_arn = aws_lb_target_group.this["ui"].arn
+  dynamic "default_action" {
+    for_each = local.closed ? [] : [1]
+
+    content {
+      type             = "forward"
+      order            = 2
+      target_group_arn = aws_lb_target_group.this["ui"].arn
+    }
+  }
+
+  dynamic "default_action" {
+    for_each = local.closed ? [1] : []
+
+    content {
+      type = "fixed-response"
+
+      fixed_response {
+        content_type = "text/plain"
+        message_body = local.closed_message
+        status_code  = "503"
+      }
+    }
   }
 
   tags = local.tags
@@ -145,25 +170,46 @@ resource "aws_lb_listener_rule" "api" {
     for_each = local.auth
 
     content {
-      type  = "authenticate-cognito"
+      type  = "authenticate-oidc"
       order = 1
 
-      authenticate_cognito {
-        user_pool_arn              = action.value.user_pool_arn
-        user_pool_client_id        = action.value.client_id
-        user_pool_domain           = action.value.domain_prefix
+      authenticate_oidc {
+        issuer                     = action.value.issuer
+        authorization_endpoint     = action.value.authorization_endpoint
+        token_endpoint             = action.value.token_endpoint
+        user_info_endpoint         = action.value.user_info_endpoint
+        client_id                  = action.value.client_id
+        client_secret              = var.oidc_client_secret
         on_unauthenticated_request = "deny"
-        scope                      = "openid email profile"
+        scope                      = action.value.scope
         session_cookie_name        = "mmm-session"
         session_timeout            = action.value.session_seconds
       }
     }
   }
 
-  action {
-    type             = "forward"
-    order            = 2
-    target_group_arn = aws_lb_target_group.this["api"].arn
+  dynamic "action" {
+    for_each = local.closed ? [] : [1]
+
+    content {
+      type             = "forward"
+      order            = 2
+      target_group_arn = aws_lb_target_group.this["api"].arn
+    }
+  }
+
+  dynamic "action" {
+    for_each = local.closed ? [1] : []
+
+    content {
+      type = "fixed-response"
+
+      fixed_response {
+        content_type = "text/plain"
+        message_body = local.closed_message
+        status_code  = "503"
+      }
+    }
   }
 
   tags = local.tags

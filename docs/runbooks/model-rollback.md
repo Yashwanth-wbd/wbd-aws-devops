@@ -1,7 +1,8 @@
 # Runbook: model rollback
 
 Approved response curves live in `s3://<models>/curves/<bu>/` (written by `model-governance.yml`
-**promote**). The API and SageMaker optimizer read those objects; registry state is in the SageMaker
+**promote**), with the drift baseline in `s3://<models>/baseline/<bu>/` (read by the model monitor).
+The API and SageMaker optimizer read the curves; registry state is in the SageMaker
 Model Registry package group `mmm-<env_short>-<bu>`. Full flow:
 [docs/10 §7](../10-data-platform-and-model-governance.md#7-model-governance-model-governanceyml).
 
@@ -20,8 +21,9 @@ metrics fail, or the data team asks for it.
    gh workflow run model-governance.yml -f environment=prod -f action=rollback -f business_unit=streaming
    ```
    Optional: `-f version=<package-version>` if not using `previous_approved_version`.
-3. Approve in GitHub → the run re-copies the previous version's curves to `curves/<bu>/`, rejects
-   the bad package version, and updates governance tags.
+3. Approve in GitHub → the run re-copies the previous version's curves to `curves/<bu>/` and its
+   baseline to `baseline/<bu>/` (if it had one), rejects the bad package version, and updates
+   governance tags. The next model-monitor run compares against the restored baseline.
 4. New what-if and optimization runs pick up the curves from S3 immediately. If the API caches
    curves in memory, force `aws ecs update-service --cluster $P-ecs --service $P-api --force-new-deployment`.
 5. Verify: a known what-if returns the previous results; `aws s3 ls s3://<models-bucket>/curves/streaming/`
@@ -33,5 +35,5 @@ metrics fail, or the data team asks for it.
 
 Under an incident ticket, a user with the `gha-model-approve` role (or break-glass) can run
 `scripts/model_governance.py rollback` locally with OIDC credentials, or manually copy the previous
-curves in S3 and set package status to **Rejected** in the SageMaker console – then reconcile tags
+curves and baseline in S3 and set package status to **Rejected** in the SageMaker console – then reconcile tags
 when the workflow is back.

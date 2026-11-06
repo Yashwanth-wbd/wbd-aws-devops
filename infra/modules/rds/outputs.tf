@@ -1,36 +1,31 @@
-output "cluster_identifier" {
-  description = "Cluster identifier (<name_prefix>-aurora)."
-  value       = aws_rds_cluster.this.cluster_identifier
+output "instance_identifier" {
+  description = "DB instance identifier (<name_prefix>-postgres)."
+  value       = aws_db_instance.this.identifier
 }
 
-output "cluster_arn" {
-  description = "Cluster ARN."
-  value       = aws_rds_cluster.this.arn
+output "instance_arn" {
+  description = "DB instance ARN."
+  value       = aws_db_instance.this.arn
 }
 
-output "writer_endpoint" {
-  description = "Cluster writer endpoint (clients use the proxy endpoint instead)."
-  value       = aws_rds_cluster.this.endpoint
-}
-
-output "instance_identifiers" {
-  description = "Cluster instance identifiers."
-  value       = [for i in aws_rds_cluster_instance.this : i.identifier]
+output "endpoint" {
+  description = "DB instance address (clients use the proxy endpoint instead)."
+  value       = aws_db_instance.this.address
 }
 
 output "db_name" {
   description = "Initial database name."
-  value       = aws_rds_cluster.this.database_name
+  value       = aws_db_instance.this.db_name
 }
 
 output "port" {
   description = "PostgreSQL port."
-  value       = aws_rds_cluster.this.port
+  value       = aws_db_instance.this.port
 }
 
 output "master_user_secret_arn" {
   description = "RDS-managed admin secret (rotated by RDS)."
-  value       = aws_rds_cluster.this.master_user_secret[0].secret_arn
+  value       = aws_db_instance.this.master_user_secret[0].secret_arn
 }
 
 output "proxy_endpoint" {
@@ -50,5 +45,5 @@ output "proxy_resource_id" {
 
 output "log_group_name" {
   description = "PostgreSQL log group (connections, errors and pgaudit)."
-  value       = aws_cloudwatch_log_group.this.name
+  value       = aws_cloudwatch_log_group.this["postgresql"].name
 }

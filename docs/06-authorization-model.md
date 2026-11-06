@@ -8,7 +8,7 @@ differently.
 | Engineers | Okta + MFA → IAM Identity Center | Permission sets per account | [02-aws-access-sso-cli.md](02-aws-access-sso-cli.md) |
 | Pipelines | GitHub OIDC token | IAM roles whose trust is bound to repo + GitHub Environment | [03-github-oidc.md](03-github-oidc.md) |
 | Running services | ECS task role, Lambda role, or Step Functions role (temporary credentials) | One IAM role per component, least privilege | Section 2 below |
-| Planners | Okta (MFA at Okta) → Cognito SAML → ALB session | App roles + business-unit groups + PostgreSQL RLS | [04-okta-mfa-app-login.md](04-okta-mfa-app-login.md) and section 3 |
+| Planners | Okta (MFA at Okta) → ALB `authenticate-oidc` → ALB session | App roles + business-unit groups + PostgreSQL RLS | [04-okta-mfa-app-login.md](04-okta-mfa-app-login.md) and section 3 |
 
 ## 1. Guard rails on every IAM role Terraform creates
 
@@ -28,14 +28,14 @@ too broad, the boundary blocks:
 | Role | May | May not |
 |---|---|---|
 | `mmm-<env>-ecs-task-exec` (shared execution role) | Pull from ECR, write its log groups, read **only the listed** secrets/parameters, KMS decrypt for those | Anything at runtime inside the app |
-| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), start/watch/stop the optimization state machine, read approved curves under `models/curves/`, read/write the results bucket (run inputs under `runs/*/input/`), read/write exports, **write once** to approved-WORM (on approval), read SSM `/mmm/<env_short>/*`, invoke the private LLM gateway (`execute-api:Invoke`) when GenAI is enabled | Delete or tamper with approved-WORM objects (explicit deny); direct cluster login without the proxy |
+| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), send run requests to the SQS queue `<prefix>-optimization-requests` (SQS key), watch/stop optimization executions, read approved curves under `models/curves/`, read/write the results bucket (run inputs under `runs/*/input/`), read/write exports, **write once** to approved-WORM (on approval), read SSM `/mmm/<env_short>/*`, invoke the private LLM gateway (`execute-api:Invoke`) when GenAI is enabled | Start optimization executions directly (only the dispatcher does); delete or tamper with approved-WORM objects (explicit deny); direct DB login without the proxy |
 | `mmm-<env>-task-ui` | Read SSM `genai_enabled` (UI banner only) | Any other AWS API |
 | `mmm-<env>-task-migrate` | Connect to RDS Proxy as `mmm_migrator`. Only while `enable_db_bootstrap = true`: also as `mmm_admin`, plus writing the `rds/migrate` and `rds/proxy` secrets | S3, Step Functions |
-| `mmm-<env>-task-platform-check` | S3 round trip under `results/platform-check/`, `DescribeStateMachine` on the optimization state machine, read SageMaker image SSM parameters (dev/staging when enabled) | DB login, other S3 paths |
+| `mmm-<env>-task-platform-check` | S3 round trip under `results/platform-check/`, `DescribeStateMachine` on the optimization state machine, `GetQueueAttributes` on the run queue, read SageMaker image SSM parameters (dev/staging when enabled) | DB login, other S3 paths |
 
 What-if optimization runs **inside the API** on the approved curves. Full optimization is
-asynchronous: the API only starts the Step Functions execution; it does not run SageMaker jobs
-itself.
+asynchronous: the API only queues the request in SQS; the dispatcher Lambda starts the Step
+Functions execution when a run slot is free. The API does not run SageMaker jobs itself.
 
 Network limits match the roles: the API accepts traffic only from the ALB security group; the UI
 only from the ALB; tasks and Lambda reach the database only through the RDS Proxy security group.
@@ -46,7 +46,8 @@ Task roles are defined in `infra/environments/<env>/ecs.tf`.
 
 | Role | May | May not |
 |---|---|---|
-| `mmm-<env>-optimization` (Step Functions) | Read the optimizer image from SSM, create/describe/stop SageMaker Processing jobs `<prefix>-opt-*`, invoke the results-publisher Lambda alias `live`, pass the SageMaker optimization role, use KMS grants for job volumes and S3 | Start executions (API only); change image pointers |
+| `mmm-<env>-optimization` (Step Functions) | Read the optimizer image from SSM, create/describe/stop SageMaker Processing jobs `<prefix>-opt-*`, invoke the results-publisher Lambda alias `live`, pass the SageMaker optimization role, use KMS grants for job volumes and S3 | Start executions (dispatcher only); change image pointers |
+| `mmm-<env>-run-dispatcher` (Lambda) | Receive / delete messages of the run queue (SQS key decrypt), read SSM `optimization/max_concurrent_runs`, `ListExecutions` + `StartExecution` on the optimization state machine, `PutMetricData` in namespace `MMM/Optimization` | Anything else; it never reads run inputs |
 | SageMaker role `mmm-<env>-sagemaker-optimization` | Read models and results buckets, write run output under results, pull `mmm/sagemaker-optimizer` from ECR | Other buckets, other repos |
 | `mmm-<env>-results-publisher` (Lambda) | Connect to RDS Proxy as `mmm_app`, read finished run output under `results/runs/*` | Write S3, start jobs |
 
@@ -54,9 +55,10 @@ Task roles are defined in `infra/environments/<env>/ecs.tf`.
 
 | Role | May | May not |
 |---|---|---|
-| `mmm-<env>-model-refresh` (Step Functions) | Call Databricks job APIs through the EventBridge connection, run SageMaker training/evaluation jobs, register model packages `PendingManualApproval` | Approve models (governance pipeline only) |
-| SageMaker role `mmm-<env>-sagemaker-training` | Read training-data and models, write artifacts and evaluation reports, register into model package groups `<prefix>-<bu>` | Publish curves to `curves/` (approver role only) |
-| `mmm-<env>-model-refresh-trigger` | `states:StartExecution` on the model-refresh state machine (Scheduler and on-demand EventBridge rule) | Anything else |
+| `mmm-<env>-model-refresh` (Step Functions) | Call Databricks job APIs through the EventBridge connection (refresh and write-back jobs), run SageMaker training/evaluation jobs, register model packages `PendingManualApproval` | Approve models (governance pipeline only) |
+| `mmm-<env>-model-monitor` (Step Functions) | Call the Databricks export job, run the SageMaker `drift` Processing job, read its `drift.json`, `PutMetricData` `MMM/Models`, send `mmm.refresh` events to the default bus | Train or register models |
+| SageMaker role `mmm-<env>-sagemaker-training` | Read training-data, lakehouse and models, write artifacts, evaluation reports and drift results, register into model package groups `<prefix>-<bu>` | Publish curves or baselines (approver role only) |
+| `mmm-<env>-model-refresh-trigger` | `states:StartExecution` on the model-refresh and model-monitor state machines (Scheduler and on-demand EventBridge rule) | Anything else |
 
 ### GitHub Actions roles (OIDC)
 
@@ -66,11 +68,11 @@ Defined in `infra/modules/iam-oidc/main.tf` per environment:
 |---|---|---|
 | `mmm-<env>-gha-plan` | GitHub Environment `<env>`, optional PR and `main` | Read-only plan, state lock, refresh secret metadata |
 | `mmm-<env>-gha-apply` | GitHub Environment `<env>` | Terraform apply (AdministratorAccess capped by boundary) |
-| `mmm-<env>-gha-deploy` | GitHub Environment `<env>` | ECS deploy, migrate task, Aurora **cluster** snapshot, SSM image pointers, Lambda release |
+| `mmm-<env>-gha-deploy` | GitHub Environment `<env>` | ECS deploy, migrate task, RDS DB snapshot, SSM image pointers, Lambda release, dry-run request to the run queue (dev, staging) |
 | `mmm-<env>-gha-ecr-push` | `<env>` and optionally `main` | Push images to dev ECR; promotion target in staging/prod |
 | `mmm-<env>-gha-ecr-read` | Trusted **previous** environment | Pull images for promotion |
 | `mmm-<env>-gha-model-eval` | `main` branch only | Read model registry + evaluation JSON; may set **Rejected** only |
-| `mmm-<env>-gha-model-approve` | GitHub Environment `<env>-model-promotion` | Approve/reject packages; copy curves to `s3://<models>/curves/<bu>/` |
+| `mmm-<env>-gha-model-approve` | GitHub Environment `<env>-model-promotion` | Approve/reject packages; copy curves to `s3://<models>/curves/<bu>/` and the drift baseline to `baseline/<bu>/`; write `approval.json` |
 
 ### GenAI (Release 2, `enable_genai = true`)
 
@@ -94,20 +96,22 @@ them. Clients never use passwords at runtime—they present an IAM auth token to
 
 ### Sign-in and request identity
 
-Planners open the app URL on the public ALB. Unauthenticated browser traffic is redirected to
-Cognito hosted UI → WBD Okta (MFA at Okta). After sign-in, the ALB sets session cookie
-`mmm-session`.
+Planners open the app URL on the public ALB. Unauthenticated browser traffic is redirected
+straight to the WBD Okta authorization server (OIDC authorization code flow, MFA at Okta). After
+sign-in, the ALB sets session cookie `mmm-session`.
 
-- Default ALB route → **ui** target group (static web app).
+- Default ALB route → authenticate with Okta → **ui** target group (static web app).
 - `/api/health` → **api** target group without authentication (smoke tests and monitoring).
-- `/api/*` → authenticate with Cognito; unauthenticated API calls get **401** (not a redirect).
+- `/api/*` → authenticate with Okta; unauthenticated API calls get **401** (not a redirect).
 
-The API reads the ALB-injected header `x-amzn-oidc-data` (JWT). The signer must match the
-environment variable `ALB_ARN`. Okta passes group membership in SAML attribute `groups`, mapped
-to Cognito **`custom:groups`**. The API maps those group names to business unit and app role
-(same naming convention as in [04](04-okta-mfa-app-login.md)—WBD to confirm group names).
+The API reads the ALB-injected header `x-amzn-oidc-data` (JWT signed by the ALB). The signer must
+match the environment variable `ALB_ARN`. Okta puts group membership in the **`groups`** claim
+(filter "Starts with `mmm-`"), which the ALB forwards from the user info endpoint. The API maps
+those group names to business unit and app role (same naming convention as in
+[04](04-okta-mfa-app-login.md)—WBD to confirm group names). `OKTA_ISSUER` is set on the API for
+logging and checks.
 
-### Roles (from Okta groups via `custom:groups`)
+### Roles (from the Okta `groups` claim)
 
 | Action | viewer | analyst | planner | approver | admin |
 |---|---|---|---|---|---|
@@ -161,8 +165,9 @@ Step 9; if pinning is high, the backend team may need to adjust how settings are
 | Store | Control |
 |---|---|
 | S3 buckets | Bucket policy: HTTPS only, deny non-KMS uploads, allow only named roles; per-BU KMS keys on data-platform buckets (Step 13) |
-| Aurora | Reached only through RDS Proxy; IAM auth at the proxy; TLS forced; cluster in private data subnets |
-| Step Functions | API may start optimization executions; refresh machine started only by Scheduler/EventBridge trigger role |
+| RDS PostgreSQL | Reached only through RDS Proxy; IAM auth at the proxy; TLS forced; instance in private data subnets |
+| SQS run queue | KMS (`sqs` key), TLS-only queue policy; API may only send, the dispatcher only receive / delete |
+| Step Functions | Only the dispatcher starts optimization executions; refresh and monitor machines started only by the Scheduler/EventBridge trigger role |
 | SageMaker | Job roles scoped to named buckets and ECR repos; job names prefixed by environment |
-| SageMaker Model Registry | Package groups per BU; governance roles may read evaluation JSON and (on approve) write `curves/` |
+| SageMaker Model Registry | Package groups per BU; governance roles may read evaluation JSON and (on approve) write `curves/`, `baseline/` and `approval.json` |
 | Databricks | Unity Catalog role on landing, lakehouse, training-data; no ECS task holds Databricks tokens—the refresh state machine uses an EventBridge connection (OAuth secret set out of band) |

@@ -23,6 +23,6 @@ output "dashboard_name" {
 }
 
 output "dashboard_names" {
-  description = "All dashboards: platform, api-ui, aurora, cost, and optimization / training / genai when those exist."
+  description = "All dashboards: platform, api-ui, rds, cost, and optimization / training / genai when those exist."
   value       = [for d in aws_cloudwatch_dashboard.this : d.dashboard_name]
 }

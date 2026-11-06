@@ -5,8 +5,9 @@
 #                                            pass -> tagged passed, a promote run is started per version
 #                                            fail -> tagged failed and Rejected, warning; never approvable
 #   dispatch promote  -> job waits in environment <env>-model-promotion (WBD approver) -> version Approved,
-#                        curves copied to s3://<models bucket>/curves/<bu>/ (gha-model-approve role)
-#   dispatch rollback -> same approval -> previous approved version re-published, current one Rejected
+#                        curves copied to s3://<models bucket>/curves/<bu>/, drift baseline to
+#                        baseline/<bu>/, approval.json written next to evaluation.json (gha-model-approve role)
+#   dispatch rollback -> same approval -> previous approved version re-published (curves + baseline), current one Rejected
 #
 # Auth: GitHub OIDC to AWS - no secrets. Repository variables (per env, upper case, from the Terraform output
 # github_repository_variables): MODEL_EVAL_ROLE_ARN_<ENV>, MODEL_APPROVE_ROLE_ARN_<ENV>, MODELS_BUCKET_<ENV>.

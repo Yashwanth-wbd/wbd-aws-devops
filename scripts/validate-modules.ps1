@@ -8,7 +8,7 @@
 
 .EXAMPLE
   .\scripts\validate-modules.ps1                 # all modules
-  .\scripts\validate-modules.ps1 -Name aurora,alb   # selected modules
+  .\scripts\validate-modules.ps1 -Name rds,alb   # selected modules
 #>
 [CmdletBinding()]
 param(

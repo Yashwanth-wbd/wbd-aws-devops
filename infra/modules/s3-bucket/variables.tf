@@ -51,6 +51,12 @@ variable "expiration_days" {
   default     = null
 }
 
+variable "prefix_expiration_days" {
+  description = "Extra expiry for short-lived prefixes: prefix (ending in /) => days, e.g. { \"monitoring/\" = 90 }."
+  type        = map(number)
+  default     = {}
+}
+
 variable "glacier_transition_days" {
   description = "Move current objects to S3 Glacier Flexible Retrieval after this many days (null = never)."
   type        = number

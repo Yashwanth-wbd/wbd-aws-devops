@@ -14,7 +14,8 @@ All of this comes from `environment = "prod"` and the tfvars, not from different
 |---|---|---|
 | Account / prefix | `wbd-mmm-stage`, `mmm-stg` | `wbd-mmm-prod`, `mmm-prd` |
 | VPC | `10.40.32.0/19` | `10.40.64.0/19` (placeholder) |
-| Aurora | 0.5–16 ACU, 14-day PITR | **1–32 ACU**, **35-day PITR, deletion protection** |
+| RDS PostgreSQL | `db.r6g.large`, Multi-AZ, 100–500 GiB, 14-day PITR | `db.r6g.xlarge`, Multi-AZ, 200–1000 GiB, **35-day PITR, deletion protection** |
+| Run queue | `max_concurrent_runs = 20` | `max_concurrent_runs = 50` |
 | ALB | – | **deletion protection** |
 | ECS min–max | api 2–4, ui 2–3 | api **3–10**, ui **2–6** |
 | `approved-worm` Object Lock | GOVERNANCE | **COMPLIANCE** (2555 days – cannot shorten later) |
@@ -23,7 +24,7 @@ All of this comes from `environment = "prod"` and the tfvars, not from different
 | Logs, flow logs, log bucket | 90 days | 365 days |
 | PR plans | allowed | **never**: `gha-plan` doesn't trust `pull_request` |
 | ECR | rc tags from dev | release tags `vX.Y.Z` copied from staging; no `ecr-read` role (nothing promoted out of prod) |
-| GitHub Environment | EY lead | **WBD approvers, prevent self-review**, change ticket on tag, **Aurora cluster snapshot** before migrations |
+| GitHub Environment | EY lead | **WBD approvers, prevent self-review**, change ticket on tag, **RDS DB snapshot** before migrations |
 | Data platform | rc tags | prod bundles and model promotion with WBD approvers (`prod-model-promotion`, prevent self-review) |
 
 First `terraform plan` on an empty account: `.\scripts\mock-plan.ps1 -Environment prod` (staging
@@ -35,7 +36,7 @@ Same order as the [staging README](../staging/README.md), with these changes:
 
 1. SSO profile `mmm-prd-devops` for bootstrap and first apply; daily access `mmm-prd-readonly`.
 2. Bootstrap with `prod.tfvars` (workspace `prod`), then fill `backend.tf` and `state_kms_key_arn`.
-3. Replace placeholders. Prod needs WBD sign-off on Aurora ACU limits, budget and COMPLIANCE Object Lock.
+3. Replace placeholders. Prod needs WBD sign-off on the RDS instance class and storage, `max_concurrent_runs`, budget and COMPLIANCE Object Lock.
 4. First apply under a CAB ticket: `terraform plan -out=prd.tfplan`, then `terraform apply prd.tfplan`.
 5. Database setup with `enable_db_bootstrap` (as staging), then `enable_db_bootstrap = false`.
    Run `Invoke-Expression (terraform output -raw platform_check_run_command)`.
@@ -61,8 +62,8 @@ Same order as the [staging README](../staging/README.md), with these changes:
 .\scripts\mock-plan.ps1 -Environment prod
 
 # account (mmm-prd-readonly is enough for read-only checks)
-$cid = (terraform output -json aurora | ConvertFrom-Json).cluster_identifier
-aws rds describe-db-clusters --db-cluster-identifier $cid --query "DBClusters[0].[Status,BackupRetentionPeriod,DeletionProtection]"
+$db = (terraform output -json rds | ConvertFrom-Json).instance_identifier
+aws rds describe-db-instances --db-instance-identifier $db --query "DBInstances[0].[DBInstanceStatus,MultiAZ,BackupRetentionPeriod,DeletionProtection]"
 aws elbv2 describe-load-balancer-attributes --load-balancer-arn $(aws elbv2 describe-load-balancers --names mmm-prd-alb --query "LoadBalancers[0].LoadBalancerArn" --output text) --query "Attributes[?Key=='deletion_protection.enabled'].Value"
 aws s3api get-object-lock-configuration --bucket wbd-mmm-prd-approved-worm-use1 --query "ObjectLockConfiguration.Rule.DefaultRetention"
 aws backup list-backup-plans --query "BackupPlansList[].BackupPlanName"
@@ -74,7 +75,7 @@ aws iam get-role --role-name mmm-prd-gha-plan --query "Role.AssumeRolePolicyDocu
 ```powershell
 git tag -a v0.1.0 -m "CHG0000000 MMM 0.1.0" <same commit as v0.1.0-rc1>; git push origin v0.1.0
 gh run watch
-aws rds describe-db-cluster-snapshots --db-cluster-identifier mmm-prd-aurora --snapshot-type manual --query "DBClusterSnapshots[-1].DBClusterSnapshotIdentifier"   # mmm-prd-predeploy-v0-1-0-<run>
+aws rds describe-db-snapshots --db-instance-identifier mmm-prd-postgres --snapshot-type manual --query "DBSnapshots[-1].DBSnapshotIdentifier"   # mmm-prd-predeploy-v0-1-0-<run>
 ```
 
 Also check that a tag without a change ticket fails at "Change ticket on the release tag", and a

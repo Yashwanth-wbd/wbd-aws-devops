@@ -12,8 +12,8 @@ or applies Terraform from a laptop after this step. No AWS keys or app secrets a
 | `optimizer-ci.yml` | PR or push to `main` touching `apps/sagemaker-optimizer/**` | Same Python CI for `mmm/sagemaker-optimizer` |
 | `training-ci.yml` | PR or push to `main` touching `apps/sagemaker-training/**` | Same Python CI for `mmm/sagemaker-training` (skipped at deploy when data platform is off) |
 | `publisher-ci.yml` | PR or push to `main` touching `apps/results-publisher/**` | `_python-service-ci.yml` with `build_image: false` (tests only); `deploy.yml` zips and publishes the Lambda |
-| `deploy.yml` | CI on `main` finished (success), `v*` tag push, or manual | Promote images → (prod) Aurora cluster snapshot → migration → ECS → smoke → SSM SageMaker pointers → publisher Lambda → release record. Rolls back on failure |
-| `terraform.yml` | PR / push touching `infra/**`, nightly 03:00 UTC, manual | PR: fmt, validate, tflint, Checkov, plan dev + staging. `main`: apply dev → staging → prod (approvals). Nightly: drift check |
+| `deploy.yml` | CI on `main` finished (success), `v*` tag push, or manual | Promote images → (prod) RDS DB snapshot → migration → ECS → smoke → SSM SageMaker pointers → publisher Lambda → release record. Rolls back on failure |
+| `terraform.yml` | PR / push touching `infra/**` or `data/model-thresholds.yaml` (drift thresholds), nightly 03:00 UTC, manual | PR: fmt, validate, tflint, Checkov, plan dev + staging. `main`: apply dev → staging → prod (approvals). Nightly: drift check |
 | `repo-checks.yml` | every PR and push to `main` | Trivy secret scan, Semgrep on `apps/`, shellcheck, LF line endings, actionlint, ECS template check, env sync check |
 | `databricks.yml` | push to `main` touching `data/databricks/**`, manual | Databricks Asset Bundle validate + deploy (OIDC). Skipped if `data/databricks/databricks.yml` is missing |
 | `model-governance.yml` | hourly, manual | SageMaker registry evaluate / promote / rollback ([10 §7](10-data-platform-and-model-governance.md#7-model-governance-model-governanceyml)) |
@@ -66,24 +66,26 @@ If `apps/<folder>` is missing in the checkout, that component is skipped with a 
    `promote-images.sh copy` each image tag.
 2. Switch to `AWS_DEPLOY_ROLE_ARN`. Verify images exist; record **running** task definitions,
    SSM pointer values and Lambda alias `live`.
-3. **Prod** (migrations + `api`): `aws rds create-db-cluster-snapshot` on `AURORA_CLUSTER_ID`
-   (`mmm-<env>-aurora`), wait for completion.
+3. **Prod** (migrations + `api`): `aws rds create-db-snapshot` on `DB_INSTANCE_ID`
+   (`mmm-<env>-postgres`), wait for `db-snapshot-available`.
 4. **Migration** (when enabled and `api` in scope): render `ecs/<env>/migrate.json` with the new
    `mmm/api` image; `run-migration.sh` runs the task once and fails the job on non-zero exit.
 5. **ECS** (`api`, `ui`): `ecs-deploy.sh render` overlays `ecs/<env>/<service>.json`, sets image
    and `APP_VERSION`; `ecs-deploy.sh update` waits for `rolloutState = COMPLETED`.
 6. **Smoke test** `scripts/smoke.sh` against `SMOKE_BASE_URL` or `APP_URL`: `/api/health` → 200;
-   `/` → 302 to Cognito hosted UI (12 × 10 s by default).
+   `/` → 302 to the Okta authorize endpoint (12 × 10 s by default; only while `SMOKE_CHECK_LOGIN = true`).
 7. **SageMaker pointers**: write `registry/repo@digest` to SSM for `optimizer` / `training`.
 8. **Publisher**: `lambda-release.sh build` + `publish` → new version, alias `live` moved.
 9. **Optimization dry run** (dev and staging, when `optimizer` or `publisher` changed;
-   `SMOKE_DRY_RUN=false` skips it): `scripts/dry-run-optimization.sh` starts one execution
-   `dryrun-<run>-<attempt>` with `dry_run = true` for `DRY_RUN_BUSINESS_UNIT` and waits up to 20 minutes.
+   `SMOKE_DRY_RUN=false` skips it): `scripts/dry-run-optimization.sh` sends one request
+   `dryrun-<run>-<attempt>` with `dry_run = true` for `DRY_RUN_BUSINESS_UNIT` to the run queue
+   (`OPTIMIZATION_QUEUE_URL`), waits up to 10 minutes for the dispatcher to start the execution of
+   the same name, then up to 20 minutes for it to finish. This also proves the queue and dispatcher work.
    It is skipped while no optimizer image was released or that BU has no approved curves yet.
 10. **Rollback** on failure after step 5 started: previous ECS task defs, previous SSM values,
     previous Lambda version. Migrations are **not** reverted (expand-then-contract).
 11. **Release record:** JSON artifact + job summary (version, digests, revisions, approvers,
-    change ticket, Aurora snapshot id).
+    change ticket, DB snapshot id).
 
 ### Who owns what in a task definition
 
@@ -135,9 +137,10 @@ gh auth login
 | `AWS_DEPLOY_ROLE_ARN` | deploy |
 | `ECR_PUSH_ROLE_ARN`, `ECR_REGISTRY` | CI push (dev), promotion target (staging/prod) |
 | `ECS_CLUSTER`, `APP_SUBNET_IDS`, `DATA_CLIENTS_SG_ID` | deploy, migration |
-| `APP_URL`, `AURORA_CLUSTER_ID`, `PUBLISHER_FUNCTION` | smoke test, prod snapshot, Lambda release |
+| `APP_URL`, `DB_INSTANCE_ID`, `PUBLISHER_FUNCTION` | smoke test, prod snapshot, Lambda release |
+| `SMOKE_CHECK_LOGIN` | smoke test: `true` once `okta_sign_in_enabled = true` (re-run `setup-github.ps1` after that apply) |
 | `SAGEMAKER_IMAGE_PARAM_PREFIX` | deploy (SSM `/mmm/<env_short>/images`) |
-| `OPTIMIZATION_STATE_MACHINE_ARN` | deploy dry run, runbooks |
+| `OPTIMIZATION_STATE_MACHINE_ARN`, `OPTIMIZATION_QUEUE_URL` | deploy dry run, runbooks |
 | `RESULTS_BUCKET`, `MODELS_BUCKET`, `DRY_RUN_BUSINESS_UNIT` | deploy dry run (dev, staging only) |
 | `SOURCE_ECR_READ_ROLE_ARN`, `SOURCE_ECR_REGISTRY` | staging/prod promotion |
 | `DATABRICKS_HOST` | `databricks.yml` (data platform) |
@@ -150,7 +153,6 @@ gh auth login
 |---|---|---|
 | `SMOKE_BASE_URL` | `APP_URL` | Override smoke URL (for example before WBD DNS points at the ALB) |
 | `SMOKE_CHECK_VERSION` | off | `true` once `/api/health` returns `APP_VERSION` |
-| `SMOKE_CHECK_LOGIN` | `true` | Set `false` to skip the `/` → Cognito redirect check |
 | `SMOKE_DRY_RUN` | `true` | Set `false` to skip the post-release optimization dry run (dev, staging) |
 | `CHANGE_TICKET_PATTERN` | `CHG[0-9]{7}` | Regex for the change ticket in the prod tag message |
 
@@ -218,7 +220,9 @@ same approvals.
 | `deployment failed … circuit breaker` | New tasks failed health checks. Check service events and `/ecs/mmm-<env>/<service>` logs |
 | Migration fails | Log printed in the job. ECS may not have rolled forward; fix forward in a new release |
 | Smoke test: `/api/health` not 200 | WAF block, unhealthy targets, or API not listening on 8080 |
-| Smoke test: `/` not 302 to Cognito | ALB listener rules or Cognito domain misconfigured; check `front_door` output |
+| Smoke test: `/` returns 503 | Okta sign-in is off (`okta_sign_in_enabled = false`) but `SMOKE_CHECK_LOGIN` is `true`; re-run `setup-github.ps1` |
+| Smoke test: `/` not 302 to Okta | ALB listener rules, `okta_issuer` or `okta_client_id` wrong; check `front_door` output |
+| Dry run: `dry run not started after 600s` | Dispatcher not consuming: check `mmm-<env>-run-dispatcher` logs, the `runs-*` alarms and whether `max_concurrent_runs` runs are already active |
 | Plan skipped in PR | `TF_PLAN_ROLE_ARN_<ENV>` repository variable not set yet |
 | Nightly drift job red | Change outside Terraform; CloudTrail → import or revert |
 | repo-checks env sync red | Edit `infra/environments/dev` or `ecs/dev`, run `.\scripts\sync-environments.ps1`, commit |

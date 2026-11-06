@@ -54,6 +54,30 @@ data "aws_iam_policy_document" "uc" {
     resources = concat(var.bucket_arns, [for b in var.bucket_arns : "${b}/*"])
   }
 
+  dynamic "statement" {
+    for_each = { for i, p in var.read_only_prefixes : tostring(i) => p }
+    content {
+      sid       = "ReadOnlyObjects${statement.key}"
+      actions   = ["s3:GetObject"]
+      resources = ["${statement.value.bucket_arn}/${statement.value.prefix}*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = { for i, p in var.read_only_prefixes : tostring(i) => p }
+    content {
+      sid       = "ReadOnlyList${statement.key}"
+      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      resources = [statement.value.bucket_arn]
+
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["${statement.value.prefix}*"]
+      }
+    }
+  }
+
   statement {
     sid       = "BucketKeys"
     actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*"]

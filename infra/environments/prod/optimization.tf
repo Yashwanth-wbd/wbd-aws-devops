@@ -1,8 +1,8 @@
 # ================================================================== Step 7b - Full optimization (Step Functions + SageMaker)
-# API -> StartExecution {run_id, business_unit, input_s3_uri}
+# API -> run queue -> dispatcher StartExecution {run_id, business_unit, input_s3_uri} (run-queue.tf)
 #   -> read the optimizer image from SSM -> SageMaker Processing job (.sync, private subnets)
-#   -> results-publisher Lambda (alias live) writes the summary to Aurora; on failure it marks the run failed.
-# Progress for the UI = execution status (DescribeExecution) + the run row in Aurora; no queue, no cache.
+#   -> results-publisher Lambda (alias live) writes the summary to RDS; on failure it marks the run failed.
+# Progress for the UI = execution status (DescribeExecution; name = run_id) + the run row in RDS.
 # deploy.yml adds dry_run = true after a release in dev/staging (scripts/dry-run-optimization.sh):
 # the job gets DRY_RUN=true and the publisher dry_run, so neither writes a real run.
 locals {
@@ -91,13 +91,13 @@ module "publisher" {
 
   name_prefix = local.name_prefix
   name        = local.publisher_name
-  description = "Writes the summary of a finished optimization run from S3 to Aurora (code shipped by deploy.yml)"
+  description = "Writes the summary of a finished optimization run from S3 to RDS (code shipped by deploy.yml)"
   timeout     = 120
   environment = {
     APP_ENV        = var.environment
-    DB_HOST        = module.aurora.proxy_endpoint
+    DB_HOST        = module.rds.proxy_endpoint
     DB_PORT        = "5432"
-    DB_NAME        = module.aurora.db_name
+    DB_NAME        = module.rds.db_name
     DB_USER        = "mmm_app"
     RESULTS_BUCKET = module.buckets["results"].bucket_name
   }

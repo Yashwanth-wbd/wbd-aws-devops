@@ -4,9 +4,9 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 5 Nov 2026 – requirement 2 (v2 architecture from `wbd_Presentation.pptx`)
-implemented, reviewed against the plan and the slides, gaps fixed, validated and pushed to `main`
-(latest `35b8a47` plus this update); all GitHub workflows green.
+Last updated: 6 Nov 2026 – requirement 3 (v3 architecture from `wbd_Presentation_3.pptx`)
+implemented and validated offline; **not committed yet** (v2 is on `main`, latest `35b8a47` plus
+memory updates). Commit / push when the user asks.
 
 ---
 
@@ -18,8 +18,8 @@ Attach **this file** (and, for a new requirement, the new requirement document),
 > everything: what is built, decisions, working rules, history and next steps. Project folder:
 > `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1`,
 > GitHub https://github.com/Yashwanth-wbd/wbd-aws-devops (branch `main`). Follow the rules in section 3.
-> Today I want to: <e.g. "review the attached requirement 3 – plan and architecture only, no code yet",
-> or "fill the real dev values I have">.
+> Today I want to: <e.g. "commit and push the v3 changes", "review the attached requirement 4 – plan
+> and architecture only, no code yet", or "fill the real dev values I have">.
 
 If the tools are gone after a VDI reset, start with: *"reinstall the tools from section 4.1 and log in
 to GitHub CLI"*.
@@ -36,33 +36,50 @@ At the end of every session ask the agent to **update this file** (sections 1, 6
 | Project folder (source of truth) | `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
 | GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files. All push workflows green. Check the latest with `git log --oneline -5`. |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset: `gh auth login --web --scopes repo,workflow` |
-| Requirement documents (`docs/requirements/`) | **`wbd_Presentation.pptx`** (v2 target architecture – the one implemented), `devops_plan_2.txt` (v2 plan + implementation status), `aws_resource_list_2.xlsx` (v2 resources per env + "Implemented" column + `decisions` sheet), `wbd_mmm_ecs_final_2.docx` (v2 design doc + implemented defaults), `PROJECT_CONTEXT_2.md` (v2 planning context, section 4a = where the build differs from the plan), **`devops_2_client_question.xlsx`** (what WBD must provide – section 7). v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
+| Requirement documents (`docs/requirements/`) | **`wbd_Presentation_3.pptx`** (v3 target architecture – the one implemented), `devops_plan_3.txt` (v3 plan + implementation status + where the build differs), `aws_resource_list_3.xlsx` (v3 resources per env + column H "v3 implementation" + `removed_vs_v2` and `decisions` sheets), `wbd_mmm_ecs_final_3.docx` (v3 design doc + implemented defaults), `PROJECT_CONTEXT_3.md` (v3 planning context, section 4a = where the build differs from the plan), **`devops_3_client_question.xlsx`** (what WBD must provide – section 7). v2 kept for history: `wbd_Presentation.pptx`, `devops_plan_2.txt`, `aws_resource_list_2.xlsx`, `wbd_mmm_ecs_final_2.docx`, `PROJECT_CONTEXT_2.md`, `devops_2_client_question.xlsx`. v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
-| Status | **v2 implemented with placeholder values, validated offline, pushed.** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
+| Status | **v3 implemented with placeholder values and validated offline; not committed yet.** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
 
-### 1.1 v2 architecture in one paragraph
+### 1.1 v3 architecture in one paragraph
 
-Planners sign in at **WBD Okta (SAML) → Cognito user pool → ALB `authenticate-cognito`** behind a
-**regional WAF**. The ALB routes `/` to the **`ui`** ECS service and `/api/*` to the **`api`** ECS
-service (Fargate). What-if runs in the API; an optimization run is an **async Step Functions
-execution** (`mmm-<env>-optimization`) that starts a **SageMaker Processing job** (image
-`mmm/sagemaker-optimizer`, current URI in SSM) and then the **results-publisher Lambda**, which
-writes the result to **Aurora PostgreSQL Serverless v2** through **RDS Proxy** (IAM auth). With the
-data platform, **EventBridge Scheduler / an `mmm.refresh` event** starts `mmm-<env>-model-refresh`:
-Databricks job (features) → SageMaker training → evaluation → **SageMaker Model Registry**
-(`PendingManualApproval`); `model-governance.yml` checks thresholds and a WBD approver approves,
-which publishes the response curves the optimizer reads. Release 2 GenAI: **private API Gateway
-LLM gateway** → OpenAI / Anthropic / Google with **Bedrock Guardrails** (`ApplyGuardrail`).
+Planners sign in with **WBD Okta over OIDC directly at the ALB (`authenticate-oidc`)** behind a
+**regional WAF** (no Cognito); until `okta_sign_in_enabled = true` the ALB answers 503. The ALB
+routes `/` to the **`ui`** ECS service and `/api/*` to the **`api`** ECS service (Fargate). What-if
+runs in the API; an optimization request goes to the **SQS run queue**
+(`<prefix>-optimization-requests` + DLQ); the **run-dispatcher Lambda** starts at most
+`max_concurrent_runs` (SSM, soft limit) **Step Functions executions** (`mmm-<env>-optimization`), each
+starting a **SageMaker Processing job** (image `mmm/sagemaker-optimizer`, URI in SSM) and then the
+**results-publisher Lambda**, which writes to **RDS PostgreSQL** (Multi-AZ in staging / prod) through
+**RDS Proxy** (IAM auth). With the data platform, **EventBridge Scheduler / an `mmm.refresh` event**
+starts `mmm-<env>-model-refresh`: Databricks job (features) → SageMaker training → evaluation →
+**SageMaker Model Registry** (`PendingManualApproval`) → **Databricks write-back** (predictions, lift);
+`model-governance.yml` checks thresholds and a WBD approver approves, which publishes the response
+curves + drift baseline and writes `approval.json`. **`mmm-<env>-model-monitor`** (daily per BU, off
+until the first baseline) scores drift, publishes `MMM/Models ModelDrift`, alarms, and requests a
+refresh only with `auto_refresh_on_drift = true`. Release 2 GenAI: **private API Gateway LLM
+gateway** → OpenAI / Anthropic / Google with **Bedrock Guardrails** (`ApplyGuardrail`).
 
-### 1.2 What v2 removed (vs v1)
+### 1.2 What v3 changed (vs v2)
+
+Removed: Cognito (module `cognito`, SSM `cognito/*`, API env `COGNITO_*`), Aurora Serverless v2
+(module `aurora`, Aurora alarms / dashboard), runbook `cognito-idp-outage.md`, GitHub variable
+`AURORA_CLUSTER_ID`, `states:StartExecution` on the API task role. Added: module `rds` (instance,
+parameter group, subnet group, Proxy), module `run-queue` (queue, DLQ, dispatcher Lambda, alarms) +
+stack file `run-queue.tf`, ALB `authenticate-oidc`, secret `okta/alb-client`, SSM `okta/issuer` and
+`optimization/max_concurrent_runs`, KMS key `sqs`, SQS endpoint, write-back states, model-monitor
+state machine + schedules + drift alarms, governance baseline + `approval.json`, GitHub variables
+`DB_INSTANCE_ID`, `OPTIMIZATION_QUEUE_URL`, `SMOKE_CHECK_LOGIN`, runbooks `okta-outage`,
+`write-back-failed`, `model-drift`. Where the build differs from the v3 plan: `PROJECT_CONTEXT_3.md` §4a.
+
+### 1.2a What v2 removed (vs v1, history)
 
 CloudFront (+ KVS, OAC, us-east-1 WAF/cert, origin-verify secret, S3 frontend bucket), RDS instance,
 ElastiCache Valkey, SQS FIFO + DLQ, `whatif-worker` / `optimizer-worker` services, MWAA + data-trigger
 Lambda + DAGs + `data.yml`, MLflow/Unity Catalog model aliases, `genai-gateway` ECS service and the
 old `bedrock` module. Modules deleted: `rds`, `elasticache`, `sqs`, `edge`, `mwaa`, `data-trigger`,
-`bedrock`.
+`bedrock`. (v3 brought back an RDS instance and a standard SQS queue as new modules `rds`, `run-queue`.)
 
-### 1.3 Where the build differs from the v2 plan (simpler default chosen)
+### 1.3 Where the build differs from the v2 plan (simpler default chosen; Cognito rows no longer apply in v3)
 
 | Plan | Built |
 |---|---|
@@ -85,7 +102,7 @@ old `bedrock` module. Modules deleted: `rds`, `elasticache`, `sqs`, `edge`, `mwa
 | Evaluation states baseline → channel lift → title adjustment | One evaluation Processing job (`evaluate` argument); the three stages are inside the data scientists' code |
 | Optimizer reads the approved model from the registry | `model-governance.yml` publishes the approved curves to `models/curves/<bu>/` on approval; the optimizer reads that prefix |
 
-### 1.4 Slide services (`wbd_Presentation.pptx`) vs this repo
+### 1.4 Slide services (`wbd_Presentation.pptx`, still true for `wbd_Presentation_3.pptx` – Okta, RDS, SQS and the dispatcher Lambda are built) vs this repo
 
 Every AWS service on both slides is created by Terraform (data platform and GenAI parts built but
 off). **Not created by this repo:** ACM certificate (WBD issues it; `alb_certificate_arn`, expiry
@@ -107,18 +124,20 @@ Databricks or model code.
 | Repository layout | Single repo (infra + pipelines + ecs + data hooks + docs) | |
 | Account security baseline | CloudTrail, GuardDuty, Security Hub, Config, SCPs, … **owned by WBD, only verified** | `docs/01` |
 | Terraform state lock | S3 native lock file (`use_lockfile = true`) | `infra/bootstrap/README.md` |
-| Front door | **No CloudFront.** Public ALB + regional WAF; `alb_ingress_cidrs` default `0.0.0.0/0` (WAF + Cognito protect it); set WBD ranges to restrict | `infra/modules/alb`, `waf-regional` |
-| Sign-in | **Cognito federated to Okta via SAML** (ALB-native, no app secret in the UI); MFA in Okta; groups via SAML attribute `groups` → `custom:groups` | `docs/04` |
+| Front door | **No CloudFront.** Public ALB + regional WAF; `alb_ingress_cidrs` default `0.0.0.0/0` (WAF + Okta sign-in protect it); set WBD ranges to restrict | `infra/modules/alb`, `waf-regional` |
+| Sign-in | **Okta OIDC at the ALB** (`authenticate-oidc`, scopes `openid profile email groups`), one Okta OIDC web app per env; client secret in `mmm/<env>/okta/alb-client` read by a Terraform data source (lands in the encrypted state); `okta_sign_in_enabled` switch, 503 until on; MFA in Okta; groups claim `groups` | `docs/04` |
 | App DNS | Route 53 alias only if `route53_zone_id` is set; otherwise WBD DNS adds the CNAME from `dns_records_for_wbd` | `docs/01` |
 | UI hosting | **`ui` ECS Fargate container** (`/healthz`), image `mmm/ui` | `ecs/dev/ui.json` |
-| Database | **Aurora PostgreSQL Serverless v2** 16.6 + RDS Proxy (IAM auth, TLS). dev 1 × 0.5–4 ACU; staging 2 × 0.5–16; prod 2 × 1–32 | `infra/modules/aurora` |
-| Cache / queue | **None.** Step Functions executions replace the queue (idempotent by `run_id`); progress = DescribeExecution + run row in Aurora | `optimization.tf` |
-| Optimization engine | Step Functions → SageMaker Processing (`createProcessingJob.sync`) → Lambda publisher (`live` alias) | `optimization.tf` |
+| Database | **RDS PostgreSQL** 16.6 + RDS Proxy (IAM auth, TLS). dev `db.t4g.medium` Single-AZ 50 GiB, staging `db.r6g.large` Multi-AZ 100 GiB, prod `db.r6g.xlarge` Multi-AZ 200 GiB; gp3 + storage autoscaling; PITR 7 / 14 / 35 days; DB snapshot before prod migrations | `infra/modules/rds` |
+| Cache / queue | No cache. **Standard SQS run queue + DLQ** (KMS key `sqs`; visibility 360 s, maxReceiveCount 10 → DLQ after ~60 min); dispatcher Lambda keeps running executions ≤ `max_concurrent_runs` (5 / 20 / 50, soft limit, SSM, change applies within a minute); requests older than `max_queue_wait_minutes` (30, allowed 5–50) are dropped with metric `ExpiredRunRequests`; `0` pauses new runs | `run-queue.tf`, `infra/modules/run-queue` |
+| Optimization engine | API → SQS → dispatcher → Step Functions (execution name = `run_id`) → SageMaker Processing (`createProcessingJob.sync`) → Lambda publisher (`live` alias) | `optimization.tf` |
 | SageMaker image versions | SSM pointer `/mmm/<env_short>/images/sagemaker-*` = `<registry>/<repo>@<digest>`, written by `deploy.yml`; Terraform ignores the value | `optimization.tf`, `deploy.yml` |
 | Instance types | `ml.m5.xlarge` (optimizer / evaluation), `ml.m5.2xlarge` (training); no warm pools | `terraform.tfvars` |
 | Autoscaling | CPU target tracking 60 % for api and ui (dev 1–2 / 1–2, stg 2–4 / 2–3, prd 3–10 / 2–6) | `ecs.tf` |
 | Data orchestration | **No MWAA.** EventBridge Scheduler (per BU) + on-demand `mmm.refresh` event → Step Functions HTTP Task → Databricks Jobs API via an **EventBridge connection** (OAuth) | `data.tf` |
-| Model registry | **SageMaker Model Registry** per BU (`<prefix>-<bu>`); eval role can only reject; approve role (GitHub Environment `<env>-model-promotion`) approves and publishes curves to `models/curves/<bu>/`; rollback re-approves the previous version | `docs/10` §7 |
+| Model registry | **SageMaker Model Registry** per BU (`<prefix>-<bu>`); eval role can only reject; approve role (GitHub Environment `<env>-model-promotion`) approves, publishes curves to `models/curves/<bu>/` and the drift baseline to `models/baseline/<bu>/`, and writes `approval.json` next to `evaluation.json`; rollback re-approves the previous version (curves + baseline) | `docs/10` §7 |
+| Write-back | After `RegisterModel`, the model-refresh state machine runs the Databricks write-back job (`databricks_writeback_job_id`; parameters business_unit, refresh_id, results_uri, model_package_arn); failure → `WritebackFailed`, the registered model stays | `data.tf`, `data/README.md` |
+| Drift monitor | `mmm-<env>-model-monitor`: export (refresh job, `purpose=monitor`) → `CheckDrift` (training image, writes `drift.json` `{"score":0-1,"checks":{}}`) → metric `MMM/Models ModelDrift` → alarm `<prefix>-model-drift-<bu>`; threshold `drift.threshold` (0.2) in `data/model-thresholds.yaml`; daily schedule `mmm-<env_short>-drift-<bu>`, off until the first baseline; `auto_refresh_on_drift = false` (alert only) | `data.tf`, `docs/10` §3b |
 | Databricks code | Asset Bundle in `data/databricks/` (data engineers) deployed by `databricks.yml` with GitHub OIDC federation | `docs/10` |
 | GenAI (Release 2) | Built but **off** (`enable_genai = false`): private API Gateway + proxy Lambda; Bedrock guardrail on every call | `docs/12` |
 | Data platform | Built but **off** (`enable_data_platform = false`); per-BU KMS keys `s3-<bu>` come with it | `docs/10` |
@@ -132,7 +151,8 @@ Databricks or model code.
 ## 3. How the user wants to work (keep to this)
 
 1. **Plan first, code later.** New requirement: review → plan + architecture + open questions →
-   the user verifies → only then implement. ("Don't add any code unless I verify.")
+   the user verifies → only then implement. ("Don't add any code unless I verify.") The user wants
+   the project complete *before* the client values arrive – placeholders + defaults, everything else done.
 2. **DevOps only.** Never write api / ui / data-engineering / model code.
 3. **Open points:** implement the **simpler, industry-standard default**, record it as an open
    question for WBD, keep going. If something is truly blocking, ask – the user provides it.
@@ -198,16 +218,17 @@ uvx --from shellcheck-py shellcheck scripts/*.sh        # on an LF copy, see sec
 .\scripts\secret-scan.ps1
 ```
 
-Mock-plan results on 5 Nov 2026 (resources to add):
+Mock-plan results on 6 Nov 2026, v3 (resources to add):
 
 | Env | Default | All optional features on |
 |---|---|---|
-| dev | 297 | 430 |
-| staging | 314 | 449 |
-| prod | 314 | 451 |
+| dev | 311 | 459 |
+| staging | 326 | 476 |
+| prod | 326 | 478 |
 
-Last run (5 Nov 2026): all of the above clean (Checkov 0 failed; accepted findings have a
-`#checkov:skip=<ID>:<reason>` comment).
+Last run (6 Nov 2026, v3): all of the above clean – 24 modules validate, tflint 0, Checkov 1323
+passed / 0 failed (accepted findings have a `#checkov:skip=<ID>:<reason>` comment), actionlint 0,
+shellcheck 0, secret scan clean, `python scripts\model_governance.py --thresholds data\model-thresholds.yaml check-thresholds` OK.
 
 ---
 
@@ -216,15 +237,15 @@ Last run (5 Nov 2026): all of the above clean (Checkov 0 failed; accepted findin
 | Area | Content |
 |---|---|
 | Bootstrap | `infra/bootstrap`: state bucket (versioned, KMS, TLS-only), KMS key |
-| Modules (`infra/modules`) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, **aurora**, ecs-cluster, alb, ecs-service, **cognito**, **waf-regional**, **step-functions**, **sagemaker**, **lambda-function**, monitoring, log-shipping, backup, databricks-access, **bedrock-guardrails**, **llm-gateway** (bold = new in v2). Each has a README |
-| Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets, Aurora), `frontdoor.tf` (Cognito, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (SSM image pointers, SageMaker role, publisher Lambda, optimization state machine), `data.tf` (Databricks access + connection, training side, model-refresh state machine, schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
+| Modules (`infra/modules`, 24) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, **rds**, ecs-cluster, alb, ecs-service, waf-regional, step-functions, **run-queue**, sagemaker, lambda-function, monitoring, log-shipping, backup, databricks-access, bedrock-guardrails, llm-gateway (bold = new in v3). Each has a README |
+| Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets, RDS), `frontdoor.tf` (Okta OIDC on the ALB, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (SSM image pointers, SageMaker role, publisher Lambda, optimization state machine), `run-queue.tf` (run queue, dispatcher, SSM run limit), `data.tf` (Databricks access + connection, training side, model-refresh state machine with write-back, model-monitor state machine, refresh + drift schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
 | ECS templates | `ecs/<env>/api.json`, `ui.json`, `migrate.json` |
-| Workflows | `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer, training, publisher; promotion, prod Aurora snapshot, migration, smoke, optimization dry run in dev/staging, rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role), `databricks`, `model-governance`, `repo-checks`. **All actions pinned to commit SHAs** (`@<sha> # vX.Y.Z`; Dependabot updates them) |
-| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, Aurora CPU / ACU / connections / free local storage / replica lag (stg, prd), what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors, cert expiry, model refresh overdue (7 days), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization, aurora, cost (+ training, genai). Events: ECS deploy failed / service error, GuardDuty High, break-glass, backup job failed, model package state |
-| Backup | Aurora + `results`, `approved-worm`, `models`, and with the data platform `training-data`, `lakehouse` (lakehouse cost to confirm) |
-| Scripts | `smoke.sh` (health + Cognito redirect), `dry-run-optimization.sh` (post-release `dry_run` execution), `deploy-components.sh`, `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh`, `model_governance.py` (SageMaker registry), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py`, `setup-github.ps1` (`-DatabricksClientId`), `sync-environments.ps1`, `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1`, `secret-scan.ps1` |
-| Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed, model refresh failed, Cognito/Okta outage, DB restore, ECS task stuck, rotation, pipeline failure, model rollback, GenAI, security incident, break-glass) |
-| Requirement doc tools | `docs/requirements/tools/` – `extract_pptx.py` (slide text + images), `extract.py` (v1 docx/xlsx dump), `build_v2.py` (generates the `_2` xlsx/docx), `check_v2.py`; README explains use |
+| Workflows | `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer, training, publisher; promotion, prod RDS snapshot (`DB_INSTANCE_ID`), migration, smoke (Okta redirect when `SMOKE_CHECK_LOGIN`), optimization dry run through the run queue in dev/staging, rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role; also on `data/model-thresholds.yaml`), `databricks`, `model-governance` (curves + baseline + `approval.json`), `repo-checks`. **All actions pinned to commit SHAs** (`@<sha> # vX.Y.Z`; Dependabot updates them) |
+| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, RDS CPU / free storage / connections / read + write latency, run queue (`runs-oldest-request`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, `runs-expired-requests`), `model-drift-<bu>`, `model-monitor-failed`, what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors, cert expiry, model refresh overdue (7 days), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization (+ run queue), rds, cost (+ training with drift, genai). Events: ECS deploy failed / service error, GuardDuty High, break-glass, backup job failed, model package state |
+| Backup | RDS instance (native PITR + AWS Backup) + `results`, `approved-worm`, `models`, and with the data platform `training-data`, `lakehouse` (lakehouse cost to confirm) |
+| Scripts | `smoke.sh` (health + Okta redirect when `SMOKE_CHECK_LOGIN`), `dry-run-optimization.sh` (post-release dry run sent to the run queue), `deploy-components.sh`, `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh` (queue, RDS Proxy), `model_governance.py` (SageMaker registry, thresholds incl. `drift`, baseline, `approval.json`), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py`, `setup-github.ps1` (`-DatabricksClientId`), `sync-environments.ps1`, `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1`, `secret-scan.ps1` |
+| Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed incl. DLQ redrive, model refresh failed, write-back failed, model drift, Okta outage, DB restore (RDS), ECS task stuck, rotation incl. Okta secret, pipeline failure, model rollback, GenAI, security incident, break-glass); `data/README.md` = evaluation, write-back and monitor contracts |
+| Requirement doc tools | `docs/requirements/tools/` – `extract_pptx.py` (slide text + images), `extract.py` (v1 docx/xlsx dump), `build_v3.py` (generates the `_3` xlsx/docx; `build_v2.py` / `check_v2.py` for v2), `build_client_questions.py` (generates `devops_3_client_question.xlsx`); README explains use |
 
 v1 defects D1–D4 are fixed: Trivy `version:` on every trivy-action, drift job skips without role,
 skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`wbd-aws-devops`.
@@ -237,12 +258,16 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 
 | # | Question | Default implemented |
 |---|---|---|
-| Q1 | ALB reachable from the internet or only WBD ranges? Shield Advanced? | Internet + WAF + Cognito; `alb_ingress_cidrs` to restrict; no Shield Advanced |
-| Q2 | Throttling for 50–150 planners without SQS | Step Functions retries on SageMaker limits + app-side concurrency limit per user |
+| Q1 | ALB reachable from the internet or only WBD ranges? Shield Advanced? | Internet + WAF + Okta sign-in; `alb_ingress_cidrs` to restrict; no Shield Advanced |
+| Q2 | Optimization runs at the same time; fairness between BUs; queue wait | Run queue, soft limit 5 / 20 / 50, order of arrival, 30 min wait; per-user limits app side |
 | Q3 | External LLM providers = data leaves AWS | Behind `enable_genai` + guardrail PII masking/blocking; needs written WBD approval |
 | Q4 | Databricks workspace IP access list must allow Step Functions HTTP calls | Confirm with WBD Databricks |
-| Q5 | Okta: SAML app per env, group names | `groups` attribute; names `mmm-bu-*` / `mmm-role-*` (docs/04, 06) |
+| Q5 | Okta: OIDC app per env, issuer, group names, logout with `client_id` | `groups` claim; names `mmm-bu-*` / `mmm-role-*` (docs/04, 06); Okta logout URL with `client_id` (to confirm) |
 | Q6 | Separate Databricks service principal for bundle deploy (`DATABRICKS_CLIENT_ID`) vs the refresh SP | Two SPs recommended |
+| Q7 | Okta client secret in the encrypted Terraform state | Accepted; read from Secrets Manager, state bucket KMS + restricted |
+| Q8 | RDS sizes, Multi-AZ, read replica | As in section 2; no read replica; resize after the load test |
+| Q9 | Write-back scope (every version or only approved) and Gold tables | Every registered version keyed by `refresh_id` + version, approval status from `approval.json`; `gold.<bu>_model_results` |
+| Q10 | Drift definition, threshold, schedule, auto-retrain | Score 0–1, threshold 0.2, daily, alert only |
 
 ### 6.2 Gaps (still open)
 
@@ -253,13 +278,17 @@ business-continuity page, shared account decision.
 App contract added on 5 Nov 2026 (the app teams must implement): `DRY_RUN` env in the optimizer
 image and `dry_run` in the publisher event; metrics `OptimizeDurationMs` (`RunSize` standard/large,
 from the publisher) and `GenAITokens` (`BusinessUnit`, from the API) – see `infra/modules/monitoring/README.md`.
+Added in v3: the API sends run requests to `OPTIMIZATION_QUEUE_URL` (message contract in
+`infra/modules/run-queue/README.md`) and validates Okta tokens against `OKTA_ISSUER`; the training image
+writes `baseline/`, `predictions/`, `lift/` and has a `drift` entrypoint; the Databricks bundle has the
+write-back job and the `purpose=monitor` export – contracts in `data/README.md`.
 
 ### 6.3 Not in this repo but needed before a real deployment works
 
 - App code: `apps/api`, `apps/ui`, `apps/sagemaker-optimizer`, `apps/sagemaker-training`,
   `apps/results-publisher`, and the Databricks bundle `data/databricks/`. Until then the CI jobs
   skip and there is nothing to deploy.
-- Real values (section 7), issued ACM certificate, WBD DNS record, Okta SAML apps.
+- Real values (section 7), issued ACM certificate, WBD DNS record, Okta OIDC apps (client ID + secret).
 - Dependabot PRs open: #1 (10 GitHub Actions updates), #2 (2 Python updates in `scripts/`) – merge when green.
 
 ### 6.4 How the app teams plug in (same repo, own folders)
@@ -267,11 +296,11 @@ from the publisher) and `GenAITokens` (`BusinessUnit`, from the API) – see `in
 | Team | Folder | Pipeline | Must provide |
 |---|---|---|---|
 | Frontend | `apps/ui` | `ui-ci.yml` | Dockerfile (nginx, non-root), `/healthz` |
-| Backend (API, LangGraph, QA dashboard) | `apps/api` | `api-ci.yml` | Dockerfile, `/api/health`, Alembic migrations, PostgreSQL RLS per BU, StartExecution of the optimization, `GenAITokens` metric |
+| Backend (API, LangGraph, QA dashboard) | `apps/api` | `api-ci.yml` | Dockerfile, `/api/health`, Alembic migrations, PostgreSQL RLS per BU, run row `QUEUED` + SQS message to the run queue, Okta token check (`OKTA_ISSUER`, ALB `x-amzn-oidc-data`), `GenAITokens` metric |
 | Data science – optimizer | `apps/sagemaker-optimizer` | `optimizer-ci.yml` | Processing image: reads `runs/<run_id>/input/` + `curves/<bu>/`, writes `runs/<run_id>/`, honours `DRY_RUN` |
-| Data science – training / evaluation | `apps/sagemaker-training` | `training-ci.yml` | Training image + `evaluate` argument writing `evaluation.json`; real limits in `data/model-thresholds.yaml` |
-| Results publisher | `apps/results-publisher` | `publisher-ci.yml` | Lambda writing to Aurora, honours `dry_run`, `OptimizeDurationMs` with `RunSize` |
-| Data engineering | `data/databricks/` | `databricks.yml` | Asset Bundle (Lakeflow Bronze → Gold, feature export) writing Parquet + metadata to `training-data/<bu>/<refresh_id>/` |
+| Data science – training / evaluation | `apps/sagemaker-training` | `training-ci.yml` | Training image + `evaluate` argument writing `evaluation.json`, `curves/`, `baseline/`, `predictions/`, `lift/`; `drift` entrypoint writing `drift.json`; real limits in `data/model-thresholds.yaml` |
+| Results publisher | `apps/results-publisher` | `publisher-ci.yml` | Lambda writing to RDS PostgreSQL (via RDS Proxy), honours `dry_run`, `OptimizeDurationMs` with `RunSize` |
+| Data engineering | `data/databricks/` | `databricks.yml` | Asset Bundle (Lakeflow Bronze → Gold, feature export) writing Parquet + metadata to `training-data/<bu>/<refresh_id>/`; `purpose=monitor` export to `lakehouse/monitoring/<bu>/<date>/`; write-back job into Gold |
 
 DevOps owns `infra/`, `ecs/`, `.github/`, `scripts/`, `docs/` (protect with CODEOWNERS once team names
 are known). DevOps to-do with the teams: starter Dockerfile skeletons with health checks, dev access
@@ -295,7 +324,7 @@ elevation per change ticket; `ReadOnly` everywhere; `SecurityAudit` in prod.
 | Bootstrap + GitHub OIDC provider + `gha-*` roles (needs IAM create) | Once per account: WBD Cloud runs `infra/bootstrap` + first apply, or gives time-limited elevation under a change ticket; afterwards the permission boundary limits the roles to `mmm-*` |
 | Secret values | Not needed – RDS-managed DB password, apps read via task roles, owners fill their own secrets; ask for `PutSecretValue` on `mmm/<env>/*`, `GetSecretValue` in dev only |
 | App URL / DNS / certificate | Output `dns_records_for_wbd` → WBD DNS team; ACM certificate issued by WBD, ARN into tfvars |
-| Okta SAML app | Output `okta_app_settings` → WBD Identity team → metadata URL |
+| Okta OIDC app | Output `okta_app_settings` → WBD Identity team → issuer + client ID (tfvars); they or DevOps put the client secret in `mmm/<env>/okta/alb-client` |
 | Quotas, GuardDuty / CloudTrail / Config, Databricks admin, GitHub repo admin | Quota request (WBD Cloud approves); account baseline; WBD Databricks admins; repo admin for `setup-github.ps1` |
 | External URLs (LLM providers, Splunk, Databricks) | Egress via NAT, allow-list / proxy by WBD network team; on the VDI set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` |
 | Service-to-service access | Already in code: per-service IAM roles (API task, SageMaker, Step Functions, publisher) |
@@ -309,12 +338,12 @@ all of the above – most items are already in `docs/01-client-inputs-tracker.md
 
 ## 7. Values to collect from the client and where they go
 
-**Send to WBD:** `docs/requirements/devops_2_client_question.xlsx` – 44 inputs only WBD can provide
-(accounts and access, network, domain / certificate / Okta, GitHub and approvals, operations,
-Databricks and data, GenAI) with dev / staging / prod columns, plus sheet `decisions_to_confirm`
-(Q1–Q6, lakehouse backup cost, shared account). Generated by
-`docs/requirements/tools/build_client_questions.py`; once WBD fills it in, edit the workbook directly.
-Things DevOps creates (state bucket, KMS, Cognito pool and domain prefix, roles, buckets) are not in it.
+**Send to WBD:** `docs/requirements/devops_3_client_question.xlsx` – 49 inputs only WBD can provide
+(accounts and access, network, domain / certificate / Okta OIDC, GitHub and approvals, operations incl.
+RDS sizing and run limits, Databricks and data incl. write-back job and drift, GenAI) with dev /
+staging / prod columns, plus sheet `decisions_to_confirm` (Q1–Q10, lakehouse backup cost, shared
+account). Generated by `docs/requirements/tools/build_client_questions.py`; once WBD fills it in,
+edit the workbook directly. Things DevOps creates (state bucket, KMS, roles, buckets, queue) are not in it.
 
 Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholder:
 `git grep -n -A1 "add actual value"`. Edit each environment's `terraform.tfvars` separately.
@@ -324,10 +353,10 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 | Accounts, region | `aws_account_id`, `aws_region`, `allowed_regions`, `dr_region`, `backend.tf`, `infra/bootstrap/<env>.tfvars` |
 | Network | `vpc_cidr`, `availability_zone_ids`, `enable_nat_gateway`, TGW / resolver values |
 | Front door | `app_domain_name`, `alb_certificate_arn` (workload region, ISSUED), `alb_ingress_cidrs`, `route53_zone_id` (optional), `geo_allow_countries`, `waf_count_only` |
-| Sign-in | `okta_saml_metadata_url` (one Okta SAML app per env), `cognito_domain_prefix`, `session_hours`; after apply give WBD Okta `terraform output okta_app_settings` |
-| Database | `aurora_min_acu`, `aurora_max_acu` (`aurora_engine_version`) |
-| Optimization | `optimizer_instance_type`, `optimizer_max_runtime_seconds` |
-| Data platform | `databricks_host`, `databricks_account_id`, `databricks_privatelink_service_name`, `databricks_sp_client_id`, `databricks_refresh_job_id`, `training_instance_type`, `model_refresh_schedule` / `_timezone`, `enable_model_refresh_schedule`, `training_data_retention_days`, `data/model-thresholds.yaml`, then `enable_data_platform = true` (UC role two-phase) |
+| Sign-in | `okta_issuer`, `okta_client_id` (one Okta OIDC app per env; give WBD Okta `terraform output okta_app_settings`), `session_hours`; secret `mmm/<env>/okta/alb-client`, then `okta_sign_in_enabled = true` and re-run `setup-github.ps1` |
+| Database | `rds_instance_class`, `rds_allocated_storage`, `rds_max_allocated_storage`, `rds_multi_az` (`rds_engine_version`) |
+| Optimization | `optimizer_instance_type`, `optimizer_max_runtime_seconds`, `max_concurrent_runs`, `max_queue_wait_minutes` |
+| Data platform | `databricks_host`, `databricks_account_id`, `databricks_privatelink_service_name`, `databricks_sp_client_id`, `databricks_refresh_job_id`, `databricks_writeback_job_id`, `training_instance_type`, `model_refresh_schedule` / `_timezone`, `enable_model_refresh_schedule`, `model_monitor_schedule`, `enable_model_monitor_schedule` (after the first approval), `model_drift_threshold`, `auto_refresh_on_drift`, `training_data_retention_days`, `data/model-thresholds.yaml` (incl. `drift.threshold`), then `enable_data_platform = true` (UC role two-phase) |
 | GenAI | `llm_providers`, `genai_token_quotas`, `genai_reserved_concurrency`, guardrail thresholds, `manage_apigw_account_logging_role`, then `enable_genai = true` |
 | Monitoring, budgets, backup | `alert_emails`, `budget_alert_emails`, `monthly_budget_usd`, `splunk_hec_endpoint`, `approved_worm_lock_mode` (irreversible for COMPLIANCE), `approved_worm_retention_days`, prod `enable_vault_lock` / `enable_cross_region_copy` |
 | GitHub | reviewer teams/users, model approvers, `-DatabricksClientId`, change-ticket pattern |
@@ -338,7 +367,8 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 
 | Secret / credential | Filled by | When |
 |---|---|---|
-| Aurora admin password | RDS-managed, auto-rotated | automatic |
+| RDS admin password | RDS-managed, auto-rotated | automatic |
+| `mmm/<env>/okta/alb-client` (`{"client_secret": "..."}`) | WBD Identity or DevOps (never by email) | before `okta_sign_in_enabled = true`; rotation in `docs/runbooks/rotation.md` |
 | `mmm/<env>/rds/migrate`, `rds/proxy`, `api/db` | DB bootstrap task (`enable_db_bootstrap = true`, apply, run `terraform output -raw db_bootstrap_run_command`, set back to `false`) | before the first migration |
 | Databricks client secret | DevOps, on the EventBridge connection `<prefix>-databricks` (`aws events update-connection`, docs/05) | data platform |
 | `mmm/<env>/splunk/hec` | WBD Splunk team | before `enable_splunk_shipping = true` |
@@ -356,12 +386,13 @@ GitHub needs **no secrets** (OIDC). Details: `docs/05`.
   (WBD model approvers, `main` only).
 - **Environment variables** (`terraform output github_environment_variables`, set by `setup-github.ps1`):
   `AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_PUSH_ROLE_ARN, TF_PLAN_ROLE_ARN, TF_APPLY_ROLE_ARN, ECR_REGISTRY,
-  ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, AURORA_CLUSTER_ID, PUBLISHER_FUNCTION,
-  OPTIMIZATION_STATE_MACHINE_ARN, SAGEMAKER_IMAGE_PARAM_PREFIX, GENAI_ENABLED` (+ `MODEL_REFRESH_STATE_MACHINE_ARN`,
-  `DATABRICKS_HOST` with the data platform; `DATABRICKS_CLIENT_ID` via `-DatabricksClientId`);
-  dev/staging also `RESULTS_BUCKET, MODELS_BUCKET, DRY_RUN_BUSINESS_UNIT` (dry run);
-  staging/prod also `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY`. Optional `SMOKE_BASE_URL`,
-  `SMOKE_CHECK_LOGIN`, `SMOKE_DRY_RUN`, `CHANGE_TICKET_PATTERN`.
+  ECS_CLUSTER, APP_URL, APP_SUBNET_IDS, DATA_CLIENTS_SG_ID, DB_INSTANCE_ID, PUBLISHER_FUNCTION,
+  OPTIMIZATION_STATE_MACHINE_ARN, OPTIMIZATION_QUEUE_URL, SMOKE_CHECK_LOGIN, SAGEMAKER_IMAGE_PARAM_PREFIX`
+  (+ `MODEL_REFRESH_STATE_MACHINE_ARN`, `DATABRICKS_HOST` with the data platform; `DATABRICKS_CLIENT_ID`
+  via `-DatabricksClientId`); dev/staging also `RESULTS_BUCKET, MODELS_BUCKET, DRY_RUN_BUSINESS_UNIT`
+  (dry run); staging/prod also `SOURCE_ECR_READ_ROLE_ARN, SOURCE_ECR_REGISTRY`. Optional
+  `SMOKE_BASE_URL`, `SMOKE_DRY_RUN`, `CHANGE_TICKET_PATTERN`. `SMOKE_CHECK_LOGIN` follows
+  `okta_sign_in_enabled` – re-run `setup-github.ps1` after turning sign-in on.
 - **Repository variables** (`github_repository_variables`): `AWS_REGION`, `TF_PLAN_ROLE_ARN_<ENV>`
   (+ `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` with the data platform).
 
@@ -384,7 +415,10 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 |---|---|
 | Network share | The UNC project path is slow; `Select-String` fails on it (use the editor search). Run shell commands from `C:\Users\yn` with absolute paths. For Terraform, tflint, Checkov use the local copy `C:\work\wbd` (section 4.2) |
 | PATH | Every new PowerShell needs the PATH line from section 4.1 |
-| Mock plan | Takes ~7–12 min; run it in the background |
+| Mock plan | Takes ~5–12 min; run it in the background **in-process** (`& .\scripts\mock-plan.ps1 -Environment dev,staging,prod`) – `powershell -File ... -Environment dev,staging,prod` passes one string and fails the ValidateSet. The script sets `$ErrorActionPreference = 'Continue'` around terraform (Windows PowerShell 5.1 otherwise stops on the first stderr line). The all-features run catches type errors that `validate` misses (e.g. a conditional returning a tuple or `[]`: use `try(map[key], [])`) |
+| PowerShell bulk edits | Inside `@( ... )`, `'a' + "`n" + 'b'` is split by the comma operator and silently drops text. Use the editor's replace tool, or one double-quoted string with `` `n ``; check with `git --no-pager diff -U0` |
+| Deleting folders | Recursive delete on the share: a single `-LiteralPath`, or `git rm -r` then `git reset` to keep it unstaged |
+| Robocopy mirror | The auto-review asks for approval for `robocopy /MIR` to `C:\work\wbd` – approve it in the card (it is the scratch copy) |
 | Checkov | Accepted findings get `#checkov:skip=<ID>:<reason>` inside the resource (same style as existing ones) |
 | Shellcheck | Local files have CRLF: strip `\r` into a temp copy first, otherwise every line reports SC1017. CI checks the LF version in Git |
 | Line endings | `.gitattributes` normalizes; CRLF/LF warnings on `git add` are expected |
@@ -392,7 +426,8 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | git push | Git cannot prompt for a password here. Push with the `gh` login: `git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin main` |
 | Push approval | The agent's auto-review blocks pushes to `main`; the user approves the push in the approval card |
 | App CI | Editing a workflow file triggers its CI; app CIs skip while `apps/<name>` is absent and `deploy.yml` then skips too |
-| Requirement docs | xlsx/docx are generated, not hand-edited: edit `docs/requirements/tools/build_v2.py` and re-run it (`uv run --no-project --with openpyxl --with python-docx python build_v2.py <docs/requirements>`) |
+| Requirement docs | xlsx/docx are generated, not hand-edited: edit `docs/requirements/tools/build_v3.py` and re-run it (`uv run --no-project --with openpyxl --with python-docx python build_v3.py <docs/requirements>`) |
+| model_governance.py | Global option before the command: `python scripts\model_governance.py --thresholds data\model-thresholds.yaml check-thresholds` |
 | Slides as images | Client decks are mostly images: `extract_pptx.py` saves them; read the images to see the diagrams |
 | Python helpers | `uv run --no-project --with <pkg> python <script>` – no installs needed |
 
@@ -400,18 +435,26 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 11. Next steps
 
-### 11.1 Process for the next requirement (requirement 3)
+### 11.0 Right now (after session 19)
+
+1. **Commit and push v3 when the user asks** (one commit is fine: "v3: Okta OIDC, RDS PostgreSQL, run
+   queue, write-back, drift monitor"); new `.sh` files: none in v3. Then watch the push workflows
+   (terraform plan matrix, repo-checks, actionlint) and fix anything red.
+2. Send `devops_3_client_question.xlsx` to WBD.
+
+### 11.1 Process for the next requirement (requirement 4)
 
 1. **Read the new document** (`docs/requirements/tools/extract_pptx.py` for slides, read the images).
 2. **Compare with what is built** (sections 1–5 of this file, `infra/modules/README.md`): replacement
    map removed / replaced / new / kept.
-3. **Write the plan files** `docs/requirements/devops_plan_3.txt`, `PROJECT_CONTEXT_3.md` and generate
-   `aws_resource_list_3.xlsx` + `wbd_mmm_ecs_final_3.docx` (copy `tools/build_v2.py` → `build_v3.py`).
+3. **Write the plan files** `docs/requirements/devops_plan_4.txt`, `PROJECT_CONTEXT_4.md` and generate
+   `aws_resource_list_4.xlsx` + `wbd_mmm_ecs_final_4.docx` (copy `tools/build_v3.py` → `build_v4.py`).
    Mark open points `[ASK]`, assumptions `[ASM]`. **Stop for the user's verification.**
 4. **Implement**: new/changed modules (each with a README) → dev stack (`infra/environments/dev`,
    `ecs/dev`) → `sync-environments.ps1` → workflows, scripts, docs, runbooks. Delete what is unused.
 5. **Validate** (section 4.3), update the expected mock-plan counts.
-6. **Update** the `_3` files with what was built (status, decisions, differences) and this file.
+6. **Update** the `_4` files with what was built (status, decisions, differences), the client
+   question workbook, and this file.
 7. **Push when asked**, then check the GitHub Actions runs and fix anything red.
 
 ### 11.2 Order of work once the client values arrive
@@ -419,15 +462,17 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 1. Fill dev values (section 7) – `terraform.tfvars`, `infra/bootstrap/dev.tfvars`, `backend.tf`.
 2. `aws configure sso` for dev (`docs/02`); `aws sts get-caller-identity`.
 3. Bootstrap state; copy bucket and `state_kms_key_arn` into `backend.tf` / tfvars.
-4. ACM certificate ISSUED in the workload region; Okta SAML app metadata URL from WBD.
-5. First apply of dev from the laptop. Confirm the SNS email subscriptions.
-6. Give WBD DNS `dns_records_for_wbd` and WBD Okta `okta_app_settings`.
+4. ACM certificate ISSUED in the workload region; Okta issuer + client ID from WBD.
+5. First apply of dev from the laptop (sign-in off: the ALB answers 503). Confirm the SNS email subscriptions.
+6. Give WBD DNS `dns_records_for_wbd` and WBD Okta `okta_app_settings`; client secret into
+   `mmm/<env>/okta/alb-client`; `okta_sign_in_enabled = true`; apply.
 7. `setup-github.ps1` for dev → Terraform runs from GitHub Actions from now on.
 8. DB bootstrap (section 8).
 9. When the app teams merge `apps/*`: CI builds `sha-<7>` → `deploy.yml` deploys to dev.
 10. Run the "Validate" sections in `infra/environments/dev/README.md`.
 11. Staging (tag `vX.Y.Z-rcN`), then prod (tag `vX.Y.Z` with change ticket).
-12. Data platform values → `enable_data_platform = true` → validate (`docs/10`).
+12. Data platform values → `enable_data_platform = true` → validate (`docs/10`); after the first
+    approved model per BU (baseline published) → `enable_model_monitor_schedule = true`.
 13. Release 1 gate (`docs/11`); Release 2 GenAI only after WBD approval (`docs/12`); handover (`docs/13`).
 
 ---
@@ -453,3 +498,5 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 15 | 5 Nov 2026 | Chat lost on reinstall? Which approach (v1 or v2)? How to work without AWS admin on the VDI | Chat history is local to the machine – continue by attaching this file; recommended v2 (client deck, managed services); section 6.5 (access without admin) added and pushed (`29ee523`); Office lock files ignored (`35b8a47`) |
 | 16 | 5 Nov 2026 | Full project re-read; refresh this file's header | "Last updated" and key commits in section 1 updated and pushed (`ed26c99`) |
 | 17 | 5 Nov 2026 | What must the client provide before starting (only client-owned values), as an Excel | `docs/requirements/devops_2_client_question.xlsx` (44 inputs + 8 decisions) and its generator; section 7 and `docs/01` point to it; `docs/01` pinning row fixed; pushed |
+| 18 | 6 Nov 2026 | Full walkthrough (no code); new requirement `wbd_Presentation_3.pptx` – plan and architecture only | `devops_plan_3.txt`, `PROJECT_CONTEXT_3.md`, `aws_resource_list_3.xlsx`, `wbd_mmm_ecs_final_3.docx`, `tools/build_v3.py` |
+| 19 | 6 Nov 2026 | Implement requirement 3 (remove what is not needed, add new services, pipelines too) so the project is ready before the client values arrive | v3 implemented (sections 1.1, 1.2, 2, 5): Cognito + Aurora removed; Okta OIDC at the ALB, `rds`, `run-queue`, write-back, model monitor + drift alarms, governance baseline + `approval.json`; `deploy.yml`, `terraform.yml`, `model-governance.yml`, smoke / dry run / platform check; docs 00–13, runbooks (3 new), `data/README.md`; bugs found and fixed by the mock plan (dashboard conditional) and in `mock-plan.ps1` (stderr); all offline checks clean; `_3` files updated + `devops_3_client_question.xlsx`. **Not committed** |

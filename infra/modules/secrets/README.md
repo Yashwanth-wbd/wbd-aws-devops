@@ -11,7 +11,7 @@ for one environment. All of it is encrypted with the `secrets` KMS key.
 |---|---|
 | `aws_secretsmanager_secret` per entry in `secrets` | Name `<path_prefix>/<key>`, e.g. `mmm/dev/splunk/hec`; KMS key `alias/mmm-<env>-secrets` |
 | `random_password` + `aws_secretsmanager_secret_version` | Only for entries with `generate = true` |
-| `aws_ssm_parameter` per entry in `parameters` | Name `/<path_prefix>/<key>`, e.g. `/mmm/dev/cognito/client_id`; `String`, or `SecureString` with `secure = true` |
+| `aws_ssm_parameter` per entry in `parameters` | Name `/<path_prefix>/<key>`, e.g. `/mmm/dev/okta/issuer`; `String`, or `SecureString` with `secure = true` |
 
 The secret and parameter names are listed in the environment stack (`infra/environments/<env>/main.tf`),
 not in this module.
@@ -21,8 +21,8 @@ not in this module.
 | Kind | Example | Where the value comes from |
 |---|---|---|
 | Generated (`generate = true`) | none in v2 (supported for future use) | `random_password`, alphanumeric. The value exists only in Secrets Manager and the KMS-encrypted Terraform state. |
-| Container (`generate = false`) | `api/db`, `rds/proxy`, `rds/migrate`, `splunk/hec`, `thirdparty/<vendor>`, `llm/<provider>` (GenAI) | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never reads or overwrites it. |
-| Aurora admin password | – | **Not here.** RDS creates and rotates it itself (`manage_master_user_password`). |
+| Container (`generate = false`) | `api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `splunk/hec`, `thirdparty/<vendor>`, `llm/<provider>` (GenAI) | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never overwrites it. Only `okta/alb-client` is read by the stack (`okta_sign_in_enabled = true`), because the ALB listener needs the client secret; it is then also in the KMS-encrypted state. |
+| RDS admin password | – | **Not here.** RDS creates and rotates it itself (`manage_master_user_password`). |
 | Databricks client secret | – | **Not here.** It lives in the EventBridge connection `<prefix>-databricks` (data platform), set out of band (docs/05). |
 
 - **No secret value is ever a Terraform variable**, and nothing has a `change-me` default.

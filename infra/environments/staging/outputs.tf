@@ -77,15 +77,15 @@ output "bucket_names" {
   value       = merge({ for k, b in module.buckets : k => b.bucket_name }, { logs = module.log_bucket.bucket_name })
 }
 
-output "aurora" {
+output "rds" {
   description = "Database endpoints and secrets (no passwords)."
   value = {
-    cluster_identifier     = module.aurora.cluster_identifier
-    writer_endpoint        = module.aurora.writer_endpoint
-    proxy_endpoint         = module.aurora.proxy_endpoint
-    proxy_resource_id      = module.aurora.proxy_resource_id
-    db_name                = module.aurora.db_name
-    master_user_secret_arn = module.aurora.master_user_secret_arn
+    instance_identifier    = module.rds.instance_identifier
+    endpoint               = module.rds.endpoint
+    proxy_endpoint         = module.rds.proxy_endpoint
+    proxy_resource_id      = module.rds.proxy_resource_id
+    db_name                = module.rds.db_name
+    master_user_secret_arn = module.rds.master_user_secret_arn
   }
 }
 
@@ -105,9 +105,13 @@ output "ecs" {
 }
 
 output "optimization" {
-  description = "Optimization state machine, SageMaker role, image pointers and results publisher."
+  description = "Optimization state machine, run queue, SageMaker role, image pointers and results publisher."
   value = {
     state_machine_arn = module.optimization_sfn.state_machine_arn
+    queue_url         = module.run_queue.queue_url
+    dlq_arn           = module.run_queue.dlq_arn
+    dispatcher        = module.run_queue.dispatcher_function_name
+    max_runs_param    = module.secrets.parameter_names["optimization/max_concurrent_runs"]
     sagemaker_role    = module.sagemaker_optimization.role_arn
     image_parameters  = { for k, p in aws_ssm_parameter.sagemaker_image : k => p.name }
     publisher         = module.publisher.function_name
@@ -138,15 +142,16 @@ output "db_bootstrap_run_command" {
 
 # ------------------------------------------------------------------ Step 8 - Front door and sign-in
 output "front_door" {
-  description = "App URL, ALB, WAF and Cognito values."
+  description = "App URL, ALB, WAF and Okta sign-in values."
   value = {
-    app_url       = local.app_url
-    alb_dns_name  = module.alb.alb_dns_name
-    web_acl_arn   = module.waf.web_acl_arn
-    waf_log_group = module.waf.log_group_name
-    user_pool_id  = module.cognito.user_pool_id
-    client_id     = module.cognito.client_id
-    logout_url    = module.cognito.logout_url
+    app_url        = local.app_url
+    alb_dns_name   = module.alb.alb_dns_name
+    web_acl_arn    = module.waf.web_acl_arn
+    waf_log_group  = module.waf.log_group_name
+    okta_issuer    = local.okta_issuer
+    okta_client_id = var.okta_client_id
+    sign_in        = var.okta_sign_in_enabled ? "okta" : "closed (503 until okta_sign_in_enabled = true)"
+    logout_url     = local.okta_logout_url
   }
 }
 
@@ -156,8 +161,18 @@ output "dns_records_for_wbd" {
 }
 
 output "okta_app_settings" {
-  description = "Values WBD enters in the Okta SAML app of this environment (docs/04)."
-  value       = module.cognito.okta_app_settings
+  description = "Values the WBD Identity team enters in the Okta OIDC app of this environment (docs/04)."
+  value = {
+    application_type         = "OIDC - Web Application"
+    grant_types              = ["authorization_code"]
+    sign_in_redirect_uris    = ["${local.app_url}/oauth2/idpresponse"]
+    sign_out_redirect_uris   = ["${local.app_url}/"]
+    initiate_login_uri       = "${local.app_url}/"
+    scopes                   = ["openid", "profile", "email", "groups"]
+    groups_claim             = { name = "groups", filter = "Starts with mmm-", in = "ID token and userinfo" }
+    client_secret_goes_to    = module.secrets.secret_names["okta/alb-client"]
+    client_secret_json_shape = "{\"client_secret\": \"...\"}"
+  }
 }
 
 # ------------------------------------------------------------------ Step 9 - Monitoring and logging
@@ -169,7 +184,8 @@ output "monitoring" {
     dashboards      = module.monitoring.dashboard_names
     alarms = concat(
       module.monitoring.alarm_names, module.optimization_sfn.alarm_names, [module.publisher.alarm_name],
-      var.enable_data_platform ? module.refresh_sfn[0].alarm_names : [],
+      module.run_queue.alarm_names,
+      var.enable_data_platform ? concat(module.refresh_sfn[0].alarm_names, module.monitor_sfn[0].alarm_names, [for a in aws_cloudwatch_metric_alarm.model_drift : a.alarm_name]) : [],
     )
     event_rules         = module.monitoring.event_rule_names
     splunk_stream       = module.log_shipping.delivery_stream_name
@@ -193,9 +209,12 @@ output "github_environment_variables" {
       ECR_REGISTRY                   = module.ecr.registry
       ECS_CLUSTER                    = module.ecs_cluster.cluster_name
       APP_URL                        = local.app_url
-      AURORA_CLUSTER_ID              = module.aurora.cluster_identifier
+      DB_INSTANCE_ID                 = module.rds.instance_identifier
       PUBLISHER_FUNCTION             = module.publisher.function_name
       OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
+      OPTIMIZATION_QUEUE_URL         = module.run_queue.queue_url
+      # smoke.sh checks the Okta redirect only once sign-in is on (before that the ALB answers 503)
+      SMOKE_CHECK_LOGIN = tostring(var.okta_sign_in_enabled)
       # deploy.yml writes the SageMaker image URIs here
       SAGEMAKER_IMAGE_PARAM_PREFIX = "/mmm/${local.env_short}/images"
     },
@@ -239,7 +258,7 @@ output "backup" {
     plan_id         = module.backup.plan_id
     backup_role_arn = module.backup.backup_role_arn
     selection_tag   = "${module.backup.selection_tag}=true"
-    backed_up       = concat(["aurora:${module.aurora.cluster_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}" if contains(keys(local.data_buckets), b)])
+    backed_up       = concat(["rds:${module.rds.instance_identifier}"], [for b in local.backed_up_buckets : "s3:${module.buckets[b].bucket_name}" if contains(keys(local.data_buckets), b)])
   }
 }
 
@@ -258,6 +277,8 @@ output "data_platform" {
     refresh_state_machine  = module.refresh_sfn[0].state_machine_arn
     refresh_schedules      = [for s in aws_scheduler_schedule.refresh : s.name]
     refresh_event_rule     = aws_cloudwatch_event_rule.refresh_on_demand[0].name
+    monitor_state_machine  = module.monitor_sfn[0].state_machine_arn
+    monitor_schedules      = [for s in aws_scheduler_schedule.monitor : s.name]
     training_role          = module.sagemaker_training[0].role_arn
     model_package_groups   = module.sagemaker_training[0].model_package_group_names
     training_image_pointer = aws_ssm_parameter.sagemaker_image["training"].name

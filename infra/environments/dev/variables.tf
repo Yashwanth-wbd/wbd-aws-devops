@@ -191,7 +191,7 @@ variable "ecr_repositories" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention for service logs (Aurora, ECS, Lambda, Step Functions, SageMaker, WAF)."
+  description = "CloudWatch log retention for service logs (RDS, ECS, Lambda, Step Functions, SageMaker, WAF)."
   type        = number
   default     = 30
 }
@@ -218,20 +218,30 @@ variable "training_data_retention_days" {
   default     = 365
 }
 
-variable "aurora_engine_version" {
-  description = "Aurora PostgreSQL engine version."
+variable "rds_engine_version" {
+  description = "RDS for PostgreSQL engine version."
   type        = string
   default     = "16.6"
 }
 
-variable "aurora_min_acu" {
-  description = "Aurora Serverless v2 minimum capacity (ACU)."
+variable "rds_instance_class" {
+  description = "RDS instance class (db.t4g.medium dev, db.r6g.large staging, db.r6g.xlarge prod)."
+  type        = string
+}
+
+variable "rds_allocated_storage" {
+  description = "Initial gp3 storage in GiB."
   type        = number
 }
 
-variable "aurora_max_acu" {
-  description = "Aurora Serverless v2 maximum capacity (ACU)."
+variable "rds_max_allocated_storage" {
+  description = "Storage autoscaling ceiling in GiB."
   type        = number
+}
+
+variable "rds_multi_az" {
+  description = "Multi-AZ standby (synchronous, automatic failover)."
+  type        = bool
 }
 
 # ------------------------------------------------------------------ ECS and optimization (Step 7)
@@ -271,6 +281,28 @@ variable "optimizer_max_runtime_seconds" {
   default     = 3600
 }
 
+variable "max_concurrent_runs" {
+  description = "Optimization runs allowed at the same time (SSM optimization/max_concurrent_runs, read by the run dispatcher on every batch, so a change applies within a minute without redeploying code). 0 pauses new runs."
+  type        = number
+
+  validation {
+    condition     = var.max_concurrent_runs >= 0 && floor(var.max_concurrent_runs) == var.max_concurrent_runs
+    error_message = "max_concurrent_runs must be a whole number >= 0."
+  }
+}
+
+variable "max_queue_wait_minutes" {
+  description = "A run request still waiting in the queue after this many minutes is dropped (metric ExpiredRunRequests) - the planner resubmits."
+  type        = number
+  default     = 30
+
+  # A waiting request is received again every 6 minutes and moves to the DLQ after 10 receives (~60 min).
+  validation {
+    condition     = var.max_queue_wait_minutes >= 5 && var.max_queue_wait_minutes <= 50
+    error_message = "max_queue_wait_minutes must be 5-50, so requests expire before the run queue moves them to the DLQ."
+  }
+}
+
 # ------------------------------------------------------------------ Step 8 - Front door and sign-in
 variable "app_domain_name" {
   description = "App host name (e.g. mmm-dev.<wbd-domain>); on alb_certificate_arn, CNAME / alias to the ALB."
@@ -283,7 +315,7 @@ variable "alb_certificate_arn" {
 }
 
 variable "alb_ingress_cidrs" {
-  description = "Source ranges allowed to reach the ALB: 0.0.0.0/0 (internet, filtered by the WAF and Cognito) or the WBD egress ranges."
+  description = "Source ranges allowed to reach the ALB: 0.0.0.0/0 (internet, filtered by the WAF and Okta sign-in) or the WBD egress ranges."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
@@ -294,19 +326,29 @@ variable "route53_zone_id" {
   default     = null
 }
 
-variable "okta_saml_metadata_url" {
-  description = "Metadata URL of the WBD Okta SAML app of this environment (public URL, no secret)."
+variable "okta_issuer" {
+  description = "Issuer of the WBD Okta authorization server (https://<org>.okta.com or https://<org>.okta.com/oauth2/<server-id>)."
+  type        = string
+
+  validation {
+    condition     = startswith(var.okta_issuer, "https://")
+    error_message = "okta_issuer must be an https URL."
+  }
+}
+
+variable "okta_client_id" {
+  description = "Client ID of the WBD Okta OIDC app of this environment (not a secret; the client secret is in mmm/<env>/okta/alb-client)."
   type        = string
 }
 
-variable "cognito_domain_prefix" {
-  description = "Cognito hosted domain prefix. null = wbd-mmm-<env_short>."
-  type        = string
-  default     = null
+variable "okta_sign_in_enabled" {
+  description = "Turn on Okta sign-in at the ALB. Set true once mmm/<env>/okta/alb-client holds {\"client_secret\":\"...\"}; until then the ALB answers 503."
+  type        = bool
+  default     = false
 }
 
 variable "session_hours" {
-  description = "How long a planner stays signed in (ALB session cookie and Cognito refresh token)."
+  description = "How long a planner stays signed in (ALB session cookie)."
   type        = number
   default     = 12
 }
@@ -455,6 +497,40 @@ variable "model_refresh_timezone" {
 
 variable "enable_model_refresh_schedule" {
   description = "Schedules ENABLED (true) or DISABLED (false; on-demand refresh only)."
+  type        = bool
+  default     = false
+}
+
+variable "databricks_writeback_job_id" {
+  description = "ID of the Databricks job that writes predictions and lift from models/evaluation/ back to the Gold tables (deployed by databricks.yml)."
+  type        = number
+}
+
+variable "model_monitor_schedule" {
+  description = "EventBridge Scheduler expression of the drift check (one schedule per business unit, model_refresh_timezone)."
+  type        = string
+  default     = "cron(0 7 * * ? *)"
+}
+
+variable "enable_model_monitor_schedule" {
+  description = "Drift-check schedules ENABLED (true) or DISABLED (false; on-demand check only)."
+  type        = bool
+  default     = false
+}
+
+variable "model_drift_threshold" {
+  description = "Default drift score (0-1) above which a business unit is flagged; per-BU overrides in data/model-thresholds.yaml (drift:)."
+  type        = number
+  default     = 0.2
+
+  validation {
+    condition     = var.model_drift_threshold > 0 && var.model_drift_threshold < 1
+    error_message = "model_drift_threshold must be between 0 and 1."
+  }
+}
+
+variable "auto_refresh_on_drift" {
+  description = "When drift is detected, start a model refresh automatically (true) or only alarm (false; a person decides)."
   type        = bool
   default     = false
 }

@@ -25,6 +25,15 @@ variable "bucket_arns" {
   type        = list(string)
 }
 
+variable "read_only_prefixes" {
+  description = "Extra read-only access for Unity Catalog: { bucket_arn, prefix } (e.g. the models bucket evaluation/ for the write-back job)."
+  type = list(object({
+    bucket_arn = string
+    prefix     = string
+  }))
+  default = []
+}
+
 variable "kms_key_arns" {
   description = "Keys of those buckets (s3 key and per-business-unit keys)."
   type        = list(string)

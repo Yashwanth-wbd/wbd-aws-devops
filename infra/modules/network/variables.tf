@@ -54,6 +54,7 @@ variable "interface_endpoints" {
     "xray",
     "states",
     "sagemaker.api",
+    "sqs",
   ]
 }
 

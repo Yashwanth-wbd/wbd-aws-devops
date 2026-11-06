@@ -1,6 +1,6 @@
 locals {
   # Admin first, then the app/migration users. The proxy reads each secret to log in to the DB.
-  proxy_secret_arns = concat([aws_rds_cluster.this.master_user_secret[0].secret_arn], var.proxy_user_secret_arns)
+  proxy_secret_arns = concat([aws_db_instance.this.master_user_secret[0].secret_arn], var.proxy_user_secret_arns)
 }
 
 data "aws_iam_policy_document" "proxy_assume" {
@@ -87,9 +87,7 @@ resource "aws_db_proxy_default_target_group" "this" {
 }
 
 resource "aws_db_proxy_target" "this" {
-  db_proxy_name         = aws_db_proxy.this.name
-  target_group_name     = aws_db_proxy_default_target_group.this.name
-  db_cluster_identifier = aws_rds_cluster.this.cluster_identifier
-
-  depends_on = [aws_rds_cluster_instance.this]
+  db_proxy_name          = aws_db_proxy.this.name
+  target_group_name      = aws_db_proxy_default_target_group.this.name
+  db_instance_identifier = aws_db_instance.this.identifier
 }

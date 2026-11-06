@@ -28,15 +28,31 @@ variable "certificate_arn" {
   }
 }
 
-variable "cognito" {
-  description = "Cognito sign-in at the ALB (cognito module). null = no authentication (only for tests)."
+variable "oidc" {
+  description = "OIDC sign-in at the ALB (WBD Okta app of this environment). Endpoints come from <issuer>/.well-known/openid-configuration. null = no sign-in: the ALB answers 503 (except the health path) unless allow_unauthenticated."
   type = object({
-    user_pool_arn   = string
-    client_id       = string
-    domain_prefix   = string
-    session_seconds = optional(number, 43200)
+    issuer                 = string
+    authorization_endpoint = string
+    token_endpoint         = string
+    user_info_endpoint     = string
+    client_id              = string
+    scope                  = optional(string, "openid profile email groups")
+    session_seconds        = optional(number, 43200)
   })
   default = null
+}
+
+variable "allow_unauthenticated" {
+  description = "Without oidc, forward to the targets with no sign-in (isolated tests only - never on an internet-facing environment)."
+  type        = bool
+  default     = false
+}
+
+variable "oidc_client_secret" {
+  description = "Client secret of the Okta app (read from Secrets Manager by the stack, never a tfvars value). Required when oidc is set."
+  type        = string
+  default     = null
+  sensitive   = true
 }
 
 variable "app_port" {

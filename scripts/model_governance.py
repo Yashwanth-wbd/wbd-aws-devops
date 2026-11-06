@@ -9,8 +9,10 @@ model package group <prefix>-<business unit>, with ModelMetrics pointing at eval
   evaluate-file     evaluate a metrics JSON file against the thresholds (offline, for testing)
   evaluate          evaluate every PendingManualApproval version without a governance tag:
                     tag it passed / failed with the checked metrics; failed -> Rejected (never approvable)
-  promote           approve a passed version (after the approval gate) and publish its response
-                    curves to s3://<models bucket>/curves/<bu>/, which the API reads
+  promote           approve a passed version (after the approval gate), publish its response
+                    curves to s3://<models bucket>/curves/<bu>/ (read by the API) and its drift
+                    baseline to s3://<models bucket>/baseline/<bu>/ (read by the model-monitor),
+                    and write approval.json next to its evaluation.json
   rollback          re-publish the previously approved version and reject the current one
 
 AWS auth: the GitHub OIDC role of the job (gha-model-eval may only reject; gha-model-approve may approve).
@@ -39,13 +41,18 @@ def load_thresholds(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
     errors = []
-    for key in ("model_package_group", "curves_prefix", "business_units"):
+    for key in ("model_package_group", "curves_prefix", "baseline_prefix", "business_units"):
         if key not in cfg:
             errors.append(f"missing top-level key {key!r}")
     for bu, spec in (cfg.get("business_units") or {}).items():
         metrics = (spec or {}).get("metrics") or {}
         if not metrics:
             errors.append(f"{bu}: no metrics")
+        drift = (spec or {}).get("drift")
+        if drift is not None:
+            threshold = drift.get("threshold") if isinstance(drift, dict) else None
+            if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not 0 < threshold < 1:
+                errors.append(f"{bu}.drift: use {{threshold: x}} with 0 < x < 1")
         for name, rule in metrics.items():
             if not isinstance(rule, dict) or not set(rule) <= {"min", "max"} or not rule:
                 errors.append(f"{bu}.{name}: use {{min: x}}, {{max: y}} or both")
@@ -138,15 +145,30 @@ def read_metrics(s3, uri: str) -> dict:
     return json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
 
 
+def list_keys(s3, bucket: str, prefix: str) -> list[str]:
+    return [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix) for o in page.get("Contents", [])]
+
+
 def publish_curves(s3, cfg: dict, bu: str, eval_uri: str, models_bucket: str, arn: str) -> int:
     """Replace curves/<bu>/ with <evaluation prefix>/curves/ of the approved version."""
+    return publish_folder(s3, eval_uri, "curves", cfg["curves_prefix"].format(business_unit=bu), models_bucket, arn, required=True)
+
+
+def publish_baseline(s3, cfg: dict, bu: str, eval_uri: str, models_bucket: str, arn: str) -> int:
+    """Replace baseline/<bu>/ (drift reference) with <evaluation prefix>/baseline/ of the approved version."""
+    count = publish_folder(s3, eval_uri, "baseline", cfg["baseline_prefix"].format(business_unit=bu), models_bucket, arn, required=False)
+    if count == 0:
+        print(f"::warning::{bu}: no baseline/ in the evaluation output - the drift check fails until a version with a baseline is approved")
+    return count
+
+
+def publish_folder(s3, eval_uri: str, folder: str, dst_prefix: str, models_bucket: str, arn: str, required: bool) -> int:
     src_bucket, eval_key = split_s3(eval_uri)
-    src_prefix = eval_key.rsplit("/", 1)[0] + "/curves/"
-    dst_prefix = cfg["curves_prefix"].format(business_unit=bu)
-    src = [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=src_bucket, Prefix=src_prefix) for o in page.get("Contents", [])]
-    if not src:
-        raise SystemExit(f"no response curves under s3://{src_bucket}/{src_prefix}")
-    old = [o["Key"] for page in s3.get_paginator("list_objects_v2").paginate(Bucket=models_bucket, Prefix=dst_prefix) for o in page.get("Contents", [])]
+    src_prefix = eval_key.rsplit("/", 1)[0] + f"/{folder}/"
+    src = list_keys(s3, src_bucket, src_prefix)
+    if not src and required:
+        raise SystemExit(f"no {folder} under s3://{src_bucket}/{src_prefix}")
+    old = list_keys(s3, models_bucket, dst_prefix)
     wanted = set()
     for key in src:
         dst = dst_prefix + key[len(src_prefix):]
@@ -160,6 +182,15 @@ def publish_curves(s3, cfg: dict, bu: str, eval_uri: str, models_bucket: str, ar
         if key not in wanted:
             s3.delete_object(Bucket=models_bucket, Key=key)
     return len(src)
+
+
+def write_approval(s3, eval_uri: str, record: dict) -> str:
+    """approval.json next to evaluation.json: who approved which version, when, with which checks."""
+    bucket, eval_key = split_s3(eval_uri)
+    key = eval_key.rsplit("/", 1)[0] + "/approval.json"
+    s3.put_object(Bucket=bucket, Key=key, ServerSideEncryption="aws:kms", ContentType="application/json",
+                  Body=json.dumps(record, indent=2, default=str).encode())
+    return f"s3://{bucket}/{key}"
 
 
 def write_output(key: str, value) -> None:
@@ -234,13 +265,23 @@ def cmd_promote(args) -> int:
     if current is not None and str(current["ModelPackageVersion"]) == str(args.version):
         print(f"{group} v{args.version} is already the approved version")
         return 0
-    count = publish_curves(s3, cfg, args.business_unit, evaluation_uri(sm, arn), args.models_bucket, arn)
+    eval_uri = evaluation_uri(sm, arn)
+    count = publish_curves(s3, cfg, args.business_unit, eval_uri, args.models_bucket, arn)
+    baseline = publish_baseline(s3, cfg, args.business_unit, eval_uri, args.models_bucket, arn)
     sm.update_model_package(ModelPackageArn=arn, ModelApprovalStatus="Approved",
                             ApprovalDescription=f"Approved by {args.approved_by} - {args.run_url}"[:1024])
     previous = str(current["ModelPackageVersion"]) if current else "none"
-    tag(sm, arn, **{PREVIOUS_TAG: previous, "approved_at": datetime.now(timezone.utc).isoformat(), "approved_by": args.approved_by})
-    write_summary([f"### Approved {group} v{args.version}", f"curves published: {count} files - previous: {previous} - approved by: {args.approved_by}"])
-    print(f"{group}: approved v{args.version} (was {previous}); {count} curve files published")
+    approved_at = datetime.now(timezone.utc).isoformat()
+    tag(sm, arn, **{PREVIOUS_TAG: previous, "approved_at": approved_at, "approved_by": args.approved_by})
+    record = write_approval(s3, eval_uri, {
+        "environment": args.environment, "business_unit": args.business_unit, "model_package_arn": arn,
+        "version": str(args.version), "previous_version": previous, "approved_by": args.approved_by,
+        "approved_at": approved_at, "run": args.run_url, "checks": tags(sm, arn).get(CHECKS_TAG, ""),
+        "curve_files": count, "baseline_files": baseline,
+    })
+    write_summary([f"### Approved {group} v{args.version}",
+                   f"curves: {count} files - baseline: {baseline} files - previous: {previous} - approved by: {args.approved_by} - record: {record}"])
+    print(f"{group}: approved v{args.version} (was {previous}); {count} curve files, {baseline} baseline files published; {record}")
     return 0
 
 
@@ -259,6 +300,7 @@ def cmd_rollback(args) -> int:
         return 1
     arn = package_arn(sm, group, target)
     publish_curves(s3, cfg, args.business_unit, evaluation_uri(sm, arn), args.models_bucket, arn)
+    publish_baseline(s3, cfg, args.business_unit, evaluation_uri(sm, arn), args.models_bucket, arn)
     sm.update_model_package(ModelPackageArn=current["ModelPackageArn"], ModelApprovalStatus="Rejected",
                             ApprovalDescription=f"Rolled back to v{target} - {args.run_url}"[:1024])
     tag(sm, current["ModelPackageArn"], **{STATUS_TAG: "rolled-back"})

@@ -35,6 +35,7 @@ gives the ARN. Logs: `/aws/states/mmm-<env>-model-refresh`.
 | TrainModel | CloudWatch `/aws/sagemaker/TrainingJobs`; console → SageMaker → Training jobs |
 | EvaluateModel | CloudWatch `/aws/sagemaker/ProcessingJobs`; report `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json` |
 | RegisterModel | Model package group `mmm-<env_short>-<bu>` must exist (created by Terraform per BU) |
+| StartDatabricksWriteback / GetWritebackRun / WritebackFailed | The model is already registered; only the Gold write-back failed – [write-back-failed.md](write-back-failed.md) |
 
 ## 3. Common causes
 

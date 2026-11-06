@@ -1,5 +1,5 @@
 # Staging: same code as dev (scripts/sync-environments.ps1); only these values differ.
-# Staging behaviour from var.environment: Aurora writer + reader, 14-day PITR, 3 AZs / 3 NATs.
+# Staging behaviour from var.environment: 14-day PITR, 3 AZs / 3 NATs.
 # ------------------------------------------------------------------ Account and region
 environment = "staging"
 
@@ -93,11 +93,15 @@ approved_worm_retention_days = 2555
 # add actual value
 training_data_retention_days = 365
 
-aurora_engine_version = "16.6"
+# RDS for PostgreSQL (staging: Multi-AZ, prod-like class)
+rds_engine_version = "16.6"
 # add actual value
-aurora_min_acu = 0.5
+rds_instance_class = "db.r6g.large"
 # add actual value
-aurora_max_acu = 16
+rds_allocated_storage = 100
+# add actual value
+rds_max_allocated_storage = 500
+rds_multi_az              = true
 
 # ------------------------------------------------------------------ ECS and optimization (Step 7)
 enable_application_signals = false
@@ -107,6 +111,9 @@ enable_platform_check_task = true
 # add actual value
 optimizer_instance_type       = "ml.m5.xlarge"
 optimizer_max_runtime_seconds = 3600
+# add actual value
+max_concurrent_runs    = 20
+max_queue_wait_minutes = 30
 
 # ------------------------------------------------------------------ Front door and sign-in (Step 8)
 # add actual value
@@ -117,10 +124,12 @@ alb_certificate_arn = "arn:aws:acm:us-east-1:222222222222:certificate/00000000-0
 alb_ingress_cidrs = ["0.0.0.0/0"]
 route53_zone_id   = null
 # add actual value
-okta_saml_metadata_url = "https://wbd.okta.com/app/exk00000000000000001/sso/saml/metadata"
+okta_issuer = "https://wbd.okta.com/oauth2/default"
 # add actual value
-cognito_domain_prefix = "wbd-mmm-stg"
-session_hours         = 12
+okta_client_id = "0oa00000000000000001"
+# true once mmm/staging/okta/alb-client holds {"client_secret":"..."}
+okta_sign_in_enabled = false
+session_hours        = 12
 # add actual value
 geo_allow_countries = []
 waf_rate_limit      = 2000
@@ -164,6 +173,14 @@ training_max_runtime_seconds = 14400
 model_refresh_schedule        = "cron(0 6 ? * MON *)"
 model_refresh_timezone        = "America/New_York"
 enable_model_refresh_schedule = false
+# add actual value
+databricks_writeback_job_id = 0
+# add actual value
+model_monitor_schedule        = "cron(0 7 * * ? *)"
+enable_model_monitor_schedule = false
+# add actual value
+model_drift_threshold = 0.2
+auto_refresh_on_drift = false
 
 # ------------------------------------------------------------------ Release 2 GenAI (Step 14)
 # Turn on after the Release 1 gate (docs/11) and WBD approval of data egress to the providers

@@ -113,10 +113,11 @@ variable "deploy_lambda_functions" {
 }
 
 variable "deploy_dry_run" {
-  description = "Let the deploy role start a dry-run execution (dryrun-*) of <name_prefix>-optimization after a release: write its input under runs/dryrun-*/ in the results bucket and list curves/ in the models bucket. null = off (prod)."
+  description = "Let the deploy role run a dry run after a release: write its input under runs/dryrun-*/ in the results bucket, list curves/ in the models bucket, send the request to <name_prefix>-optimization-requests and watch the dryrun-* execution of <name_prefix>-optimization. null = off (prod)."
   type = object({
     results_bucket_arn = string
     models_bucket_arn  = string
+    sqs_kms_key_arn    = string
   })
   default = null
 }

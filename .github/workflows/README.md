@@ -3,8 +3,9 @@
 GitHub Actions pipelines. The full guide (flow, GitHub setup, app contract, rollback) is
 [docs/09-cicd-pipelines.md](../../docs/09-cicd-pipelines.md).
 
-**Status:** v2 architecture (ALB + Cognito, ECS api / ui, SageMaker optimization and training,
-Step Functions, Lambda publisher). Data and model governance: [docs/10](../../docs/10-data-platform-and-model-governance.md).
+**Status:** v3 architecture (ALB with Okta OIDC sign-in, ECS api / ui, RDS PostgreSQL, SQS run
+queue, SageMaker optimization and training, Step Functions incl. drift monitor, Lambda publisher).
+Data and model governance: [docs/10](../../docs/10-data-platform-and-model-governance.md).
 
 | File | Trigger | Environment(s) | AWS roles |
 |---|---|---|---|
@@ -15,11 +16,11 @@ Step Functions, Lambda publisher). Data and model governance: [docs/10](../../do
 | `publisher-ci.yml` | `apps/results-publisher/**` PR / main (tests only, no image) | none | none |
 | `_python-service-ci.yml` | called by the four above (`build_image: false` for the Lambda) | | |
 | `deploy.yml` | CI finished on main → dev; `vX.Y.Z-rcN` → staging; `vX.Y.Z` → prod; manual. Components: `api`, `ui` (ECS), `optimizer`, `training` (SSM image pointers), `publisher` (Lambda version + alias `live`) | the target | previous env `gha-ecr-read`, own `gha-ecr-push`, own `gha-deploy` |
-| `terraform.yml` | `infra/**` PR / main; nightly; manual | `dev` → `staging` → `prod` (apply) | `gha-plan` (PR, drift), `gha-apply` |
+| `terraform.yml` | `infra/**`, `data/model-thresholds.yaml` PR / main; nightly; manual | `dev` → `staging` → `prod` (apply) | `gha-plan` (PR, drift), `gha-apply` |
 | `_terraform-apply.yml` | called by `terraform.yml` | the target | `gha-apply` |
 | `repo-checks.yml` | every PR / main | none | none |
 | `databricks.yml` | `data/databricks/**` main → dev; manual → staging / prod | the target | none: Databricks GitHub OIDC federation (deploy service principal) |
-| `model-governance.yml` | hourly; manual evaluate / promote / rollback | none (evaluate); `<env>-model-promotion` (promote, rollback) | `gha-model-eval` (reject only), `gha-model-approve` |
+| `model-governance.yml` | hourly; manual evaluate / promote / rollback (promote publishes curves + drift baseline and writes `approval.json`) | none (evaluate); `<env>-model-promotion` (promote, rollback) | `gha-model-eval` (reject only), `gha-model-approve` |
 
 Rules for changes here:
 

@@ -18,6 +18,9 @@ mock_provider "aws" {
   mock_data "aws_iam_policy_document" {
     defaults = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
   }
+  mock_data "aws_secretsmanager_secret_version" {
+    defaults = { secret_string = "{\"client_secret\":\"mock-not-a-secret\"}" }
+  }
 }
 mock_provider "aws" {
   alias = "dr"
@@ -54,11 +57,14 @@ run "plan_all_features" {
     enable_application_signals = true
     enable_db_bootstrap        = true
     route53_zone_id            = "Z0000000000000000000"
+    okta_sign_in_enabled       = true
 
     enable_data_platform           = true
     databricks_self_assume_enabled = true
     enable_databricks_privatelink  = true
     enable_model_refresh_schedule  = true
+    enable_model_monitor_schedule  = true
+    auto_refresh_on_drift          = true
 
     enable_genai = true
   }

@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Post-release dry run of the optimization state machine (dev/staging). Non-zero exit makes
-# deploy.yml roll back.
+# Post-release dry run of the optimization path (dev/staging). Non-zero exit makes deploy.yml roll back.
 #
-#   dry-run-optimization.sh <state-machine-arn> <results-bucket> <models-bucket> <business-unit> <image-parameter>
+#   dry-run-optimization.sh <queue-url> <state-machine-arn> <results-bucket> <models-bucket> <business-unit> <image-parameter>
 #
-# Starts one execution with dry_run = true (execution name and run_id dryrun-<github run>-<attempt>).
+# Sends one request with dry_run = true to the run queue (run_id dryrun-<github run>-<attempt>), the
+# same way the API does, so it also proves the run dispatcher. The dispatcher starts the execution
+# named run_id when a run slot is free.
 # App contract: with DRY_RUN=true the optimizer image only loads its input and the approved curves
 # and writes a small output; with dry_run the results publisher checks its database connection
-# and writes no run to Aurora.
+# and writes no run to RDS.
 # Skipped (exit 0) while no optimizer image was released or no curves are approved for the business unit.
 set -euo pipefail
 
 DRY_RUN_TIMEOUT="${DRY_RUN_TIMEOUT:-1200}"
+DISPATCH_TIMEOUT="${DISPATCH_TIMEOUT:-600}"
 
 die() { echo "::error::$*" >&2; exit 1; }
 
-[ $# -eq 5 ] || die "usage: dry-run-optimization.sh <state-machine-arn> <results-bucket> <models-bucket> <business-unit> <image-parameter>"
-state_machine="$1" results="$2" models="$3" bu="$4" param="$5"
+[ $# -eq 6 ] || die "usage: dry-run-optimization.sh <queue-url> <state-machine-arn> <results-bucket> <models-bucket> <business-unit> <image-parameter>"
+queue="$1" state_machine="$2" results="$3" models="$4" bu="$5" param="$6"
 
 image=$(aws ssm get-parameter --name "$param" --query Parameter.Value --output text)
 if [[ "$image" == *:unset ]]; then
@@ -31,19 +33,25 @@ run_id="dryrun-${GITHUB_RUN_ID:-$(date +%s)}-${GITHUB_RUN_ATTEMPT:-1}"
 input_uri="s3://$results/runs/$run_id/input/"
 jq -cn --arg bu "$bu" '{dry_run: true, business_unit: $bu}' | aws s3 cp - "${input_uri}request.json" --only-show-errors
 
-input=$(jq -cn --arg run_id "$run_id" --arg bu "$bu" --arg uri "$input_uri" \
-  '{run_id: $run_id, business_unit: $bu, input_s3_uri: $uri, dry_run: true}')
-execution=$(aws stepfunctions start-execution --state-machine-arn "$state_machine" --name "$run_id" \
-  --input "$input" --query executionArn --output text)
-echo "Dry run: $execution (image $image)"
+body=$(jq -cn --arg run_id "$run_id" --arg bu "$bu" --arg uri "$input_uri" --arg by "github:${GITHUB_ACTOR:-local}" \
+  '{run_id: $run_id, business_unit: $bu, input_s3_uri: $uri, requested_by: $by, dry_run: true}')
+aws sqs send-message --queue-url "$queue" --message-body "$body" > /dev/null
+execution="${state_machine/:stateMachine:/:execution:}:$run_id"
+echo "Dry run queued: $run_id (image $image)"
 
 start=$(date +%s)
-while :; do
-  status=$(aws stepfunctions describe-execution --execution-arn "$execution" --query status --output text)
-  [ "$status" != RUNNING ] && break
+until status=$(aws stepfunctions describe-execution --execution-arn "$execution" --query status --output text 2> /dev/null); do
+  [ $(( $(date +%s) - start )) -lt "$DISPATCH_TIMEOUT" ] || die "dry run not started after ${DISPATCH_TIMEOUT}s - all run slots busy or the dispatcher fails (runbooks/optimization-run-failed.md)"
+  echo "  queued"
+  sleep 15
+done
+echo "Dry run started: $execution"
+
+while [ "$status" = RUNNING ]; do
   [ $(( $(date +%s) - start )) -lt "$DRY_RUN_TIMEOUT" ] || die "dry run still RUNNING after ${DRY_RUN_TIMEOUT}s: $execution"
   echo "  $status"
   sleep 20
+  status=$(aws stepfunctions describe-execution --execution-arn "$execution" --query status --output text)
 done
 
 if [ "$status" != SUCCEEDED ]; then

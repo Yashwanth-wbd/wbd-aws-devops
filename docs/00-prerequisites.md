@@ -56,7 +56,7 @@ $ca = "C:\certs\wbd-root-ca.pem"
 |---|---|---|
 | AWS SSO for dev, staging, prod | WBD Cloud Platform team | Bootstrap and validation |
 | GitHub org: create repo, Environments, variables | WBD GitHub admins | Pipelines |
-| Okta SAML apps per environment | WBD Identity team | Planner login (ALB → Cognito → Okta) |
+| Okta OIDC Web apps per environment (client ID + secret) | WBD Identity team | Planner login (ALB `authenticate-oidc` → Okta) |
 | Databricks workspace + service principals | WBD Databricks admins | Data platform (Step 13) and bundle deploy |
 | Splunk HEC endpoint + token | WBD Splunk team | Log shipping (Step 9) |
 | CAB process + named approvers | WBD change management | Prod releases |

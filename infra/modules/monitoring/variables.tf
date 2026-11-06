@@ -30,27 +30,45 @@ variable "target_group_arn_suffixes" {
   }
 }
 
-variable "aurora_cluster_id" {
-  description = "Aurora cluster identifier."
+variable "rds_instance_id" {
+  description = "RDS for PostgreSQL instance identifier."
   type        = string
 }
 
-variable "aurora_max_connections" {
-  description = "max_connections of the Aurora writer at max ACU (connections alarm). null = no connections alarm."
+variable "rds_max_connections" {
+  description = "max_connections of the RDS instance (connections alarm). null = no connections alarm."
   type        = number
   default     = null
 }
 
-variable "aurora_has_reader" {
-  description = "The cluster has a reader instance (replica lag alarm)."
-  type        = bool
-  default     = false
+variable "rds_free_storage_gib" {
+  description = "Alarm when free storage falls below this many GiB (about 10 % of the allocated storage)."
+  type        = number
+  default     = 10
+}
+
+variable "run_queue_name" {
+  description = "Optimization run queue (dashboard). null = not shown."
+  type        = string
+  default     = null
+}
+
+variable "run_dlq_name" {
+  description = "Dead-letter queue of the run queue (dashboard)."
+  type        = string
+  default     = null
 }
 
 variable "state_machine_arns" {
-  description = "Step Functions state machines (name => ARN). Keys optimization and model-refresh get their own dashboard and runtime / overdue alarms; failure and throttling alarms come from the step-functions module."
+  description = "Step Functions state machines (name => ARN). Keys optimization and model-refresh get their own dashboard and runtime / overdue alarms (model-monitor joins the training dashboard); failure and throttling alarms come from the step-functions module."
   type        = map(string)
   default     = {}
+}
+
+variable "drift_business_units" {
+  description = "Business units whose ModelDrift score (namespace MMM/Models) is shown on the training dashboard."
+  type        = list(string)
+  default     = []
 }
 
 variable "lambda_function_names" {
@@ -112,34 +130,22 @@ variable "api_5xx_min_requests" {
   default     = 20
 }
 
-variable "aurora_cpu_percent" {
-  description = "Aurora CPU threshold."
+variable "rds_cpu_percent" {
+  description = "RDS CPU threshold."
   type        = number
   default     = 80
 }
 
-variable "aurora_acu_percent" {
-  description = "Aurora Serverless ACU utilization (% of max ACU) threshold."
-  type        = number
-  default     = 90
-}
-
-variable "aurora_connections_percent" {
-  description = "Aurora connections threshold (% of aurora_max_connections)."
+variable "rds_connections_percent" {
+  description = "RDS connections threshold (% of rds_max_connections)."
   type        = number
   default     = 80
 }
 
-variable "aurora_free_local_storage_gib" {
-  description = "Alarm when the Aurora local (temporary) storage falls below this many GiB."
+variable "rds_latency_ms" {
+  description = "RDS read / write latency threshold (ms)."
   type        = number
-  default     = 2
-}
-
-variable "aurora_replica_lag_ms" {
-  description = "Aurora reader replica lag threshold (ms)."
-  type        = number
-  default     = 1000
+  default     = 20
 }
 
 variable "availability_target_percent" {

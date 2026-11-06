@@ -6,8 +6,8 @@
   Runs `terraform test` with infra/environments/<env>/tests/mock-plan.tftest.hcl, which has two
   plan-only runs: the environment's terraform.tfvars as is, and every optional feature switched on
   (cross-region copy, vault lock, Splunk, Transit Gateway, Resolver, Application Signals, DB
-  bootstrap). AWS data sources return fixed fake values; resource attributes stay "known after
-  apply", like in a first real plan.
+  bootstrap, Okta sign-in, data platform with drift monitor, GenAI). AWS data sources return
+  fixed fake values; resource attributes stay "known after apply", like in a first real plan.
 
   It catches what `validate` cannot: count/for_each that depend on values only known after apply,
   failing preconditions and variable validations, wrong map keys, and tfvars type errors.
@@ -38,11 +38,14 @@ New-Item -ItemType Directory -Force $env:TF_PLUGIN_CACHE_DIR | Out-Null
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 robocopy (Join-Path $root 'infra') (Join-Path $work 'infra') /S /XD .terraform /NFL /NDL /NJH /NJS /NP | Out-Null
 robocopy (Join-Path $root 'scripts') (Join-Path $work 'scripts') /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy (Join-Path $root 'data') (Join-Path $work 'data') /NFL /NDL /NJH /NJS /NP | Out-Null
 
 $failed = @()
 foreach ($e in $Environment) {
   Write-Host "== $e" -ForegroundColor Cyan
   Push-Location (Join-Path $work "infra\environments\$e")
+  # Windows PowerShell turns native stderr lines into terminating errors under 'Stop'
+  $ErrorActionPreference = 'Continue'
   try {
     terraform init -backend=false -no-color | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "terraform init failed for $e" }
@@ -52,6 +55,7 @@ foreach ($e in $Environment) {
     $out | Select-String '^Plan: |run "|Success!|Failure!' | ForEach-Object { "  $($_.Line.Trim())" }
     if ($code -ne 0) { $failed += $e }
   } finally {
+    $ErrorActionPreference = 'Stop'
     Pop-Location
   }
 }

@@ -38,7 +38,9 @@ environment's profile and name prefix (`mmm-dev-`, `mmm-stg-`, `mmm-prd-`).
 | Step 11: GitHub Environment + variables set (`setup-github.ps1`), approvals configured | ☐ | ☐ | ☐ |
 | Step 13: `enable_data_platform = true` applied; model-refresh state machine and schedules exist | ☐ | ☐ | ☐ |
 | App release deployed by `deploy.yml` (dev `sha-…`, staging `vX.Y.Z-rcN`, prod `vX.Y.Z`) | ☐ | ☐ | ☐ |
-| Smoke test green (`scripts/smoke.sh` against the public ALB URL: `/api/health` 200, `/` redirects to Cognito) | ☐ | ☐ | ☐ |
+| Smoke test green (`scripts/smoke.sh` against the public ALB URL: `/api/health` 200, `/` redirects to Okta) | ☐ | ☐ | ☐ |
+| Okta sign-in on (`okta_sign_in_enabled = true`, secret `okta/alb-client` set, `SMOKE_CHECK_LOGIN=true`) | ☐ | ☐ | ☐ |
+| Optimization dry run through the run queue green (`deploy.yml`, dev and staging) | ☐ | ☐ | – |
 | Nightly drift check green for 3 nights in a row | ☐ | ☐ | ☐ |
 | Release record artifact kept (image digests, task-definition revisions, approver) | ☐ | ☐ | ☐ |
 
@@ -81,7 +83,10 @@ When the data team ships the bundle, confirm `databricks.yml` deployed to each t
 | Optimizer reads approved curves from `s3://<models>/curves/<bu>/` after promote | ☐ | ☐ | ☐ |
 | Failing package tagged `governance_status=failed` and **Rejected** | ☐ | ☐ | ☐ |
 | Passing package waits in `<env>-model-promotion`, approved by someone other than the requester | ☐ | ☐ | ☐ |
-| Model rollback re-publishes previous curves (docs/10 §7) | ☐ | – | ☐ |
+| Approval publishes `models/baseline/<bu>/` and writes `approval.json` next to `evaluation.json` | ☐ | ☐ | ☐ |
+| Databricks write-back job ran after registration (`WritebackDone`), Gold tables updated | ☐ | ☐ | ☐ |
+| Model monitor run per BU succeeds; `ModelDrift` metric visible; then `enable_model_monitor_schedule = true` | ☐ | ☐ | ☐ |
+| Model rollback re-publishes previous curves and baseline (docs/10 §7) | ☐ | – | ☐ |
 | `data/model-thresholds.yaml` holds the **signed-off Week-1 thresholds** (not placeholders) | ☐ (one file for all) | | |
 
 ## 4. G3 – Production readiness checklist
@@ -95,7 +100,7 @@ must be seen in prod itself.
 | R2 | Penetration test done; no open Critical/High | WBD-approved tester against staging (and prod ALB if required); findings tracked to closure | staging | WBD InfoSec | Open | |
 | R3 | All scans clean or exceptions approved | Last `repo-checks`, `api-ci`, `ui-ci`, `optimizer-ci`, `training-ci`, `terraform` (Checkov) runs green on the release commit; DAST (e.g. OWASP ZAP baseline) against staging; ECR enhanced-scan findings for the release images | staging | EY DevOps | Open | |
 | R4 | Encryption at rest and TLS 1.2+ everywhere | Section 4.1 commands | staging, prod | EY DevOps | Open | |
-| R5 | Backups running; restore test met RPO/RTO | AWS Backup jobs `COMPLETED` for 7 days; Aurora point-in-time restore and S3 restore ([docs/08 §3–4](08-backup-and-dr.md)); measured times recorded in section 4.2 | staging | EY DevOps | Open | |
+| R5 | Backups running; restore test met RPO/RTO | AWS Backup jobs `COMPLETED` for 7 days; RDS point-in-time restore and S3 restore ([docs/08 §3–4](08-backup-and-dr.md)); measured times recorded in section 4.2 | staging | EY DevOps | Open | |
 | R6 | Failover tested | Section 4.3 | staging | EY DevOps | Open | |
 | R7 | Performance targets met (or deviations accepted by WBD) | Section 4.4 | staging | EY DevOps + app teams | Open | |
 | R8 | Dashboards and alerts live; on-call ready | Section 4.5 | staging, prod | EY DevOps | Open | |
@@ -112,9 +117,11 @@ Run with `mmm-stg-devops` (staging) or `mmm-prd-readonly` (prod, replace `stg` w
 
 ```powershell
 $p = "mmm-stg"
-# Aurora: encrypted cluster, TLS via proxy
-aws rds describe-db-clusters --db-cluster-identifier "$p-aurora" --query "DBClusters[0].[StorageEncrypted,KmsKeyId,DeletionProtection]"
-aws rds describe-db-proxies --db-proxy-name "$p-aurora-proxy" --query "DBProxies[0].RequireTLS"   # true
+# RDS: encrypted instance, TLS via proxy
+aws rds describe-db-instances --db-instance-identifier "$p-postgres" --query "DBInstances[0].[StorageEncrypted,KmsKeyId,DeletionProtection,MultiAZ]"
+aws rds describe-db-proxies --db-proxy-name "$p-postgres-proxy" --query "DBProxies[0].RequireTLS"   # true
+# SQS run queue: KMS key
+aws sqs get-queue-attributes --queue-url (aws sqs get-queue-url --queue-name "$p-optimization-requests" --query QueueUrl --output text) --attribute-names KmsMasterKeyId
 # S3: every project bucket has default encryption and blocks public access
 aws s3api list-buckets --query "Buckets[?starts_with(Name,'wbd-mmm-stg-')].Name" --output text -split "\s+" | ForEach-Object {
   "{0,-45} {1,-8} {2}" -f $_, (aws s3api get-bucket-encryption --bucket $_ --query "ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm" --output text),
@@ -131,7 +138,7 @@ curl.exe -s -o NUL -w "%{http_code}`n" --tls-max 1.1 https://<app domain>/
 
 | Test | Date | Target RPO / RTO (docs/08 §1) | Measured | Pass |
 |---|---|---|---|---|
-| Aurora point-in-time restore (staging) | | ≤ 5 min / 1 h | | |
+| RDS point-in-time restore (staging) | | ≤ 5 min / 1 h | | |
 | S3 single object (versioning) | | 0 / 15 min | | |
 | S3 bucket restore (AWS Backup) | | 24 h / 2 h | | |
 | Full environment rebuild from code (staging) | | 24 h / 4 h | | |
@@ -139,13 +146,13 @@ curl.exe -s -o NUL -w "%{http_code}`n" --tls-max 1.1 https://<app domain>/
 ### 4.3 Failover tests (R6, staging)
 
 Watch the platform dashboard and the `mmm-stg-api-5xx-rate` alarm during each test. A test passes when
-the API keeps answering (brief errors during an Aurora failover are expected and must recover
+the API keeps answering (brief errors during an RDS Multi-AZ failover are expected and must recover
 without manual action).
 
 ```powershell
 $p = "mmm-stg"
-# 1. Aurora failover (about 60–120 s)
-aws rds failover-db-cluster --db-cluster-identifier "$p-aurora"
+# 1. RDS Multi-AZ failover (about 60–120 s; RDS Proxy keeps the endpoint)
+aws rds reboot-db-instance --db-instance-identifier "$p-postgres" --force-failover
 # 2. Kill an API task: the service starts a replacement, ALB keeps serving from the others
 $t = aws ecs list-tasks --cluster "$p-ecs" --service-name "$p-api" --query "taskArns[0]" --output text
 aws ecs stop-task --cluster "$p-ecs" --task $t --reason "R6 failover test"
@@ -164,7 +171,8 @@ approval, record the tabletop result instead.
 
 | Test | Date | Impact seen | Recovered without action | Pass |
 |---|---|---|---|---|
-| Aurora failover | | | | |
+| RDS Multi-AZ failover | | | | |
+| Run queue: more requests than `max_concurrent_runs` queue and start as slots free up | | | | |
 | API task killed | | | | |
 | UI task killed | | | | |
 | Optimization execution stopped | | | | |
@@ -193,7 +201,8 @@ Record the tuned values after the test and copy them into the staging and prod t
 | API task CPU / memory, min / max tasks | | |
 | UI task CPU / memory, min / max tasks | | |
 | SageMaker optimizer instance type / max runtime | | |
-| Aurora min / max ACU, RDS Proxy max connections % | | |
+| RDS instance class / storage, RDS Proxy max connections % | | |
+| `max_concurrent_runs`, `max_queue_wait_minutes` | | |
 | Fargate vCPU quota requested | | |
 
 ### 4.5 Alerts reach on-call (R8)
@@ -207,7 +216,7 @@ aws cloudwatch set-alarm-state --alarm-name "$p-cert-expiry-alb" --state-value A
 ```
 
 Also confirm: one `run_id` can be followed in Splunk across API, optimization Step Functions, publisher,
-and audit events; the CloudWatch dashboard `mmm-<env>-platform` shows API, ECS, Aurora, Step Functions,
+and audit events; the CloudWatch dashboard `mmm-<env>-platform` shows API, ECS, RDS, Step Functions,
 Lambda, and WAF; every alarm description points to a runbook.
 
 ## 5. G4 – Parallel run, UAT and go-live

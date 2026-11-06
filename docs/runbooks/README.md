@@ -24,11 +24,13 @@ aws sso login --sso-session wbd && aws sts get-caller-identity
 |---|---|---|
 | [deploy.md](deploy.md) | Releasing a version to dev, staging, prod | – |
 | [rollback.md](rollback.md) | A release is bad (app, UI, infra, data, model, GenAI) | `api-5xx-rate`, `ecs-deployment-failed`, users |
-| [scale-planning-season.md](scale-planning-season.md) | Before the upfront / planning season or a known peak | `whatif-p95`, `aurora-cpu`, `aurora-acu-max`, `aurora-connections`, `optimization-runtime-max`, `optimization-throttled` |
-| [optimization-run-failed.md](optimization-run-failed.md) | An optimization Step Functions execution failed | `mmm-<env>-optimization-failed`, `results-publisher-errors`, stuck runs in the UI, failed post-release dry run |
+| [scale-planning-season.md](scale-planning-season.md) | Before the upfront / planning season or a known peak | `whatif-p95`, `rds-cpu`, `rds-connections`, `runs-oldest-request`, `runs-expired-requests`, `optimization-runtime-max`, `optimization-throttled` |
+| [optimization-run-failed.md](optimization-run-failed.md) | An optimization run stays queued or its Step Functions execution failed | `mmm-<env>-optimization-failed`, `results-publisher-errors`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, stuck runs in the UI, failed post-release dry run |
 | [model-refresh-failed.md](model-refresh-failed.md) | A model refresh (Databricks → SageMaker training → registry) failed | `mmm-<env>-model-refresh-failed`, `model-refresh-overdue` |
-| [cognito-idp-outage.md](cognito-idp-outage.md) | Users cannot sign in (Cognito / Okta) | users, smoke test login check |
-| [db-restore.md](db-restore.md) | Data was deleted or corrupted; database lost | users, AWS Health, Aurora alarms |
+| [write-back-failed.md](write-back-failed.md) | The refresh failed at the Databricks write-back (predictions / lift to Gold) | `mmm-<env>-model-refresh-failed` with `WritebackFailed` |
+| [model-drift.md](model-drift.md) | Drift above the threshold, or the drift check fails | `mmm-<env>-model-drift-<bu>`, `mmm-<env>-model-monitor-failed` |
+| [okta-outage.md](okta-outage.md) | Users cannot sign in (Okta OIDC at the ALB) | users, smoke test login check |
+| [db-restore.md](db-restore.md) | Data was deleted or corrupted; database lost | users, AWS Health, `rds-*` alarms |
 | [ecs-task-stuck.md](ecs-task-stuck.md) | Tasks do not start, do not stop, or a deployment hangs | `ecs-service-error`, `api-no-healthy-targets`, `ui-no-healthy-targets` |
 | [rotation.md](rotation.md) | Rotating secrets, tokens, certificates | `cert-expiry-*`, schedule |
 | [pipeline-failure.md](pipeline-failure.md) | A GitHub Actions workflow is red | GitHub notification |

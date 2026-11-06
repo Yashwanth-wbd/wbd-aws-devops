@@ -30,12 +30,13 @@ R = responsible, A = approves, C = consulted, I = informed.
 | Weekly | Cost check | Budget `mmm-<env>-monthly` (platform); Cost Anomaly emails | – |
 | Monthly | Patch base images | App teams bump base image digests in Dockerfiles → CI → normal release. Fargate platform is patched by AWS (`platform_version = LATEST` on deploy) | Release record |
 | Monthly | Review Security Hub / GuardDuty | Findings for the MMM accounts with WBD security | Ticket |
-| Monthly | Minor version upgrades | Aurora minor (maintenance window), Terraform provider (`terraform init -upgrade` in dev → sync → PR), GitHub Actions via Dependabot | PR |
+| Monthly | Minor version upgrades | RDS PostgreSQL minor (maintenance window), Terraform provider (`terraform init -upgrade` in dev → sync → PR), GitHub Actions via Dependabot | PR |
 | Quarterly | Access review | Permission-set assignments per account with WBD Identity; GitHub environment reviewers; no IAM users / keys (`aws iam list-users` empty); break-glass test ([break-glass.md](runbooks/break-glass.md)) | Signed review |
-| Quarterly | Restore test | Aurora point-in-time + S3 restore in staging ([docs/08 §7](08-backup-and-dr.md#7-regular-tests)), record RPO / RTO achieved | Restore record (docs/11 §4.2 format) |
-| Quarterly | Rotate long-lived tokens due | [rotation.md](runbooks/rotation.md) schedule (LLM provider keys, Splunk HEC, third-party vendors) | Ticket |
+| Quarterly | Restore test | RDS point-in-time + S3 restore in staging ([docs/08 §7](08-backup-and-dr.md#7-regular-tests)), record RPO / RTO achieved | Restore record (docs/11 §4.2 format) |
+| Quarterly | Rotate long-lived tokens due | [rotation.md](runbooks/rotation.md) schedule (Okta ALB client secret, LLM provider keys, Splunk HEC, third-party vendors) | Ticket |
+| Monthly | Drift review | `mmm-<env>-training` dashboard drift widgets per business unit; agree with data science whether a refresh is needed ([model-drift.md](runbooks/model-drift.md)) | – |
 | Twice a year | DR exercise | Rebuild staging from code + restore data (docs/08 §5); prod region failover rehearsal if WBD approved the DR region (§6) | DR report |
-| Twice a year | Failover tests | Aurora failover, kill API/UI tasks, optimization abort test (docs/11 §4.3) in staging | Test record |
+| Twice a year | Failover tests | RDS Multi-AZ failover, kill API/UI tasks, optimization abort test (docs/11 §4.3) in staging | Test record |
 | Yearly | Major upgrades | PostgreSQL major, Python runtime on Lambda/images, Terraform major – planned changes with a staging soak | Change ticket |
 | Before planning season | Scale up | [scale-planning-season.md](runbooks/scale-planning-season.md) | PR |
 
@@ -49,10 +50,13 @@ Lambda `-errors`. Full list with thresholds: [monitoring README](../infra/module
 | `api-no-healthy-targets`, `ui-no-healthy-targets`, `api-5xx-rate`, `availability`, EventBridge `ecs-deployment-failed`, `ecs-service-error` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [rollback.md](runbooks/rollback.md) |
 | `whatif-p95` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [scale-planning-season.md](runbooks/scale-planning-season.md) |
 | `optimization-failed`, `results-publisher-errors`, `optimization-runtime-max`, `optimization-standard-p95` | [optimization-run-failed.md](runbooks/optimization-run-failed.md); runtime: [scale-planning-season.md](runbooks/scale-planning-season.md) (`optimizer_instance_type`) |
-| `optimization-throttled`, `model-refresh-throttled` | [scale-planning-season.md](runbooks/scale-planning-season.md) (Step Functions quota) |
-| `model-refresh-failed`, `model-refresh-overdue` | [model-refresh-failed.md](runbooks/model-refresh-failed.md) |
+| `runs-oldest-request`, `runs-expired-requests` | [scale-planning-season.md](runbooks/scale-planning-season.md) (`max_concurrent_runs`); [optimization-run-failed.md](runbooks/optimization-run-failed.md) if runs are not finishing |
+| `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles` | [optimization-run-failed.md](runbooks/optimization-run-failed.md) (dispatcher, DLQ redrive) |
+| `optimization-throttled`, `model-refresh-throttled`, `model-monitor-throttled` | [scale-planning-season.md](runbooks/scale-planning-season.md) (Step Functions quota) |
+| `model-refresh-failed`, `model-refresh-overdue` | [model-refresh-failed.md](runbooks/model-refresh-failed.md); write-back step: [write-back-failed.md](runbooks/write-back-failed.md) |
+| `model-monitor-failed`, `model-drift-<bu>` | [model-drift.md](runbooks/model-drift.md) |
 | EventBridge `model-package-state` (version created / approved / rejected) | [model-rollback.md](runbooks/model-rollback.md); a rejection lists the failed thresholds |
-| `aurora-cpu`, `aurora-acu-max`, `aurora-connections`, `aurora-free-local-storage`, `aurora-replica-lag` | Raise `aurora_max_acu` / tune queries (PR); [db-restore.md](runbooks/db-restore.md) if data is affected |
+| `rds-cpu`, `rds-connections`, `rds-read-latency`, `rds-write-latency`, `rds-free-storage` | Larger `rds_instance_class` or `rds_max_allocated_storage` / tune queries (PR; class change = short outage, Multi-AZ fails over first); [db-restore.md](runbooks/db-restore.md) if data is affected |
 | `cert-expiry-alb` | [rotation.md](runbooks/rotation.md) |
 | EventBridge `backup-job-failed` | [docs/08](08-backup-and-dr.md); re-run the job on demand |
 | Budget email `mmm-<env>-monthly`, Cost Anomaly email | Cost dashboard `mmm-<env>-cost`; [scale-planning-season.md](runbooks/scale-planning-season.md) to scale back down |
@@ -61,8 +65,8 @@ Lambda `-errors`. Full list with thresholds: [monitoring README](../infra/module
 | EventBridge `guardduty-high`, `breakglass-used` | [security-incident.md](runbooks/security-incident.md), [break-glass.md](runbooks/break-glass.md) |
 
 **On-call daily check (prod):** `describe-alarms` in ALARM; scan SNS topic subscriptions; open the
-`mmm-prd-platform` dashboard (alarm list, requests and 5xx, ECS tasks, Aurora, Step Functions,
-Lambda, WAF), then `mmm-prd-api-ui`, `mmm-prd-optimization`, `mmm-prd-aurora`, `mmm-prd-cost`
+`mmm-prd-platform` dashboard (alarm list, requests and 5xx, ECS tasks, RDS, Step Functions,
+Lambda, WAF), then `mmm-prd-api-ui`, `mmm-prd-optimization` (incl. run queue), `mmm-prd-rds`, `mmm-prd-cost`
 (and `-training`, `-genai` when those are on) as needed. If Splunk shipping is on, spot-check
 freshness for `api`, `sfn-optimization`, and `publisher` log groups.
 

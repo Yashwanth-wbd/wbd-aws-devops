@@ -1,7 +1,8 @@
 # 10 – Data platform and model governance (Step 13)
 
 How a business unit moves from landing-zone data to a trained model in the SageMaker Model Registry,
-and how an approved model’s response curves reach the optimizer. DevOps owns the AWS plumbing,
+how predictions and lift are written back to Databricks, how an approved model’s response curves
+reach the optimizer, and how drift is watched afterwards. DevOps owns the AWS plumbing,
 Step Functions, schedules, and governance pipelines. The data team owns the Databricks Asset Bundle
 (`data/databricks/`) and the refresh job logic.
 
@@ -21,9 +22,16 @@ flowchart LR
   sm_train --> sm_eval[SageMaker evaluate]
   sm_eval -->|evaluation.json + curves/| models[(S3 models<br/>evaluation/...)]
   sm_eval --> reg[(SageMaker Model Registry<br/>PendingManualApproval)]
+  reg --> wb[Databricks write-back job<br/>predictions + lift → Gold]
   gov[model-governance.yml] -->|thresholds + WBD approval| reg
   gov -->|copy curves| curves[(S3 models/curves/&lt;bu&gt;/)]
+  gov -->|copy baseline| base[(S3 models/baseline/&lt;bu&gt;/)]
   curves --> opt[SageMaker optimizer<br/>Step Functions optimization]
+  msched[Scheduler per BU<br/>drift] --> mon[Step Functions<br/>mmm-&lt;env&gt;-model-monitor]
+  mon -->|export recent data| dbx
+  mon -->|drift job vs baseline| base
+  mon -->|ModelDrift metric, alarm| cw[CloudWatch]
+  mon -.->|above threshold + auto_refresh_on_drift| ondemand
 ```
 
 | Piece | Where | Name (dev) |
@@ -33,6 +41,8 @@ flowchart LR
 | Model-refresh state machine | `infra/modules/step-functions` | `mmm-dev-model-refresh` |
 | Schedules (one per BU) | `data.tf` | `mmm-dev-refresh-<bu>` in group `mmm-dev-model-refresh` |
 | On-demand rule | `data.tf` | `mmm-dev-model-refresh-on-demand` |
+| Model-monitor (drift) state machine | `infra/modules/step-functions` | `mmm-dev-model-monitor` |
+| Drift schedules (one per BU) and alarms | `data.tf` | `mmm-dev-drift-<bu>` in group `mmm-dev-model-monitor`; alarm `mmm-dev-model-drift-<bu>` |
 | SageMaker training role and model package groups | `infra/modules/sagemaker` | `mmm-dev-training`, groups `mmm-dev-<bu>` |
 | Thresholds and bundle hook | `data/` | `model-thresholds.yaml`, `databricks/` (data team) |
 | Pipelines | `.github/workflows/databricks.yml`, `model-governance.yml` | – |
@@ -67,10 +77,29 @@ State machine `mmm-<env>-model-refresh` (6 h timeout). Definition: `infra/enviro
 | **TrainModel** | SageMaker training job `mmm-<env>-train-<refresh_id>` on the snapshot; artifacts under `s3://<models>/artifacts/<bu>/`. |
 | **EvaluateModel** | Processing job `mmm-<env>-eval-<refresh_id>` (same image, argument `evaluate`); writes `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json` and `curves/`. |
 | **RegisterModel** | `CreateModelPackage` in group `mmm-<env_short>-<bu>` with status `PendingManualApproval` and `ModelMetrics` pointing at `evaluation.json`. |
+| **StartDatabricksWriteback / WaitForWriteback / GetWritebackRun** | `run-now` of job `databricks_writeback_job_id` with `business_unit`, `refresh_id`, `results_uri` (the evaluation prefix, incl. `predictions/` and `lift/`) and `model_package_arn`; polled every 60 s. The data team's job writes predictions and lift to the Gold tables, tagged with the package ARN (the approval status stays in the registry). |
+| **WritebackDone** | `SUCCESS` → **RefreshComplete**; failed or cancelled → **WritebackFailed** (the execution fails, `model-refresh-failed` alarm; the package stays registered—[runbooks/write-back-failed.md](runbooks/write-back-failed.md)). |
 
 Training uses `training_instance_type` and `training_max_runtime_seconds`. Evaluation uses the
 optimizer instance sizing from the environment tfvars (`optimizer_instance_type`,
 `optimizer_max_runtime_seconds`).
+
+### 3b. Model-monitor (drift) state machine
+
+State machine `mmm-<env>-model-monitor`, one execution per business unit, started by schedule
+`mmm-<env_short>-drift-<bu>` (`model_monitor_schedule`, default `cron(0 7 * * ? *)`, only with
+`enable_model_monitor_schedule = true`) or by hand with `{"business_unit": "<bu>"}`.
+
+| Step | What it does |
+|---|---|
+| **ApplyDefaults / Init** | Fills `drift_threshold` (from `data/model-thresholds.yaml` `business_units.<bu>.drift.threshold` in the schedule input, else `model_drift_threshold`) and `auto_refresh` (`auto_refresh_on_drift`); sets `monitor_id` and `monitor_date`. |
+| **StartDatabricksExport** (+ wait / poll) | The refresh job (`databricks_refresh_job_id`) with `purpose = monitor` exports recent features to `s3://<lakehouse>/monitoring/<bu>/<date>/` (kept 90 days). |
+| **CheckDrift** | Processing job (training image, argument `drift`) compares that data with `s3://<models>/baseline/<bu>/` and `curves/<bu>/` of the approved model; writes `drift.json` under `s3://<models>/monitoring/<bu>/<date>/`. |
+| **ReadDrift / PublishDrift** | Reads `drift.json` (`{"score": 0–1, "checks": {...}}`) and puts metric `MMM/Models` `ModelDrift` (dimensions `BusinessUnit`, `Check=overall`). |
+| **DriftDecision** | Score above threshold and `auto_refresh` → **RequestRefresh** (`mmm.refresh` event, same as the on-demand trigger); above threshold only → **DriftDetected** (alarm `mmm-<env>-model-drift-<bu>` fires on the metric); otherwise **NoDrift**. |
+
+The drift check needs a baseline, which exists only after the first approval (§7). Keep
+`enable_model_monitor_schedule = false` until every business unit has an approved model.
 
 ## 4. Databricks setup (WBD Databricks admins, once per environment)
 
@@ -88,8 +117,13 @@ Apply AWS with `enable_data_platform = true` first. Host and job id live in tfva
    `s3://wbd-mmm-<env>-training-data-<region_code>/`. The role can decrypt with the shared S3 key and
    per-business-unit keys (`business_unit_keys` in the `data_platform` output).
 4. **Refresh job** owned by the data team in `data/databricks/` (Asset Bundle). It must accept
-   `business_unit` and `snapshot_uri` and write the training snapshot to that prefix. After deploy,
-   set `databricks_refresh_job_id` in tfvars to the job id.
+   `business_unit` and `snapshot_uri` and write the training snapshot to that prefix. With
+   `purpose = monitor` it writes only the latest features to `snapshot_uri`, which then points at
+   `s3://<lakehouse>/monitoring/<bu>/<date>/` (drift check). After
+   deploy, set `databricks_refresh_job_id` in tfvars to the job id.
+   **Write-back job** (data team): accepts `business_unit`, `refresh_id`, `results_uri`,
+   `model_package_arn`, reads `predictions/` and `lift/` under `results_uri` and writes the Gold
+   tables; set `databricks_writeback_job_id`.
 5. **Service principal for the state machine.** Create a workspace service principal; put its
    application (client) id in `databricks_sp_client_id`. Its OAuth client secret is **not** in Secrets
    Manager: DevOps sets it on the EventBridge connection (§5).
@@ -152,7 +186,8 @@ sequenceDiagram
     G->>SM: tag governance_status=passed
     G->>A: dispatch promote (environment <env>-model-promotion)
     A-->>G: approve (cannot approve own run)
-    G->>SM: status Approved; copy curves to s3://<models>/curves/<bu>/
+    G->>SM: status Approved; copy curves to s3://<models>/curves/<bu>/ and baseline/ to baseline/<bu>/
+    G->>G: write approval.json next to evaluation.json
   end
 ```
 
@@ -172,10 +207,19 @@ sequenceDiagram
   It may tag and **reject** failing packages only. **promote** and **rollback** run in GitHub
   Environment `<env>-model-promotion` (WBD model approvers, prevent self-review) with
   `mmm-<env>-gha-model-approve`: sets **Approved**, copies `evaluation/.../curves/` to
-  `s3://<models bucket>/curves/<bu>/` plus `_model_package.json` (what the optimizer reads).
+  `s3://<models bucket>/curves/<bu>/` plus `_model_package.json` (what the optimizer reads), and
+  `evaluation/.../baseline/` to `s3://<models bucket>/baseline/<bu>/` (the drift reference; a
+  version without `baseline/` gets a warning and an empty baseline, so the drift check fails until
+  a version with a baseline is approved). Rollback re-publishes both.
+
+* **Thresholds file** also holds `baseline_prefix` and an optional `drift: {threshold: x}` per
+  business unit (0 < x < 1); `check-thresholds` validates both. A change to the file is applied by
+  `terraform.yml` (the drift schedules carry the threshold).
 
 * **Evidence**: SageMaker tags (`governance_status`, `governance_checks`, `governance_evaluated_at`,
-  `previous_approved_version`, `approved_by`, …) and artifact `model-evaluation-<env>-<run>` (90 days).
+  `previous_approved_version`, `approved_by`, …), `approval.json` next to `evaluation.json`
+  (environment, BU, package ARN, version, previous version, approver, time, run URL, checks, file
+  counts) and artifact `model-evaluation-<env>-<run>` (90 days).
 
 * **Manual runs** (*Actions → model-governance → Run workflow*):
   * `evaluate`: one business unit or `all`; optional `version` to re-evaluate.
@@ -210,8 +254,10 @@ tag policies for app releases (`v*` tags only).
 
 1. In `infra/environments/<env>/terraform.tfvars`: set `enable_data_platform = true` and WBD values for
    `databricks_account_id`, `databricks_host`, `databricks_sp_client_id`, `databricks_refresh_job_id`,
-   `training_instance_type`, `training_max_runtime_seconds`, `model_refresh_schedule`,
-   `model_refresh_timezone`, and optionally `enable_model_refresh_schedule`,
+   `databricks_writeback_job_id`, `training_instance_type`, `training_max_runtime_seconds`,
+   `model_refresh_schedule`, `model_refresh_timezone`, `model_monitor_schedule`,
+   `model_drift_threshold`, `auto_refresh_on_drift`, and optionally `enable_model_refresh_schedule`,
+   `enable_model_monitor_schedule` (after the first approval),
    `databricks_self_assume_enabled`, `enable_databricks_privatelink`,
    `databricks_privatelink_service_name`. PR → plan → apply (`terraform.yml`).
 2. Complete Databricks §4 (UC phase 2, refresh job deployed via `databricks.yml`, connection secret §5).
@@ -235,6 +281,13 @@ aws stepfunctions start-execution --state-machine-arn $dp.refresh_state_machine 
 # Registry packages for a BU
 aws sagemaker list-model-packages --model-package-group-name "mmm-dev-streaming" `
   --model-approval-status PendingManualApproval --sort-by CreationTime --sort-order Descending
+# Drift check for one BU (after an approval published models/baseline/streaming/)
+aws stepfunctions start-execution --state-machine-arn $dp.monitor_state_machine `
+  --input '{"business_unit":"streaming"}'
+aws cloudwatch get-metric-statistics --namespace MMM/Models --metric-name ModelDrift `
+  --dimensions Name=BusinessUnit,Value=streaming Name=Check,Value=overall `
+  --start-time (Get-Date).ToUniversalTime().AddDays(-7).ToString("s") --end-time (Get-Date).ToUniversalTime().ToString("s") `
+  --period 86400 --statistics Maximum
 ```
 
 Governance: `gh workflow run model-governance.yml -f environment=dev -f action=evaluate -f business_unit=streaming`.
@@ -251,3 +304,6 @@ Governance: `gh workflow run model-governance.yml -f environment=dev -f action=e
 | Governance skipped | `MODEL_EVAL_ROLE_ARN_<ENV>` unset; package already tagged `governance_status` |
 | Promote refused | Tag `governance_status=passed`; version still `PendingManualApproval` |
 | Optimizer uses old curves | Promote copies to `models/curves/<bu>/`; check `_model_package.json` |
+| Refresh fails at `WritebackFailed` | Databricks write-back run in the UI; `databricks_writeback_job_id`; [runbooks/write-back-failed.md](runbooks/write-back-failed.md) |
+| Monitor fails at `CheckDrift` | `models/baseline/<bu>/` empty (no approved version with a baseline yet); training image `drift` entrypoint; [runbooks/model-drift.md](runbooks/model-drift.md) |
+| `model-drift-<bu>` in ALARM | [runbooks/model-drift.md](runbooks/model-drift.md) |

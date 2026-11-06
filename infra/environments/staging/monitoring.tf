@@ -5,10 +5,24 @@ locals {
 
   state_machines = merge(
     { optimization = module.optimization_sfn.state_machine_arn },
-    var.enable_data_platform ? { model-refresh = module.refresh_sfn[0].state_machine_arn } : {},
+    var.enable_data_platform ? { model-refresh = module.refresh_sfn[0].state_machine_arn, model-monitor = module.monitor_sfn[0].state_machine_arn } : {},
   )
 
-  lambda_functions = concat([module.publisher.function_name], var.enable_genai ? [module.llm_gateway[0].proxy_function_name] : [])
+  lambda_functions = concat([module.publisher.function_name, module.run_queue.dispatcher_function_name], var.enable_genai ? [module.llm_gateway[0].proxy_function_name] : [])
+
+  # RDS for PostgreSQL max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000); unknown class = no connections alarm
+  rds_memory_gib = {
+    "db.t4g.medium"  = 4
+    "db.t4g.large"   = 8
+    "db.m6g.large"   = 8
+    "db.m6g.xlarge"  = 16
+    "db.r6g.large"   = 16
+    "db.r6g.xlarge"  = 32
+    "db.r6g.2xlarge" = 64
+    "db.r7g.large"   = 16
+    "db.r7g.xlarge"  = 32
+  }
+  rds_max_connections = try(min(floor(local.rds_memory_gib[var.rds_instance_class] * 1073741824 / 9531392), 5000), null)
 
   # Shipped to Splunk: app logs, audit logs, WAF; VPC flow logs only on request (volume / licence).
   splunk_log_groups = merge(
@@ -17,15 +31,17 @@ locals {
       ui               = module.svc_ui.log_group_name
       migrate          = module.task_migrate.log_group_name
       ecs-exec         = module.ecs_cluster.exec_audit_log_group_name
-      aurora-postgres  = module.aurora.log_group_name
+      rds-postgres     = module.rds.log_group_name
       waf              = module.waf.log_group_name
       sfn-optimization = module.optimization_sfn.log_group_name
       publisher        = module.publisher.log_group_name
+      run-dispatcher   = module.run_queue.log_group_name
       sagemaker-jobs   = aws_cloudwatch_log_group.sagemaker["ProcessingJobs"].name
     },
     var.ship_vpc_flow_logs ? { vpc-flow = module.network.flow_log_group_name } : {},
     var.enable_data_platform ? {
       sfn-model-refresh = module.refresh_sfn[0].log_group_name
+      sfn-model-monitor = module.monitor_sfn[0].log_group_name
       sagemaker-train   = aws_cloudwatch_log_group.sagemaker["TrainingJobs"].name
     } : {},
     var.enable_genai ? { for k, v in module.llm_gateway[0].log_group_names : "llm-${k}" => v } : {},
@@ -41,7 +57,7 @@ module "monitoring" {
 
   alb_arn_suffix            = module.alb.alb_arn_suffix
   target_group_arn_suffixes = module.alb.target_group_arn_suffixes
-  aurora_cluster_id         = module.aurora.cluster_identifier
+  rds_instance_id           = module.rds.instance_identifier
   ecs_cluster_name          = module.ecs_cluster.cluster_name
   ecs_service_names         = [module.svc_api.service_name, module.svc_ui.service_name]
   state_machine_arns        = local.state_machines
@@ -50,9 +66,12 @@ module "monitoring" {
   certificate_arns          = local.watched_certificates
   waf_web_acl_name          = module.waf.web_acl_name
 
-  # Aurora PostgreSQL default max_connections = LEAST(memory / 9531392, 5000); 2 GiB per ACU at max_acu
-  aurora_max_connections = min(floor(var.aurora_max_acu * 2147483648 / 9531392), 5000)
-  aurora_has_reader      = var.environment != "dev"
+  rds_max_connections  = local.rds_max_connections
+  rds_free_storage_gib = max(floor(var.rds_allocated_storage / 10), 5)
+
+  run_queue_name       = module.run_queue.queue_name
+  run_dlq_name         = module.run_queue.dlq_name
+  drift_business_units = var.enable_data_platform ? var.business_units : []
 
   # Weekly schedule: alarm after 7 days without a successful refresh
   model_refresh_overdue_days = var.enable_data_platform && var.enable_model_refresh_schedule ? 7 : null

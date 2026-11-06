@@ -8,9 +8,9 @@ locals {
       tasks        = "One-off ECS tasks (platform check, DB bootstrap) - no inbound, HTTPS out"
       data_clients = "Attach to anything that uses the database - PostgreSQL to RDS Proxy"
       rds_proxy    = "RDS Proxy - PostgreSQL from data clients only"
-      rds          = "Aurora PostgreSQL - from RDS Proxy only"
+      rds          = "RDS PostgreSQL - from RDS Proxy only"
       sagemaker    = "SageMaker jobs - traffic between job instances, HTTPS to VPC endpoints and S3 only"
-      lambda       = "VPC Lambda functions (results publisher) - no inbound, HTTPS to VPC endpoints and S3"
+      lambda       = "VPC Lambda functions (results publisher, run dispatcher) - no inbound, HTTPS to VPC endpoints and S3"
     },
     var.enable_resolver_forwarding ? { resolver = "Route 53 Resolver outbound endpoint - DNS to WBD servers" } : {},
     var.create_genai_security_group ? { genai = "LLM gateway proxy Lambda - no inbound, HTTPS out to the approved LLM providers and VPC endpoints" } : {},
@@ -41,7 +41,7 @@ locals {
   static_egress_rules = {
     alb_to_api                = { sg = "alb", description = "App port to API tasks", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "api", enabled = true }
     alb_to_ui                 = { sg = "alb", description = "Web port to UI tasks", protocol = "tcp", port = var.ui_port, cidr = null, prefix_list = null, source_sg = "ui", enabled = true }
-    alb_https_out             = { sg = "alb", description = "HTTPS to Cognito (authenticate-cognito token exchange)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
+    alb_https_out             = { sg = "alb", description = "HTTPS to Okta (authenticate-oidc token and user info calls)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
     api_https_out             = { sg = "api", description = "HTTPS to AWS endpoints, S3 and the ALB token-signing keys", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
     ui_to_endpoints           = { sg = "ui", description = "HTTPS to interface endpoints (ECR, logs)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     ui_to_s3                  = { sg = "ui", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
@@ -49,7 +49,7 @@ locals {
     data_clients_to_proxy     = { sg = "data_clients", description = "PostgreSQL to RDS Proxy", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds_proxy", enabled = true }
     data_clients_to_endpoints = { sg = "data_clients", description = "HTTPS to interface endpoints (ECR, logs, secrets)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     data_clients_to_s3        = { sg = "data_clients", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
-    rds_proxy_to_rds          = { sg = "rds_proxy", description = "PostgreSQL to Aurora", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds", enabled = true }
+    rds_proxy_to_rds          = { sg = "rds_proxy", description = "PostgreSQL to the RDS instance", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds", enabled = true }
     sagemaker_to_self         = { sg = "sagemaker", description = "Between instances of one job (distributed training)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "sagemaker", enabled = true }
     sagemaker_to_endpoints    = { sg = "sagemaker", description = "HTTPS to interface endpoints (ECR, logs, STS, KMS, SageMaker API)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     sagemaker_to_s3           = { sg = "sagemaker", description = "HTTPS to S3 gateway endpoint (data, models, outputs)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
@@ -70,7 +70,7 @@ locals {
 }
 
 resource "aws_security_group" "this" {
-  #checkov:skip=CKV2_AWS_5:Attached by the ALB, ECS, Aurora, SageMaker and Lambda resources of the environment stack.
+  #checkov:skip=CKV2_AWS_5:Attached by the ALB, ECS, RDS, SageMaker and Lambda resources of the environment stack.
   for_each = local.security_groups
 
   name        = "${var.name_prefix}-${replace(each.key, "_", "-")}-sg"

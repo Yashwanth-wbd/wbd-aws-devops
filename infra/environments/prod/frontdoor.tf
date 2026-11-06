@@ -1,21 +1,24 @@
 # ================================================================== Step 8 - Front door and sign-in
-# Browser -> public ALB (regional WAF, TLS 1.2+) -> Cognito sign-in federated to WBD Okta (SAML)
+# Browser -> public ALB (regional WAF, TLS 1.2+) -> sign-in with WBD Okta (OIDC, MFA in Okta)
 # -> UI tasks (/*) and API tasks (/api/*). Unauthenticated /api/* calls get 401; only
 # /api/health is open (health checks, smoke test).
+# Until okta_sign_in_enabled = true (client secret stored in mmm/<env>/okta/alb-client) the ALB
+# answers 503 on everything except /api/health - the app is never reachable without sign-in.
 locals {
   app_url = "https://${var.app_domain_name}"
+
+  # Org authorization server (https://<org>.okta.com) or custom one (https://<org>.okta.com/oauth2/<id>)
+  okta_issuer   = trimsuffix(var.okta_issuer, "/")
+  okta_base     = strcontains(local.okta_issuer, "/oauth2/") ? local.okta_issuer : "${local.okta_issuer}/oauth2"
+  okta_endpoint = { for e in ["authorize", "token", "userinfo", "logout"] : e => "${local.okta_base}/v1/${e}" }
+
+  okta_logout_url = "${local.okta_endpoint.logout}?client_id=${var.okta_client_id}&post_logout_redirect_uri=${urlencode("${local.app_url}/")}"
 }
 
-# ------------------------------------------------------------------ Cognito (WBD Okta federation)
-module "cognito" {
-  source = "../../modules/cognito"
+data "aws_secretsmanager_secret_version" "okta" {
+  count = var.okta_sign_in_enabled ? 1 : 0
 
-  name_prefix         = local.name_prefix
-  app_domain_name     = var.app_domain_name
-  domain_prefix       = coalesce(var.cognito_domain_prefix, "wbd-mmm-${local.env_short}")
-  saml_metadata_url   = var.okta_saml_metadata_url
-  session_hours       = var.session_hours
-  deletion_protection = local.is_prod
+  secret_id = module.secrets.secret_arns["okta/alb-client"]
 }
 
 # ------------------------------------------------------------------ ALB
@@ -30,12 +33,15 @@ module "alb" {
   app_port          = local.app_port
   ui_port           = local.ui_port
 
-  cognito = {
-    user_pool_arn   = module.cognito.user_pool_arn
-    client_id       = module.cognito.client_id
-    domain_prefix   = module.cognito.domain_prefix
-    session_seconds = var.session_hours * 3600
-  }
+  oidc = var.okta_sign_in_enabled ? {
+    issuer                 = local.okta_issuer
+    authorization_endpoint = local.okta_endpoint.authorize
+    token_endpoint         = local.okta_endpoint.token
+    user_info_endpoint     = local.okta_endpoint.userinfo
+    client_id              = var.okta_client_id
+    session_seconds        = var.session_hours * 3600
+  } : null
+  oidc_client_secret = var.okta_sign_in_enabled ? jsondecode(data.aws_secretsmanager_secret_version.okta[0].secret_string)["client_secret"] : null
 
   access_log_bucket   = module.log_bucket.bucket_name
   access_log_prefix   = module.log_bucket.prefixes.alb

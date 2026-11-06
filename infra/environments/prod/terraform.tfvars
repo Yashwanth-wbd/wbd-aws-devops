@@ -1,6 +1,6 @@
 # Prod: same code as dev and staging (scripts/sync-environments.ps1); only these values differ.
-# Prod-only behaviour comes from var.environment = "prod": Aurora writer + reader with deletion
-# protection, ALB and Cognito deletion protection, 35-day PITR + monthly backups, recovery points
+# Prod-only behaviour comes from var.environment = "prod": RDS and ALB deletion protection,
+# 35-day PITR + monthly backups, recovery points
 # cannot be deleted, no PR plans, larger ECS min/max, no execution data in Step Functions logs.
 # ------------------------------------------------------------------ Account and region
 environment = "prod"
@@ -96,11 +96,15 @@ approved_worm_retention_days = 2555
 # add actual value
 training_data_retention_days = 730
 
-aurora_engine_version = "16.6"
+# RDS for PostgreSQL (prod: Multi-AZ, memory-optimised)
+rds_engine_version = "16.6"
 # add actual value
-aurora_min_acu = 1
+rds_instance_class = "db.r6g.xlarge"
 # add actual value
-aurora_max_acu = 32
+rds_allocated_storage = 200
+# add actual value
+rds_max_allocated_storage = 1000
+rds_multi_az              = true
 
 # ------------------------------------------------------------------ ECS and optimization (Step 7)
 enable_application_signals = false
@@ -111,6 +115,9 @@ enable_platform_check_task = true
 # add actual value
 optimizer_instance_type       = "ml.m5.2xlarge"
 optimizer_max_runtime_seconds = 3600
+# add actual value
+max_concurrent_runs    = 50
+max_queue_wait_minutes = 30
 
 # ------------------------------------------------------------------ Front door and sign-in (Step 8)
 # add actual value
@@ -121,10 +128,12 @@ alb_certificate_arn = "arn:aws:acm:us-east-1:333333333333:certificate/00000000-0
 alb_ingress_cidrs = ["0.0.0.0/0"]
 route53_zone_id   = null
 # add actual value
-okta_saml_metadata_url = "https://wbd.okta.com/app/exk00000000000000002/sso/saml/metadata"
+okta_issuer = "https://wbd.okta.com/oauth2/default"
 # add actual value
-cognito_domain_prefix = "wbd-mmm"
-session_hours         = 12
+okta_client_id = "0oa00000000000000002"
+# true once mmm/prod/okta/alb-client holds {"client_secret":"..."}
+okta_sign_in_enabled = false
+session_hours        = 12
 # add actual value
 geo_allow_countries = []
 # add actual value
@@ -171,6 +180,14 @@ training_max_runtime_seconds = 14400
 model_refresh_schedule        = "cron(0 6 ? * MON *)"
 model_refresh_timezone        = "America/New_York"
 enable_model_refresh_schedule = false
+# add actual value
+databricks_writeback_job_id = 0
+# add actual value
+model_monitor_schedule        = "cron(0 7 * * ? *)"
+enable_model_monitor_schedule = false
+# add actual value
+model_drift_threshold = 0.2
+auto_refresh_on_drift = false
 
 # ------------------------------------------------------------------ Release 2 GenAI (Step 14)
 # Turn on after the Release 1 gate (docs/11) and WBD approval of data egress to the providers

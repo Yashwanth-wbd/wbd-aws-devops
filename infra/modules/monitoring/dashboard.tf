@@ -24,7 +24,7 @@ locals {
     ] },
   ] }
 
-  # One dashboard per audience (Step 9): platform overview, API/UI, optimization, training, Aurora, cost, GenAI.
+  # One dashboard per audience (Step 9): platform overview, API/UI, optimization, training, RDS, cost, GenAI.
   dashboard_widgets = merge(
     {
       platform = concat(
@@ -37,9 +37,9 @@ locals {
           { title = "ECS running tasks per service", metrics = [
             for s in var.ecs_service_names : ["ECS/ContainerInsights", "RunningTaskCount", "ClusterName", var.ecs_cluster_name, "ServiceName", s, { stat = "Average" }]
           ] },
-          { title = "Aurora CPU % and ACU %", metrics = [
-            ["AWS/RDS", "CPUUtilization", "DBClusterIdentifier", var.aurora_cluster_id, { stat = "Average" }],
-            [".", "ACUUtilization", ".", ".", { stat = "Average" }],
+          { title = "RDS CPU % and connections", metrics = [
+            ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", var.rds_instance_id, { stat = "Average" }],
+            [".", "DatabaseConnections", ".", ".", { stat = "Maximum", yAxis = "right" }],
           ] },
           { title = "Step Functions executions (started / failed)", metrics = concat(
             [for n, arn in var.state_machine_arns : ["AWS/States", "ExecutionsStarted", "StateMachineArn", arn, { stat = "Sum", label = "${n} started" }]],
@@ -90,31 +90,28 @@ locals {
         ],
       )
 
-      aurora = concat(
-        [
-          { title = "CPU % and connections", metrics = [
-            ["AWS/RDS", "CPUUtilization", "DBClusterIdentifier", var.aurora_cluster_id, { stat = "Average" }],
-            [".", "DatabaseConnections", ".", ".", { stat = "Maximum", yAxis = "right" }],
-          ] },
-          { title = "Capacity (ACU) and ACU %", metrics = [
-            ["AWS/RDS", "ServerlessDatabaseCapacity", "DBClusterIdentifier", var.aurora_cluster_id, { stat = "Average" }],
-            [".", "ACUUtilization", ".", ".", { stat = "Average", yAxis = "right" }],
-          ] },
-          { title = "Free local storage and freeable memory (bytes)", metrics = [
-            ["AWS/RDS", "FreeLocalStorage", "DBClusterIdentifier", var.aurora_cluster_id, { stat = "Minimum" }],
-            [".", "FreeableMemory", ".", ".", { stat = "Minimum" }],
-          ] },
-          { title = "Read / write latency (s)", metrics = [
-            ["AWS/RDS", "ReadLatency", "DBClusterIdentifier", var.aurora_cluster_id, { stat = "Average" }],
-            [".", "WriteLatency", ".", ".", { stat = "Average" }],
-          ] },
-        ],
-        var.aurora_has_reader ? [
-          { title = "Reader replica lag (ms)", metrics = [
-            ["AWS/RDS", "AuroraReplicaLag", "DBClusterIdentifier", var.aurora_cluster_id, "Role", "READER", { stat = "Maximum" }],
-          ] },
-        ] : [],
-      )
+      rds = [
+        { title = "CPU % and connections", metrics = [
+          ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", var.rds_instance_id, { stat = "Average" }],
+          [".", "DatabaseConnections", ".", ".", { stat = "Maximum", yAxis = "right" }],
+        ] },
+        { title = "Free storage and freeable memory (bytes)", metrics = [
+          ["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", var.rds_instance_id, { stat = "Minimum" }],
+          [".", "FreeableMemory", ".", ".", { stat = "Minimum" }],
+        ] },
+        { title = "Read / write latency (s)", metrics = [
+          ["AWS/RDS", "ReadLatency", "DBInstanceIdentifier", var.rds_instance_id, { stat = "Average" }],
+          [".", "WriteLatency", ".", ".", { stat = "Average" }],
+        ] },
+        { title = "Read / write IOPS", metrics = [
+          ["AWS/RDS", "ReadIOPS", "DBInstanceIdentifier", var.rds_instance_id, { stat = "Average" }],
+          [".", "WriteIOPS", ".", ".", { stat = "Average" }],
+        ] },
+        { title = "RDS Proxy client connections", metrics = [
+          ["AWS/RDS", "ClientConnections", "ProxyName", "${var.rds_instance_id}-proxy", { stat = "Maximum" }],
+          [".", "DatabaseConnections", ".", ".", { stat = "Maximum" }],
+        ] },
+      ]
 
       # Billing metrics exist only in us-east-1 and need "Receive Billing Alerts" on in the account.
       cost = [
@@ -143,9 +140,32 @@ locals {
             [".", "Duration", ".", ".", { stat = "p95", yAxis = "right" }],
           ] },
         ],
+        var.run_queue_name == null ? [] : [
+          { title = "Run queue: waiting requests and DLQ", metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", var.run_queue_name, { stat = "Maximum", label = "waiting" }],
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", coalesce(var.run_dlq_name, "${var.run_queue_name}-dlq"), { stat = "Maximum", label = "DLQ" }],
+          ] },
+          { title = "Run queue: oldest request (s)", metrics = [
+            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", var.run_queue_name, { stat = "Maximum" }],
+          ] },
+          { title = "Running runs and expired requests", metrics = [
+            ["MMM/Optimization", "RunningRuns", "StateMachine", "${var.name_prefix}-optimization", { stat = "Maximum" }],
+            [".", "ExpiredRunRequests", ".", ".", { stat = "Sum", yAxis = "right" }],
+          ] },
+        ],
       )
     } : {},
-    local.has_model_refresh ? { training = local.sfn_widgets["model-refresh"] } : {},
+    local.has_model_refresh ? {
+      training = concat(
+        local.sfn_widgets["model-refresh"],
+        try(local.sfn_widgets["model-monitor"], []),
+        length(var.drift_business_units) == 0 ? [] : [
+          { title = "Model drift score per business unit", period = 86400, metrics = [
+            for bu in var.drift_business_units : ["MMM/Models", "ModelDrift", "BusinessUnit", bu, "Check", "overall", { stat = "Maximum", label = bu }]
+          ] },
+        ],
+      )
+    } : {},
     var.llm_gateway_api_name == null ? {} : {
       genai = concat(
         [

@@ -8,17 +8,31 @@ services that use the value.
 
 | Value | Rotation | How |
 |---|---|---|
-| Aurora admin password | automatic (RDS-managed secret) | nothing to do; `terraform output aurora.master_user_secret_arn` |
+| RDS admin password | automatic (RDS-managed secret) | nothing to do; `terraform output rds.master_user_secret_arn` |
+| Okta ALB client secret (`mmm/<env>/okta/alb-client`) | when WBD Identity rotates it (at least yearly) | below – needs a `terraform apply` |
 | App / migration DB users (`mmm/<env>/rds/proxy`, `rds/migrate`) | every 90 days | below |
 | LLM provider keys (`mmm/<env>/llm/<provider>`) | when the issuer rotates (at least yearly) | below |
 | Databricks OAuth client secret (model refresh) | when WBD rotates the service principal | EventBridge connection (below), not Secrets Manager |
 | Splunk HEC token, third-party keys | when the issuer rotates them | below |
 | ACM certificate (ALB) | automatic (DNS validation) | alarm `cert-expiry-alb` 30 days before expiry means renewal is failing |
 | GitHub OIDC | no secret to rotate | – |
-| Cognito / Okta SAML | metadata cert rotation at Okta | update `okta_saml_metadata_url` if WBD changes the app |
+| Okta signing keys | rotated by Okta automatically | nothing to do (the ALB reads Okta's keys; the API checks the ALB's signature, not Okta's) |
 
-Terraform does **not** generate Redis, CloudFront or other platform secrets in v2 – every container
+Terraform does **not** generate Redis, CloudFront or other platform secrets – every container
 is filled out of band once.
+
+## Okta ALB client secret
+
+The ALB listener holds the secret, so it changes only when Terraform applies.
+
+1. WBD Identity adds a second client secret in the Okta app (Okta allows two active secrets), or
+   agrees a short window.
+2. Write it from a file, then delete the file:
+   `aws secretsmanager put-secret-value --secret-id mmm/<env>/okta/alb-client --secret-string file://okta-client.json`
+   (`{"client_secret":"<new>"}`).
+3. Run the `terraform` workflow for that environment (dispatch, or any merge to `main` for dev);
+   the plan shows an in-place update of the HTTPS listener and the `/api/*` rule.
+4. Test sign-in in a private window, then WBD Identity deactivates the old secret.
 
 ## DB users
 

@@ -1,9 +1,11 @@
 # ================================================================== Step 13 - Data-team platform and model refresh
 # Databricks (Lakeflow job) prepares the training snapshot; SageMaker trains and evaluates; the
 # model package is registered as PendingManualApproval and approved by a WBD approver through
-# model-governance.yml. Orchestration: EventBridge Scheduler / "mmm.refresh" event -> model-refresh
-# state machine. DevOps owns the plumbing; the job code belongs to the data team.
-# Everything in this file exists only when enable_data_platform = true.
+# model-governance.yml; the Databricks write-back job copies predictions and lift to Gold.
+# Orchestration: EventBridge Scheduler / "mmm.refresh" event -> model-refresh state machine.
+# Drift: a daily model-monitor state machine per BU compares new features with the approved
+# baseline (alarm; optional automatic refresh). DevOps owns the plumbing; the job code belongs to
+# the data team. Everything in this file exists only when enable_data_platform = true.
 locals {
   data_platform_kms_purposes = var.enable_data_platform ? [for bu in var.business_units : "s3-${bu}"] : []
   bu_key_arns                = var.enable_data_platform ? { for bu in var.business_units : bu => module.kms.key_arns["s3-${bu}"] } : {}
@@ -19,8 +21,11 @@ locals {
 
   refresh_name         = "model-refresh"
   refresh_sm_arn       = "arn:${local.partition}:states:${var.aws_region}:${local.account_id}:stateMachine:${local.name_prefix}-${local.refresh_name}"
+  monitor_name         = "model-monitor"
+  monitor_sm_arn       = "arn:${local.partition}:states:${var.aws_region}:${local.account_id}:stateMachine:${local.name_prefix}-${local.monitor_name}"
   training_job_prefix  = "${local.name_prefix}-train"
   evaluate_job_prefix  = "${local.name_prefix}-eval"
+  drift_job_prefix     = "${local.name_prefix}-drift"
   databricks_api       = trimsuffix(var.databricks_host, "/")
   sagemaker_arn_prefix = "arn:${local.partition}:sagemaker:${var.aws_region}:${local.account_id}"
 }
@@ -61,6 +66,9 @@ module "databricks_access" {
   bucket_arns  = [for b in local.data_bucket_names : module.buckets[b].bucket_arn]
   kms_key_arns = local.data_key_arns
 
+  # Write-back job reads predictions and lift from the evaluation output
+  read_only_prefixes = [{ bucket_arn = module.buckets["models"].bucket_arn, prefix = "evaluation/" }]
+
   enable_privatelink         = var.enable_databricks_privatelink
   workspace_host             = var.databricks_host
   workspace_service_name     = var.databricks_privatelink_service_name
@@ -80,7 +88,7 @@ resource "aws_cloudwatch_event_connection" "databricks" {
   count = local.data_count
 
   name               = "${local.name_prefix}-databricks"
-  description        = "Databricks workspace API (service principal OAuth) for the model-refresh state machine"
+  description        = "Databricks workspace API (service principal OAuth) for the model-refresh and model-monitor state machines"
   authorization_type = "OAUTH_CLIENT_CREDENTIALS"
 
   auth_parameters {
@@ -118,7 +126,7 @@ module "sagemaker_training" {
 
   name_prefix         = local.name_prefix
   name                = "training"
-  read_bucket_arns    = [module.buckets["training-data"].bucket_arn, module.buckets["models"].bucket_arn]
+  read_bucket_arns    = [module.buckets["training-data"].bucket_arn, module.buckets["models"].bucket_arn, module.buckets["lakehouse"].bucket_arn]
   write_bucket_arns   = [module.buckets["models"].bucket_arn]
   data_kms_key_arns   = local.data_key_arns
   volume_kms_key_arn  = module.kms.key_arns["sagemaker"]
@@ -140,6 +148,13 @@ locals {
     Subnets          = module.network.private_app_subnet_ids
     SecurityGroupIds = [module.network.security_group_ids["sagemaker"]]
   }
+
+  databricks_retry = [{
+    ErrorEquals     = ["States.Http.StatusCode.429", "States.Http.StatusCode.503"]
+    IntervalSeconds = 30
+    MaxAttempts     = 3
+    BackoffRate     = 2
+  }]
 
   refresh_definition = var.enable_data_platform ? {
     Comment        = "MMM model refresh per business unit (${var.environment})"
@@ -316,8 +331,71 @@ locals {
         }
         ResultSelector = { "model_package_arn.$" = "$.ModelPackageArn" }
         ResultPath     = "$.registered"
-        End            = true
+        Next           = "StartDatabricksWriteback"
       }
+      # Write-back job: predictions/ and lift/ of the evaluation output -> Gold monitoring tables
+      # (tagged with model_package_arn; the approval status lives in the registry).
+      StartDatabricksWriteback = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::http:invoke"
+        Parameters = {
+          ApiEndpoint    = "${local.databricks_api}/api/2.2/jobs/run-now"
+          Method         = "POST"
+          Authentication = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
+          RequestBody = {
+            job_id = var.databricks_writeback_job_id
+            job_parameters = {
+              "business_unit.$"     = "$.business_unit"
+              "refresh_id.$"        = "$.refresh_id"
+              "results_uri.$"       = local.evaluation_uri
+              "model_package_arn.$" = "$.registered.model_package_arn"
+            }
+          }
+        }
+        ResultSelector = { "run_id.$" = "$.ResponseBody.run_id" }
+        ResultPath     = "$.writeback"
+        Retry          = local.databricks_retry
+        Next           = "WaitForWriteback"
+      }
+      WaitForWriteback = { Type = "Wait", Seconds = 60, Next = "GetWritebackRun" }
+      GetWritebackRun = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::http:invoke"
+        Parameters = {
+          ApiEndpoint     = "${local.databricks_api}/api/2.2/jobs/runs/get"
+          Method          = "GET"
+          Authentication  = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
+          QueryParameters = { "run_id.$" = "States.Format('{}', $.writeback.run_id)" }
+        }
+        ResultSelector = { "state.$" = "$.ResponseBody.state" }
+        ResultPath     = "$.writeback.run"
+        Retry          = local.databricks_retry
+        Next           = "WritebackDone"
+      }
+      WritebackDone = {
+        Type = "Choice"
+        Choices = [
+          {
+            And = [
+              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "TERMINATED" },
+              { Variable = "$.writeback.run.state.result_state", IsPresent = true },
+              { Variable = "$.writeback.run.state.result_state", StringEquals = "SUCCESS" },
+            ]
+            Next = "RefreshComplete"
+          },
+          {
+            Or = [
+              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "TERMINATED" },
+              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "INTERNAL_ERROR" },
+              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "SKIPPED" },
+            ]
+            Next = "WritebackFailed"
+          },
+        ]
+        Default = "WaitForWriteback"
+      }
+      WritebackFailed = { Type = "Fail", Error = "WritebackFailed", Cause = "The model package is registered, but the Databricks write-back job did not succeed (runbooks/write-back-failed.md)." }
+      RefreshComplete = { Type = "Succeed" }
     }
   } : null
 }
@@ -438,7 +516,7 @@ resource "aws_iam_role" "refresh_trigger" {
   count = local.data_count
 
   name                 = "${local.name_prefix}-model-refresh-trigger"
-  description          = "EventBridge Scheduler / rule -> start the model-refresh state machine"
+  description          = "EventBridge Scheduler / rule -> start the model-refresh and model-monitor state machines"
   assume_role_policy   = data.aws_iam_policy_document.refresh_trigger_trust.json
   permissions_boundary = module.permission_boundary.policy_arn
 
@@ -452,7 +530,7 @@ resource "aws_iam_role_policy" "refresh_trigger" {
   role = aws_iam_role.refresh_trigger[0].id
   policy = jsonencode({
     Version   = "2012-10-17"
-    Statement = [{ Sid = "StartRefresh", Effect = "Allow", Action = "states:StartExecution", Resource = module.refresh_sfn[0].state_machine_arn }]
+    Statement = [{ Sid = "StartRefreshAndMonitor", Effect = "Allow", Action = "states:StartExecution", Resource = [module.refresh_sfn[0].state_machine_arn, module.monitor_sfn[0].state_machine_arn] }]
   })
 }
 
@@ -517,4 +595,372 @@ resource "aws_cloudwatch_event_target" "refresh_on_demand" {
     input_paths    = { bu = "$.detail.business_unit" }
     input_template = "{\"business_unit\": <bu>}"
   }
+}
+
+# ------------------------------------------------------------------ Model-monitor (drift) state machine
+# Per BU, daily: Databricks exports the latest features -> SageMaker Processing (training image,
+# argument "drift") compares them with the approved baseline (models/baseline/<bu>/, written by
+# model-governance on approval) -> drift.json -> metric ModelDrift -> alarm above the threshold;
+# with auto_refresh_on_drift the state machine also requests a model refresh.
+locals {
+  # Per-BU drift threshold from data/model-thresholds.yaml (business_units.<bu>.drift.threshold), else the default
+  model_thresholds = yamldecode(file("${path.module}/../../../data/model-thresholds.yaml"))
+  drift_threshold  = { for bu in var.business_units : bu => try(tonumber(local.model_thresholds.business_units[bu].drift.threshold), var.model_drift_threshold) }
+
+  models_bucket_name = "wbd-mmm-${local.env_short}-models-${local.region_code}"
+  monitor_date       = "States.ArrayGetItem(States.StringSplit($$.Execution.StartTime, 'T'), 0)"
+  features_uri       = "States.Format('s3://wbd-mmm-${local.env_short}-lakehouse-${local.region_code}/monitoring/{}/{}/', $.business_unit, $.monitor_date)"
+  drift_output_uri   = "States.Format('s3://${local.models_bucket_name}/monitoring/{}/{}/', $.business_unit, $.monitor_date)"
+
+  monitor_states = var.enable_data_platform ? {
+    ApplyDefaults = {
+      Type       = "Pass"
+      Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"drift_threshold\":${var.model_drift_threshold},\"auto_refresh\":${var.auto_refresh_on_drift}}'), $, false)" }
+      OutputPath = "$.args"
+      Next       = "Init"
+    }
+    Init = {
+      Type = "Pass"
+      Parameters = {
+        "business_unit.$"   = "$.business_unit"
+        "drift_threshold.$" = "$.drift_threshold"
+        "auto_refresh.$"    = "$.auto_refresh"
+        "monitor_id.$"      = "States.UUID()"
+        "monitor_date.$"    = local.monitor_date
+      }
+      Next = "GetTrainingImage"
+    }
+    GetTrainingImage = {
+      Type           = "Task"
+      Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
+      Parameters     = { Name = aws_ssm_parameter.sagemaker_image["training"].name }
+      ResultSelector = { "uri.$" = "$.Parameter.Value" }
+      ResultPath     = "$.image"
+      Next           = "StartDatabricksExport"
+    }
+    # Same Lakeflow job as the refresh, purpose = monitor: latest features only, no training snapshot
+    StartDatabricksExport = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::http:invoke"
+      Parameters = {
+        ApiEndpoint    = "${local.databricks_api}/api/2.2/jobs/run-now"
+        Method         = "POST"
+        Authentication = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
+        RequestBody = {
+          job_id = var.databricks_refresh_job_id
+          job_parameters = {
+            "business_unit.$" = "$.business_unit"
+            purpose           = "monitor"
+            "snapshot_uri.$"  = local.features_uri
+          }
+        }
+      }
+      ResultSelector = { "run_id.$" = "$.ResponseBody.run_id" }
+      ResultPath     = "$.databricks"
+      Retry          = local.databricks_retry
+      Next           = "WaitForExport"
+    }
+    WaitForExport = { Type = "Wait", Seconds = 60, Next = "GetExportRun" }
+    GetExportRun = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::http:invoke"
+      Parameters = {
+        ApiEndpoint     = "${local.databricks_api}/api/2.2/jobs/runs/get"
+        Method          = "GET"
+        Authentication  = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
+        QueryParameters = { "run_id.$" = "States.Format('{}', $.databricks.run_id)" }
+      }
+      ResultSelector = { "state.$" = "$.ResponseBody.state" }
+      ResultPath     = "$.databricks.run"
+      Retry          = local.databricks_retry
+      Next           = "ExportDone"
+    }
+    ExportDone = {
+      Type = "Choice"
+      Choices = [
+        {
+          And = [
+            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
+            { Variable = "$.databricks.run.state.result_state", IsPresent = true },
+            { Variable = "$.databricks.run.state.result_state", StringEquals = "SUCCESS" },
+          ]
+          Next = "CheckDrift"
+        },
+        {
+          Or = [
+            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
+            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "INTERNAL_ERROR" },
+            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "SKIPPED" },
+          ]
+          Next = "ExportFailed"
+        },
+      ]
+      Default = "WaitForExport"
+    }
+    ExportFailed = { Type = "Fail", Error = "DatabricksExportFailed", Cause = "The Databricks feature export (purpose=monitor) did not succeed; see the run in the Databricks workspace." }
+    # Training image, argument "drift": writes drift.json {"score": 0-1, "checks": {...}}
+    CheckDrift = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
+      Parameters = {
+        "ProcessingJobName.$" = "States.Format('${local.drift_job_prefix}-{}', $.monitor_id)"
+        RoleArn               = module.sagemaker_training[0].role_arn
+        AppSpecification      = { "ImageUri.$" = "$.image.uri", ContainerArguments = ["drift"] }
+        Environment = {
+          APP_ENV             = var.environment
+          "BUSINESS_UNIT.$"   = "$.business_unit"
+          "DRIFT_THRESHOLD.$" = "States.Format('{}', $.drift_threshold)"
+        }
+        ProcessingResources = {
+          ClusterConfig = {
+            InstanceCount  = 1
+            InstanceType   = var.optimizer_instance_type
+            VolumeSizeInGB = 30
+            VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
+          }
+        }
+        ProcessingInputs = [
+          { InputName = "baseline", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/baseline/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/baseline", S3DataType = "S3Prefix", S3InputMode = "File" } },
+          { InputName = "curves", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/curves/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/curves", S3DataType = "S3Prefix", S3InputMode = "File" } },
+          { InputName = "features", S3Input = { "S3Uri.$" = local.features_uri, LocalPath = "/opt/ml/processing/features", S3DataType = "S3Prefix", S3InputMode = "File" } },
+        ]
+        ProcessingOutputConfig = {
+          KmsKeyId = module.kms.key_arns["s3"]
+          Outputs  = [{ OutputName = "drift", S3Output = { "S3Uri.$" = local.drift_output_uri, LocalPath = "/opt/ml/processing/drift", S3UploadMode = "EndOfJob" } }]
+        }
+        StoppingCondition = { MaxRuntimeInSeconds = var.optimizer_max_runtime_seconds }
+        NetworkConfig     = { EnableInterContainerTrafficEncryption = true, VpcConfig = local.sagemaker_vpc }
+        Tags              = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
+      }
+      ResultPath = null
+      Next       = "ReadDrift"
+    }
+    ReadDrift = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::aws-sdk:s3:getObject"
+      Parameters = {
+        Bucket  = local.models_bucket_name
+        "Key.$" = "States.Format('monitoring/{}/{}/drift.json', $.business_unit, $.monitor_date)"
+      }
+      ResultSelector = { "result.$" = "States.StringToJson($.Body)" }
+      ResultPath     = "$.drift"
+      Next           = "PublishDrift"
+    }
+    PublishDrift = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::aws-sdk:cloudwatch:putMetricData"
+      Parameters = {
+        Namespace = "MMM/Models"
+        MetricData = [{
+          MetricName = "ModelDrift"
+          Dimensions = [{ Name = "BusinessUnit", "Value.$" = "$.business_unit" }, { Name = "Check", Value = "overall" }]
+          "Value.$"  = "$.drift.result.score"
+        }]
+      }
+      ResultPath = null
+      Next       = "DriftDecision"
+    }
+    DriftDecision = {
+      Type = "Choice"
+      Choices = [
+        {
+          And = [
+            { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold" },
+            { Variable = "$.auto_refresh", BooleanEquals = true },
+          ]
+          Next = "BuildRefreshRequest"
+        },
+        { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold", Next = "DriftDetected" },
+      ]
+      Default = "NoDrift"
+    }
+    NoDrift       = { Type = "Succeed" }
+    DriftDetected = { Type = "Succeed", Comment = "Drift above the threshold: alarm model-drift-<bu> fires; a person decides on a refresh (runbooks/model-drift.md)." }
+    BuildRefreshRequest = {
+      Type       = "Pass"
+      Parameters = { "business_unit.$" = "$.business_unit", reason = "drift", "monitor_date.$" = "$.monitor_date" }
+      ResultPath = "$.refresh_request"
+      Next       = "RequestRefresh"
+    }
+    # Same event as scripts/trigger-model-refresh.sh -> rule <prefix>-model-refresh-on-demand
+    RequestRefresh = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::aws-sdk:eventbridge:putEvents"
+      Parameters = {
+        Entries = [{
+          Source       = "mmm.refresh"
+          DetailType   = "Model Refresh Requested"
+          "Detail.$"   = "States.JsonToString($.refresh_request)"
+          EventBusName = "default"
+        }]
+      }
+      ResultPath = null
+      End        = true
+    }
+  } : null
+}
+
+data "aws_iam_policy_document" "monitor_sfn" {
+  count = local.data_count
+
+  statement {
+    sid       = "ReadImagePointer"
+    actions   = ["ssm:GetParameter"]
+    resources = [aws_ssm_parameter.sagemaker_image["training"].arn]
+  }
+
+  statement {
+    sid       = "CallDatabricks"
+    actions   = ["states:InvokeHTTPEndpoint"]
+    resources = [local.monitor_sm_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "states:HTTPEndpoint"
+      values   = ["${local.databricks_api}/api/2.2/jobs/*"]
+    }
+  }
+
+  statement {
+    sid       = "UseConnection"
+    actions   = ["events:RetrieveConnectionCredentials"]
+    resources = [aws_cloudwatch_event_connection.databricks[0].arn]
+  }
+
+  statement {
+    sid       = "ConnectionSecret"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [aws_cloudwatch_event_connection.databricks[0].secret_arn]
+  }
+
+  statement {
+    sid       = "RunDriftJob"
+    actions   = ["sagemaker:CreateProcessingJob", "sagemaker:DescribeProcessingJob", "sagemaker:StopProcessingJob", "sagemaker:AddTags", "sagemaker:ListTags"]
+    resources = ["${local.sagemaker_arn_prefix}:processing-job/${local.drift_job_prefix}-*"]
+  }
+
+  statement {
+    sid       = "SyncRule"
+    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
+    resources = ["arn:${local.partition}:events:${var.aws_region}:${local.account_id}:rule/StepFunctionsGetEventsForSageMakerProcessingJobsRule"]
+  }
+
+  statement {
+    sid       = "PassJobRole"
+    actions   = ["iam:PassRole"]
+    resources = [module.sagemaker_training[0].role_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["sagemaker.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "JobKeys"
+    actions   = ["kms:CreateGrant", "kms:DescribeKey"]
+    resources = [module.kms.key_arns["sagemaker"], module.kms.key_arns["s3"]]
+  }
+
+  statement {
+    sid       = "ReadDriftResult"
+    actions   = ["s3:GetObject"]
+    resources = ["${module.buckets["models"].bucket_arn}/monitoring/*"]
+  }
+
+  statement {
+    sid       = "DriftResultKey"
+    actions   = ["kms:Decrypt"]
+    resources = [module.kms.key_arns["s3"]]
+  }
+
+  statement {
+    sid       = "PublishDrift"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = ["MMM/Models"]
+    }
+  }
+
+  # Used only when auto_refresh is true (auto_refresh_on_drift or an on-demand input)
+  statement {
+    sid       = "RequestRefresh"
+    actions   = ["events:PutEvents"]
+    resources = ["arn:${local.partition}:events:${var.aws_region}:${local.account_id}:event-bus/default"]
+  }
+}
+
+module "monitor_sfn" {
+  source = "../../modules/step-functions"
+  count  = local.data_count
+
+  name_prefix            = local.name_prefix
+  name                   = local.monitor_name
+  definition             = jsonencode({ Comment = "MMM model drift check per business unit (${var.environment})", StartAt = "ApplyDefaults", TimeoutSeconds = 3 * 3600, States = local.monitor_states })
+  role_policy_json       = data.aws_iam_policy_document.monitor_sfn[0].json
+  include_execution_data = !local.is_prod
+  component              = "model-refresh"
+
+  logs_kms_key_arn         = module.kms.key_arns["logs"]
+  log_retention_days       = var.log_retention_days
+  alarm_topic_arn          = module.monitoring.alert_topic_arn
+  permissions_boundary_arn = module.permission_boundary.policy_arn
+}
+
+resource "aws_scheduler_schedule_group" "monitor" {
+  count = local.data_count
+
+  name = "${local.name_prefix}-model-monitor"
+  tags = merge(local.tags, { Component = "model-refresh" })
+}
+
+resource "aws_scheduler_schedule" "monitor" {
+  #checkov:skip=CKV_AWS_297:The schedule input is only the business-unit name and its drift threshold; nothing sensitive to encrypt with a CMK.
+  for_each = var.enable_data_platform ? toset(var.business_units) : toset([])
+
+  name                         = "${local.name_prefix}-drift-${each.key}"
+  group_name                   = aws_scheduler_schedule_group.monitor[0].name
+  description                  = "Daily drift check for ${each.key}"
+  schedule_expression          = var.model_monitor_schedule
+  schedule_expression_timezone = var.model_refresh_timezone
+  state                        = var.enable_model_monitor_schedule ? "ENABLED" : "DISABLED"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = module.monitor_sfn[0].state_machine_arn
+    role_arn = aws_iam_role.refresh_trigger[0].arn
+    input    = jsonencode({ business_unit = each.key, drift_threshold = local.drift_threshold[each.key] })
+
+    retry_policy {
+      maximum_retry_attempts = 3
+    }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "model_drift" {
+  for_each = var.enable_data_platform ? toset(var.business_units) : toset([])
+
+  alarm_name          = "${local.name_prefix}-model-drift-${each.key}"
+  alarm_description   = "Model drift for ${each.key} above ${local.drift_threshold[each.key]} - the approved model may no longer fit (runbooks/model-drift.md)"
+  namespace           = "MMM/Models"
+  metric_name         = "ModelDrift"
+  dimensions          = { BusinessUnit = each.key, Check = "overall" }
+  statistic           = "Maximum"
+  period              = 86400
+  evaluation_periods  = 1
+  threshold           = local.drift_threshold[each.key]
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [module.monitoring.alert_topic_arn]
+  ok_actions          = [module.monitoring.alert_topic_arn]
+
+  tags = merge(local.tags, { Component = "model-refresh" })
 }

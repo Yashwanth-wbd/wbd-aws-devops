@@ -49,11 +49,11 @@ flowchart LR
 Handled by `deploy.yml` ([09 §3](09-cicd-pipelines.md#3-deploy-sequence-deployyml-one-job-after-the-approval)):
 
 1. Remember the currently running task-definition revision (and SSM pointers / Lambda alias) for rollback.
-2. **Prod only** (when migrations run with `api`): Aurora **cluster** snapshot `mmm-<env>-predeploy-<version>-<run>`.
+2. **Prod only** (when migrations run with `api`): RDS DB snapshot `mmm-<env>-predeploy-<version>-<run>`.
 3. Run database migrations as a one-off ECS task (`mmm-<env>-migrate`) when `api` is in scope.
 4. Register new task-definition revisions for `api` and/or `ui` with the new image.
 5. Update ECS services and wait for stable (deployment circuit breaker).
-6. Smoke test `APP_URL`: `/api/health` → 200; `/` → 302 to Cognito (`smoke.sh`).
+6. Smoke test `APP_URL`: `/api/health` → 200; `/` → 302 to Okta (`smoke.sh`, once sign-in is on).
 7. Update SageMaker image SSM pointers and/or publish the results-publisher Lambda.
 8. If any step fails after ECS deploy started, roll back ECS, SSM pointers and Lambda alias.
 9. Record version, digests, revisions and snapshot in the release record artifact.
@@ -67,9 +67,9 @@ Handled by `deploy.yml` ([09 §3](09-cicd-pipelines.md#3-deploy-sequence-deployy
 | SageMaker images | `deploy.yml` rollback restores previous SSM parameter values; running Step Functions executions keep the image they started with |
 | Results publisher | `lambda-release.sh switch` or failed deploy rollback moves alias `live` to the previous version |
 | Infrastructure | Revert the PR, merge, `terraform.yml` applies |
-| Model curves | `model-governance.yml` rollback (re-publish previous approved curves)—[runbooks/model-rollback.md](runbooks/model-rollback.md) |
+| Model curves | `model-governance.yml` rollback (re-publish previous approved curves and drift baseline)—[runbooks/model-rollback.md](runbooks/model-rollback.md) |
 | GenAI | Set SSM `/mmm/<env_short>/genai_enabled` to `false` |
-| Database | Migrations are expand-then-contract, so the previous app version still works; restore from PITR or snapshot only as a last resort—[08 §3](08-backup-and-dr.md#3-restore-aurora-to-a-point-in-time) |
+| Database | Migrations are expand-then-contract, so the previous app version still works; restore from PITR or snapshot only as a last resort—[08 §3](08-backup-and-dr.md#3-restore-the-rds-database-to-a-point-in-time) |
 
 Every rollback path is rehearsed in staging before go-live. Pipeline commands are in
 [09 section 6](09-cicd-pipelines.md#6-everyday-operations).

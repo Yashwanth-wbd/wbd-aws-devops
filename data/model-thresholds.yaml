@@ -10,6 +10,11 @@ model_package_group: "{prefix}-{business_unit}"
 # <evaluation prefix>/curves/ (response curves). Approval copies the curves to s3://<models bucket>/curves/<bu>/.
 curves_prefix: "curves/{business_unit}/"
 
+# Approval also publishes the drift baseline: <evaluation prefix>/baseline/ -> s3://<models bucket>/baseline/<bu>/
+# (read by the model-monitor drift check). drift.threshold per business unit overrides
+# model_drift_threshold (tfvars); Terraform reads it, so a change needs a terraform apply.
+baseline_prefix: "baseline/{business_unit}/"
+
 business_units:
   usnetworks:
     metrics:
@@ -21,6 +26,10 @@ business_units:
       max_rhat: { max: 1.05 }
       # add actual value
       negative_contribution_channels: { max: 0 }
+    # Daily drift check (model-monitor): alarm when the drift score (0-1) is above this
+    drift:
+      # add actual value
+      threshold: 0.2
   streaming:
     metrics:
       # add actual value
@@ -31,6 +40,10 @@ business_units:
       max_rhat: { max: 1.05 }
       # add actual value
       negative_contribution_channels: { max: 0 }
+    # Daily drift check (model-monitor): alarm when the drift score (0-1) is above this
+    drift:
+      # add actual value
+      threshold: 0.2
   theatrical:
     metrics:
       # add actual value
@@ -41,3 +54,7 @@ business_units:
       max_rhat: { max: 1.05 }
       # add actual value
       negative_contribution_channels: { max: 0 }
+    # Daily drift check (model-monitor): alarm when the drift score (0-1) is above this
+    drift:
+      # add actual value
+      threshold: 0.2

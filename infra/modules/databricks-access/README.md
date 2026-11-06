@@ -8,12 +8,12 @@ Private, least-privilege access between this account and the **WBD-owned** Datab
 
 | Resource | Notes |
 |---|---|
-| IAM role `mmm-<env>-databricks-uc` | Unity Catalog **storage credential**. Read/write on the landing, lakehouse and training-data buckets and their keys (s3 + per-BU keys). Permission boundary |
+| IAM role `mmm-<env>-databricks-uc` | Unity Catalog **storage credential**. Read/write on the landing, lakehouse and training-data buckets and their keys (s3 + per-BU keys); read-only on `read_only_prefixes` (the stacks pass `models/evaluation/` so the write-back job can read predictions and lift). Permission boundary |
 | VPC endpoint (Interface) | `enable_privatelink`: the workspace REST/UI endpoint service, in the private-endpoint subnets, `endpoints` SG (HTTPS from the VPC) |
 | Route 53 private zone `<workspace host>` | `enable_privatelink`: A alias to the endpoint, so tasks in the VPC reach the normal workspace URL over PrivateLink |
 
-The Databricks service-principal credential is **not** created here. The model-refresh state
-machine calls the Jobs API through the EventBridge connection `<prefix>-databricks` (OAuth client
+The Databricks service-principal credential is **not** created here. The model-refresh and
+model-monitor state machines call the Jobs API through the EventBridge connection `<prefix>-databricks` (OAuth client
 credentials, stack `data.tf`); DevOps sets its client secret out of band from the values WBD
 Databricks admins hand over (docs/05).
 
@@ -46,6 +46,7 @@ ranges) – confirm with WBD Databricks.
 | `uc_master_role_arn` | string | Databricks UC master role (AWS commercial) |
 | `self_assume_enabled` | bool | `false` |
 | `bucket_arns`, `kms_key_arns` | list(string) | – |
+| `read_only_prefixes` | list(object({ bucket_arn, prefix })) | `[]` |
 | `enable_privatelink` | bool | `false` |
 | `workspace_host`, `workspace_service_name` | string | – / `null` |
 | `vpc_id`, `endpoint_subnet_ids`, `endpoint_security_group_id` | – | – |

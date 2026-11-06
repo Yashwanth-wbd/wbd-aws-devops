@@ -11,6 +11,7 @@ on:
       - .tflint.hcl
       - scripts/db-bootstrap.py
       - scripts/platform-check.sh
+      - data/model-thresholds.yaml
       - .github/workflows/terraform.yml
       - .github/workflows/_terraform-apply.yml
   push:
@@ -20,6 +21,7 @@ on:
       - .tflint.hcl
       - scripts/db-bootstrap.py
       - scripts/platform-check.sh
+      - data/model-thresholds.yaml
       - .github/workflows/terraform.yml
       - .github/workflows/_terraform-apply.yml
   schedule:

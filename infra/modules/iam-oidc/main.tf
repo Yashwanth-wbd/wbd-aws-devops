@@ -216,16 +216,16 @@ data "aws_iam_policy_document" "deploy" {
 
   statement {
     sid     = "PreMigrationSnapshot"
-    actions = ["rds:CreateDBClusterSnapshot", "rds:AddTagsToResource"]
+    actions = ["rds:CreateDBSnapshot", "rds:AddTagsToResource"]
     resources = [
-      "arn:${local.partition}:rds:${local.region}:${local.account_id}:cluster:${var.name_prefix}-aurora",
-      "arn:${local.partition}:rds:${local.region}:${local.account_id}:cluster-snapshot:${var.name_prefix}-*",
+      "arn:${local.partition}:rds:${local.region}:${local.account_id}:db:${var.name_prefix}-postgres",
+      "arn:${local.partition}:rds:${local.region}:${local.account_id}:snapshot:${var.name_prefix}-*",
     ]
   }
 
   statement {
     sid       = "DescribeDatabase"
-    actions   = ["rds:DescribeDBClusterSnapshots", "rds:DescribeDBClusters"]
+    actions   = ["rds:DescribeDBSnapshots", "rds:DescribeDBInstances"]
     resources = ["*"]
   }
 
@@ -259,13 +259,23 @@ data "aws_iam_policy_document" "deploy" {
     }
   }
 
-  # Post-release dry run of the optimization state machine (dev/staging).
+  # Post-release dry run (dev/staging): the request goes through the run queue like a planner's run,
+  # so it also proves the dispatcher.
   dynamic "statement" {
     for_each = var.deploy_dry_run == null ? [] : [1]
     content {
-      sid       = "DryRunStart"
-      actions   = ["states:StartExecution"]
-      resources = ["arn:${local.partition}:states:${local.region}:${local.account_id}:stateMachine:${var.name_prefix}-optimization"]
+      sid       = "DryRunEnqueue"
+      actions   = ["sqs:SendMessage", "sqs:GetQueueUrl"]
+      resources = ["arn:${local.partition}:sqs:${local.region}:${local.account_id}:${var.name_prefix}-optimization-requests"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_dry_run == null ? [] : [1]
+    content {
+      sid       = "DryRunQueueKey"
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+      resources = [var.deploy_dry_run.sqs_kms_key_arn]
     }
   }
 
@@ -425,13 +435,24 @@ data "aws_iam_policy_document" "model_governance" {
     resources = [local.models_bucket, "${local.models_bucket}/evaluation/*"]
   }
 
-  # approve only: an approval publishes the version's response curves to curves/<bu>/ (read by the API).
+  # approve only: an approval publishes the version's response curves to curves/<bu>/ (read by the API)
+  # and its drift baseline to baseline/<bu>/ (read by the model-monitor), and records approval.json
+  # next to the evaluation report.
   dynamic "statement" {
     for_each = each.key == "model_approve" ? [1] : []
     content {
-      sid       = "PublishApprovedCurves"
+      sid       = "PublishApprovedCurvesAndBaseline"
       actions   = ["s3:PutObject", "s3:DeleteObject"]
-      resources = ["${local.models_bucket}/curves/*"]
+      resources = ["${local.models_bucket}/curves/*", "${local.models_bucket}/baseline/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = each.key == "model_approve" ? [1] : []
+    content {
+      sid       = "ApprovalRecord"
+      actions   = ["s3:PutObject"]
+      resources = ["${local.models_bucket}/evaluation/*/approval.json"]
     }
   }
 
