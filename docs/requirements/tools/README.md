@@ -26,9 +26,14 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v4.py $req
 # New in v4 / Changed by v4 / From v3; obsolete v3 questions on removed_vs_v3).
 # The v3 version of this script (devops_3_client_question.xlsx) is in git history.
 uv run --no-project --with openpyxl python .\build_client_questions.py $req
+
+# Regenerate the hand-over pair for the WBD infra team (v4 written from scratch, no v3 comparison):
+# aws_resource_list_4_new.xlsx (R rows: name per env, flow step, what it does, sizes, owner; FLOW, ALARMS, OUTSIDE sheets)
+# and devops_client_question_4_new.xlsx (INPUTS, DECISIONS)
+uv run --no-project --with openpyxl python .\build_v4_new.py $req
 ```
 
-Regenerating `devops_4_client_question.xlsx` overwrites the values typed into it – once WBD starts
+Regenerating `devops_4_client_question.xlsx` or `devops_client_question_4_new.xlsx` overwrites the values typed into it – once WBD starts
 answering, edit the workbook directly instead.
 
 For a new requirement (v5), copy `build_v4.py` to `build_v5.py`, change the output names to `_5`,
