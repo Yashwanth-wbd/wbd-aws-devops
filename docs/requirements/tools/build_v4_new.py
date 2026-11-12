@@ -20,9 +20,9 @@ OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().paren
 ENVS = (("dev", "dev", "Dev"), ("staging", "stg", "Staging"), ("prod", "prd", "Prod"))
 BUS = "streaming, theatrical, usnetworks"
 
-CORE = "Required - Release 1"
-DP = "Required - Release 1 (model refresh / data platform)"
-GENAI = "Release 2 - GenAI (create after WBD approval)"
+CORE = "Required"
+DP = "Required - model refresh / data platform"
+GENAI = "Required for GenAI (create after WBD approval)"
 OPT = "Optional - only if WBD approves"
 BASE = "Account baseline - verify it exists"
 RUN = "Not pre-created - created at run time"
@@ -539,15 +539,10 @@ OUTSIDE = [
 ]
 
 HEAD = PatternFill("solid", fgColor="1F3864")
-LAYER_FILL = PatternFill("solid", fgColor="D9E1F2")
-SCOPE_FILLS = {
-    DP: PatternFill("solid", fgColor="E2EFDA"),
-    GENAI: PatternFill("solid", fgColor="FCE4D6"),
-    OPT: PatternFill("solid", fgColor="EDEDED"),
-    BASE: PatternFill("solid", fgColor="FFF2CC"),
-    QUOTA: PatternFill("solid", fgColor="FFF2CC"),
-    RUN: PatternFill("solid", fgColor="F2F2F2"),
-}
+
+
+def release(scope):
+    return "Release 2" if scope == GENAI else "Release 1"
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 WRAP = Alignment(vertical="top", wrap_text=True)
@@ -590,8 +585,8 @@ def joined(values):
     return values[0] if len(set(values)) == 1 else " / ".join(values)
 
 
-LEGEND = ("Colours: green = model refresh / data platform (slide 1), orange = GenAI (Release 2), grey = optional, yellow = WBD account "
-          "baseline or quota request, light grey = created at run time (not pre-created). No colour = core Release 1.")
+LEGEND = ("Use the filter on 'Release' (Release 1 = go-live incl. the slide 1 model refresh; Release 2 = GenAI explanation) "
+          "and on 'Scope' (required, data platform, GenAI, optional, account baseline, quota, run time).")
 
 
 def build_resources():
@@ -611,6 +606,8 @@ def build_resources():
         ("Sheets", "all_resources = complete list with dev / staging / prod values; dev, staging, prod = the same list with the real names of that environment; "
                    "architecture_flow = the v4 flow steps referenced in column 'Flow step'; alarms_and_events = every alarm and alert rule; "
                    "outside_aws = what other WBD teams provide; summary = count per layer."),
+        ("Release column", "Release 1 = everything needed for go-live (slide 2 optimization + slide 1 auto ML + platform); "
+                           "Release 2 = GenAI explanation (API Gateway LLM gateway, Bedrock Guardrails, LLM secrets). Filter on it."),
         ("Scope column", f"'{CORE}' = needed for go-live; '{DP}' = slide 1 auto ML (can be created after the core); '{GENAI}'; '{OPT}'; "
                          f"'{BASE}' = should already exist in a WBD account; '{QUOTA}'; '{RUN}' = listed so the flow is complete, not created by the infra team."),
         ("Owner column", "Who creates it. 'first version; new revisions by the deploy pipeline' = the infra team creates the resource once, "
@@ -623,7 +620,7 @@ def build_resources():
         ws.cell(ws.max_row, 1).font = Font(bold=True)
     widths(ws, (22, 140))
 
-    headers = ["#", "Layer", "AWS service", "Resource", "Name", "Qty", "Flow step", "What it does in the v4 flow",
+    headers = ["#", "Release", "Layer", "AWS service", "Resource", "Name", "Qty", "Flow step", "What it does in the v4 flow",
                "Key configuration", "Dev", "Staging", "Prod", "Depends on", "Scope", "Created by / owner"]
     ws = wb.create_sheet("all_resources")
     title(ws, "All AWS resources - v4 architecture (dev / staging / prod)",
@@ -631,26 +628,27 @@ def build_resources():
     ws.append(headers)
     style_header(ws, 4)
     for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner) in enumerate(R, 1):
-        ws.append([i, layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner])
-        style_body(ws, SCOPE_FILLS.get(scope))
-    widths(ws, (5, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24))
-    ws.freeze_panes = "E5"
+        ws.append([i, release(scope), layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner])
+        style_body(ws)
+    widths(ws, (5, 11, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24))
+    ws.freeze_panes = "F5"
     ws.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{ws.max_row}"
 
     for env, short, label in ENVS:
         ws = wb.create_sheet(env)
         title(ws, f"{label} - AWS resources to create (v4 architecture)",
               f"Real names for {label} (<env> = {short}). Setting = the {label} value. " + LEGEND)
-        ws.append(["#", "Layer", "AWS service", "Resource", f"Name ({label})", "Qty", "Flow step", "What it does in the v4 flow",
+        ws.append(["#", "Release", "Layer", "AWS service", "Resource", f"Name ({label})", "Qty", "Flow step", "What it does in the v4 flow",
                    "Key configuration", f"{label} setting", "Depends on", "Scope", "Created by / owner", "Created (Y/N)", "ARN / ID", "Notes"])
         style_header(ws, 4)
         idx = ("dev", "staging", "prod").index(env)
         for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner) in enumerate(R, 1):
-            ws.append([i, layer, svc, res, name.replace("{e}", short), qty[idx], flow, what, cfg, per_env[idx], dep, scope, owner, "", "", ""])
-            style_body(ws, SCOPE_FILLS.get(scope))
-        widths(ws, (5, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 10, 30, 24))
-        ws.freeze_panes = "E5"
-        ws.auto_filter.ref = f"A4:P{ws.max_row}"
+            ws.append([i, release(scope), layer, svc, res, name.replace("{e}", short), qty[idx], flow, what, cfg, per_env[idx], dep, scope, owner,
+                       "", "", ""])
+            style_body(ws)
+        widths(ws, (5, 11, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 10, 30, 24))
+        ws.freeze_panes = "F5"
+        ws.auto_filter.ref = f"A4:Q{ws.max_row}"
 
     ws = wb.create_sheet("architecture_flow")
     title(ws, "v4 architecture flow - steps referenced in the resource list",
@@ -660,20 +658,22 @@ def build_resources():
     for step, slide, name, text in FLOW:
         used = [str(i) for i, r in enumerate(R, 1) if step in flow_steps(r[5])]
         ws.append([step, slide, name, text, ", ".join(used)])
-        style_body(ws, LAYER_FILL if slide.startswith("Platform") else None)
+        style_body(ws)
     widths(ws, (8, 22, 28, 100, 40))
     ws.freeze_panes = "A5"
+    ws.auto_filter.ref = f"A4:E{ws.max_row}"
 
     ws = wb.create_sheet("alarms_and_events")
     title(ws, "CloudWatch alarms and EventBridge alert rules (all go to SNS mmm-<env>-alerts)",
           "Thresholds are the defaults of the code; dev / staging / prod use the same rules.")
-    ws.append(["#", "Type", "Name", "Fires when", "Flow step", "Scope"])
+    ws.append(["#", "Release", "Type", "Name", "Fires when", "Flow step", "Scope"])
     style_header(ws, 4)
     for i, (kind, name, when, flow, scope) in enumerate(ALARMS, 1):
-        ws.append([i, kind, generic(name), when, flow, scope])
-        style_body(ws, SCOPE_FILLS.get(scope))
-    widths(ws, (5, 12, 44, 80, 12, 40))
+        ws.append([i, release(scope), kind, generic(name), when, flow, scope])
+        style_body(ws)
+    widths(ws, (5, 11, 12, 44, 80, 12, 40))
     ws.freeze_panes = "A5"
+    ws.auto_filter.ref = f"A4:G{ws.max_row}"
 
     ws = wb.create_sheet("outside_aws")
     title(ws, "Provided by other WBD teams (needed to finish the resources above)", "Not AWS resources the infra team creates, but inputs they depend on.")
@@ -688,17 +688,20 @@ def build_resources():
     title(ws, "Resource count per layer", "Rows of all_resources per layer and scope. AWS objects = sum of Qty in prod "
           "(without account baseline, quotas and run-time objects; settings such as lifecycle or bucket policy are part of their resource).")
     scopes = (CORE, DP, GENAI, OPT, BASE, QUOTA, RUN)
-    ws.append(["Layer", "Rows", *scopes, "AWS objects (prod)"])
+    ws.append(["Layer", "Rows", "Release 1", "Release 2", *scopes, "AWS objects (prod)"])
     style_header(ws, 4)
-    for layer in dict.fromkeys(r[0] for r in R):
-        rows = [r for r in R if r[0] == layer]
-        ws.append([layer, len(rows), *(sum(1 for r in rows if r[10] == sc) for sc in scopes), objects(rows)])
+
+    def line(label, rows):
+        ws.append([label, len(rows), *(sum(1 for r in rows if release(r[10]) == rel) for rel in ("Release 1", "Release 2")),
+                   *(sum(1 for r in rows if r[10] == sc) for sc in scopes), objects(rows)])
         style_body(ws)
-    ws.append(["Total", len(R), *(sum(1 for r in R if r[10] == sc) for sc in scopes), objects(R)])
-    style_body(ws)
+
+    for layer in dict.fromkeys(r[0] for r in R):
+        line(layer, [r for r in R if r[0] == layer])
+    line("Total", R)
     for c in ws[ws.max_row]:
         c.font = Font(bold=True)
-    widths(ws, (40, 8, 16, 22, 22, 18, 18, 12, 18, 16))
+    widths(ws, (40, 8, 10, 10, 16, 22, 22, 18, 18, 12, 18, 16))
 
     wb.save(OUT / "aws_resource_list_4_new.xlsx")
 
