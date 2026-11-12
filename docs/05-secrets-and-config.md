@@ -9,7 +9,7 @@
 | Non-secret pipeline settings | **GitHub Environment variables** | role ARNs, region, cluster name, subnet IDs, `APP_URL` | Not secret; scoped per environment |
 | Pipeline secrets | **GitHub Environment secrets** (rare) | `SONAR_TOKEN` if SonarQube is used | Only for third-party tools that cannot use OIDC |
 | AWS credentials for pipelines | **none stored** | – | GitHub OIDC gives temporary credentials |
-| Databricks SP secret (model refresh) | **EventBridge connection** auth (managed secret ARN on the connection) | OAuth client secret for `databricks_sp_client_id` | Terraform creates placeholder `set-out-of-band`; DevOps updates once |
+| Databricks export service principal (model refresh) | **AWS Secrets Manager** `mmm/<env>/databricks/export-sp` | `{"client_id","client_secret"}` (OAuth M2M) | Read only by the export Lambda; DevOps fills it once (§4) |
 | RDS admin password | **RDS-managed secret** (Secrets Manager, auto-rotated) | `rds!db-…` | Nobody ever sees it |
 
 **Never:** in Git, in Docker images, in plain task-definition `environment`, in Terraform
@@ -28,9 +28,11 @@ All paths use prefix **`mmm/<env_short>/`** (for example `mmm/dev/api/db` in the
 | `mmm/<env>/splunk/hec` | `{"hec_token":"..."}` (Firehose requires this key name) | DevOps from WBD Splunk team | Firehose (when `enable_splunk_shipping`) |
 | `mmm/<env>/thirdparty/<vendor>` | Vendor-specific JSON (e.g. API keys) | DevOps from WBD data owners | API / batch jobs as wired by the app |
 | `mmm/<env>/llm/<provider>` | `{"api_key":"..."}` (only when `enable_genai`) | DevOps from WBD / vendor | LLM gateway proxy Lambda |
+| `mmm/<env>/databricks/export-sp` | `{"client_id","client_secret"}` of the WBD export service principal (only with `enable_data_platform`) | DevOps from WBD Databricks admins | Databricks export Lambda |
+| `mmm/<env>/rds/etl` | ETL DB user `mmm_etl` `{username, password}` (only with `enable_data_platform`) | `scripts/db-bootstrap.py` (`ETL_SECRET_ID`) | RDS Proxy; the Glue `export-rds` job connects with an IAM token |
 
-There is **no** `redis/token`, **no** `edge/origin-verify`, **no** `databricks/sp` Secrets Manager
-entry, and **no** MWAA connection secrets in v2.
+There is **no** `redis/token`, **no** `edge/origin-verify`, **no** EventBridge connection secret,
+and **no** MWAA connection secrets.
 
 ## 3. SSM parameters (Terraform-owned values)
 
@@ -39,38 +41,30 @@ entry, and **no** MWAA connection secrets in v2.
 | `/mmm/<env>/genai_enabled` | `false` | tfvars `genai_enabled` | API |
 | `/mmm/<env>/okta/issuer` | `https://wbd.okta.com/oauth2/default` | tfvars `okta_issuer` | API (also env `OKTA_ISSUER`) |
 | `/mmm/<env>/optimization/max_concurrent_runs` | `5` | tfvars `max_concurrent_runs` (change it there, not in the console) | Run dispatcher Lambda (each batch) |
-| `/mmm/<env>/databricks/host` | `https://dbc-….cloud.databricks.com` | tfvars `databricks_host` | Platform jobs / diagnostics |
+| `/mmm/<env>/databricks/host` | `https://dbc-….cloud.databricks.com` | tfvars `databricks_host` | Operators / diagnostics (the export Lambda gets the same value as env `DATABRICKS_HOST`) |
+| `/mmm/<env>/databricks/export_job_ids` | `{"streaming":123,…}` | tfvars `databricks_export_job_ids` (data platform) | Export Lambda |
 | `/mmm/<env>/genai/token_quota/<bu>` | `1000000` | tfvars `genai_token_quotas` | LLM gateway (Release 2) |
 
-SageMaker image pointers live under **`/mmm/<env_short>/images/`** (separate parameters, written
-by `deploy.yml`—not in the secrets module).
+Release pointers are written by `deploy.yml` (Terraform only creates them): the optimizer task
+definition ARN in **`/mmm/<env_short>/ecs/optimizer_task_definition`** and the SageMaker training
+image in **`/mmm/<env_short>/images/sagemaker-training`** (data platform).
 
-## 4. EventBridge connection: Databricks OAuth secret (model refresh)
+## 4. Databricks export service principal (model refresh)
 
-When `enable_data_platform = true`, Terraform creates connection
-**`<prefix>-databricks`** (dev: `mmm-dev-databricks`) with client ID
-`databricks_sp_client_id` and placeholder client secret `set-out-of-band`. DevOps sets the
-real **service principal OAuth secret** once (WBD Databricks admin):
+When `enable_data_platform = true`, Terraform creates the empty secret
+**`mmm/<env>/databricks/export-sp`**. WBD Databricks admins create a workspace service principal
+with "Can manage run" on the export jobs and an OAuth secret; DevOps stores both once:
 
 ```powershell
 $env:AWS_PROFILE = "mmm-dev-devops"
-$conn = "mmm-dev-databricks"   # terraform output data_platform.databricks_connection
-$id   = "00000000-0000-0000-0000-00000000c001"  # add actual value - databricks_sp_client_id
-$secret = Read-Host "Databricks SP client secret" -AsSecureString
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-
-aws events update-connection `
-  --name $conn `
-  --authorization-type OAUTH_CLIENT_CREDENTIALS `
-  --auth-parameters "OAuthParameters={ClientParameters={ClientID=$id,ClientSecret=$plain},AuthorizationEndpoint=https://dbc-00000000-0000.cloud.databricks.com/oidc/v1/token,HttpMethod=POST,OAuthHttpParameters={BodyParameters=[{Key=grant_type,Value=client_credentials,IsValueSecret=false},{Key=scope,Value=all-apis,IsValueSecret=false}]}}"
-
-# add actual value - use databricks_host from tfvars (no trailing slash) in AuthorizationEndpoint
+# export-sp.json (add actual value): {"client_id":"<application id>","client_secret":"<oauth secret>"}
+aws secretsmanager put-secret-value --secret-id mmm/dev/databricks/export-sp --secret-string file://export-sp.json
+Remove-Item export-sp.json
 ```
 
-Replace `AuthorizationEndpoint` with `{databricks_host}/oidc/v1/token` for that environment.
-Terraform ignores changes to the client secret after the first manual update
-(`lifecycle { ignore_changes = … }` on the connection).
+The export Lambda reads the secret whenever it needs a new token and exchanges it for a
+short-lived token at `{databricks_host}/oidc/v1/token` (cached until shortly before expiry);
+nothing else can read it.
 
 ## 5. How a value gets into a running container
 
@@ -126,7 +120,7 @@ aws ssm get-parameter --name /mmm/dev/genai_enabled --query Parameter.Value
 | Okta ALB client secret | When WBD Identity rotates it: `put-secret-value` on `okta/alb-client`, then `terraform apply` (the listener gets the new value; [runbooks/rotation.md](runbooks/rotation.md)) |
 | App / migrate DB users | Manual or rotation Lambda follow-up; update Secrets Manager and redeploy |
 | Splunk / third-party / LLM keys | When the issuer rotates; update the secret and force a new deployment |
-| Databricks connection OAuth secret | WBD rotates SP secret; re-run `aws events update-connection` with the new `ClientSecret` |
+| Databricks export service principal | WBD rotates the OAuth secret; `put-secret-value` on `databricks/export-sp` (used from the next token request, at most about an hour later; no redeploy) |
 
 ## 8. Guard rails
 

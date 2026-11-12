@@ -6,8 +6,12 @@ and **prod**.
 
 This repository contains only DevOps work: Terraform, ECS task definitions, GitHub Actions
 pipelines, scripts and operational documentation. Application code (`apps/api`, `apps/ui`,
-`apps/sagemaker-optimizer`, `apps/sagemaker-training`, `apps/results-publisher`) is owned by the
-development teams; the pipelines here build, scan and deploy their artifacts.
+`apps/optimizer`, `apps/sagemaker-training`, `apps/results-publisher`) and data code
+(`data/glue/jobs`) is owned by the development and data teams; the pipelines here build, scan and
+deploy their artifacts.
+
+**Status:** v4 architecture implemented (Databricks export + AWS Glue medallion, optimizer as an
+ECS Fargate task, uploads bucket, `run_type` optimize / forecast); apply pending accounts.
 
 ---
 
@@ -24,9 +28,9 @@ impressions, Tier 1 dollars) plus paid media budget. Three business units compet
 
 The platform replaces a third-party tool. It:
 
-1. Ingests media and outcome data (S3 landing → Databricks feature engineering when the data platform is on).
-2. Refreshes media-mix models per business unit (Step Functions model refresh → Databricks job → SageMaker training and evaluation → SageMaker Model Registry → Databricks write-back of predictions and lift), and watches them for drift (model-monitor state machine per business unit).
-3. Runs a constrained optimizer asynchronously with a limit on concurrent runs (API → SQS run queue → dispatcher Lambda → Step Functions → SageMaker Processing → results publisher Lambda → RDS PostgreSQL).
+1. Ingests media and outcome data: the WBD Databricks catalog is the source; an export job writes raw Parquet to S3 landing, and AWS Glue builds Bronze → Silver (Data Quality) → Gold Delta tables (when the data platform is on).
+2. Refreshes media-mix models per business unit (Step Functions model refresh → Databricks export → Glue medallion → Glue exports to the training snapshot and RDS → SageMaker training and evaluation → SageMaker Model Registry → results publisher writes predictions, lift and evaluation to RDS), and watches them for drift (model-monitor state machine per business unit).
+3. Runs the optimizer (optimize or forecast) asynchronously with a limit on concurrent runs (browser upload to S3 → API → SQS run queue → dispatcher Lambda → Step Functions → ECS Fargate optimizer task → results publisher Lambda → RDS PostgreSQL).
 4. Gives planners a web UI and API for scenarios, comparison, synchronous what-if, overrides and exports (ECS `ui` + `api` behind an ALB that signs users in with WBD Okta over OIDC).
 5. Release 2 adds GenAI (private API Gateway LLM gateway, external providers, Bedrock Guardrails) behind `enable_genai`.
 
@@ -41,14 +45,20 @@ flowchart LR
   api -->|SendMessage| sqs[SQS run queue + DLQ]
   sqs --> disp[Lambda run-dispatcher<br/>max_concurrent_runs]
   disp -->|StartExecution| sfn[Step Functions optimization]
-  sfn --> sm[SageMaker Processing]
-  sm --> s3res[(S3 results / models curves)]
+  user -->|presigned PUT| up[(S3 uploads)]
+  sfn -->|runTask.sync| opt[ECS Fargate optimizer task]
+  up --> opt
+  opt --> s3res[(S3 results / models curves)]
   sfn --> pub[Lambda results-publisher]
   pub --> proxy
-  land[(S3 landing)] -->|enable_data_platform| dbx[Databricks]
-  dbx --> refresh[Step Functions model-refresh]
-  refresh --> train[SageMaker Training]
-  refresh -->|write-back| dbx
+  refresh[Step Functions model-refresh] -->|enable_data_platform| exp[Lambda databricks-export]
+  exp -->|Jobs API| dbx[Databricks export job]
+  dbx --> land[(S3 landing raw/)]
+  land --> glue[Glue Bronze / Silver / Gold]
+  glue --> td[(S3 training-data)]
+  glue -->|export-rds| proxy
+  refresh --> train[SageMaker Training + Registry]
+  refresh -->|model_results| pub
   monitor[Step Functions model-monitor] -->|drift| cw
   vpc[VPC] --> cw[CloudWatch] --> fh[Firehose] --> splunk[Splunk]
   api -. enable_genai .-> llm[Private API GW LLM gateway]
@@ -58,13 +68,13 @@ flowchart LR
 |---|---|
 | Identity | IAM Identity Center + Okta (engineers), GitHub OIDC (pipelines), ECS task roles, Okta OIDC at the ALB (planners) |
 | Network | VPC /19, public / private-app / private-data / private-endpoint subnets, NAT, VPC endpoints, Transit Gateway (WBD hub) |
-| Compute | ECS Fargate: `api`, `ui`, one-off `migrate` and `platform-check`; Step Functions; SageMaker Processing / Training; Lambda publisher and run dispatcher |
+| Compute | ECS Fargate: `api`, `ui`, one-off `migrate`, `platform-check` and `optimizer` (one task per run); Step Functions; AWS Glue; SageMaker Training / Processing (evaluation, drift); Lambda publisher, run dispatcher and Databricks export |
 | Data | RDS PostgreSQL + RDS Proxy (IAM auth, TLS), SQS run queue (KMS), S3 (versioned, KMS, Object Lock), SageMaker Model Registry |
 | Front door | Public ALB with Okta OIDC sign-in, regional WAF, ACM, optional Route 53 |
 | Security | KMS, Secrets Manager, SSM, permission boundary, Inspector / Trivy / Checkov |
 | Observability | CloudWatch (Container Insights, alarms, dashboards), SNS, Firehose → Splunk |
 | Resilience | RDS Multi-AZ (stg / prd) and PITR, AWS Backup (+ vault lock and cross-region copy in prod), SQS DLQ |
-| Data platform | EventBridge Scheduler + `mmm.refresh`, Step Functions model refresh (with Databricks write-back) and model monitor (drift), Databricks Unity Catalog access |
+| Data platform | EventBridge Scheduler + `mmm.refresh`, Step Functions model refresh and model monitor (drift), Databricks export Lambda + write-only Unity Catalog role, AWS Glue (Data Catalog, Delta Lake jobs, Data Quality) |
 | GenAI (R2) | Bedrock Guardrails, private API Gateway + proxy Lambda, provider keys in Secrets Manager |
 
 ## 3. Environments
@@ -83,13 +93,13 @@ flowchart LR
 | Data allowed | synthetic / masked | approved prod-like clone | production |
 | Deploy approval | automatic on merge | EY delivery lead | WBD approver + CAB |
 
-Each account has its **own ECR registry** (`mmm/api`, `mmm/ui`, `mmm/sagemaker-optimizer`,
+Each account has its **own ECR registry** (`mmm/api`, `mmm/ui`, `mmm/optimizer`,
 `mmm/sagemaker-training`). CI builds once in dev; promotion copies the same digest to staging on
 `vX.Y.Z-rcN` and to prod on `vX.Y.Z`.
 
 Decisions taken: account security baseline (CloudTrail, GuardDuty, Security Hub, Config, SCPs) is
-owned by WBD and verified here. Data orchestration uses Databricks + Step Functions behind
-`enable_data_platform`.
+owned by WBD and verified here. Data orchestration uses Step Functions + AWS Glue, with Databricks
+only as the source catalog, behind `enable_data_platform`.
 
 ## 4. Repository layout
 
@@ -97,7 +107,7 @@ owned by WBD and verified here. Data orchestration uses Databricks + Step Functi
 wbd_devops_implmenetation_1/
 ├── README.md                 this file
 ├── docs/                     architecture, access, OIDC, Okta, secrets, operations guides
-│   └── runbooks/             deploy, rollback, scaling, restore, ECS, rotation, pipeline, model, drift, write-back, sign-in, GenAI, optimization failures, security, break-glass
+│   └── runbooks/             deploy, rollback, scaling, restore, ECS, rotation, pipeline, model, drift, Databricks export, Glue jobs, sign-in, GenAI, optimization failures, security, break-glass
 ├── scripts/                  deploy, smoke, platform-check, lambda-release, model governance, setup-github, sync-environments, …
 ├── apps/                     reference or team-owned application folders (pipeline skips missing folders)
 ├── infra/
@@ -107,9 +117,9 @@ wbd_devops_implmenetation_1/
 │       ├── dev/              source stack (edit here)
 │       ├── staging/          sync from dev
 │       └── prod/             sync from dev
-├── ecs/                      task definition templates per environment (api, ui, migrate)
-├── data/                     model thresholds; Databricks bundle under data/databricks/ when present
-└── .github/workflows/        api-ci, ui-ci, optimizer-ci, training-ci, publisher-ci, deploy, terraform, databricks, model-governance, repo-checks
+├── ecs/                      task definition templates per environment (api, ui, migrate, optimizer)
+├── data/                     model thresholds; Glue job scripts (data/glue/jobs/) and DQ rules when present
+└── .github/workflows/        api-ci, ui-ci, optimizer-ci, training-ci, publisher-ci, deploy, terraform, glue, model-governance, repo-checks
 ```
 
 ## 5. Implementation steps
@@ -123,13 +133,13 @@ wbd_devops_implmenetation_1/
 | 4 | Networking: VPC, subnets, NAT, endpoints, security groups | ✅ Validated (apply pending accounts) |
 | 5 | Secrets Manager / SSM containers (out-of-band values) | ✅ Validated (apply pending accounts) |
 | 6 | Platform: ECR, S3, RDS PostgreSQL + Proxy | ✅ Validated (apply pending accounts) |
-| 7 | ECS cluster, ALB, `api` / `ui`, optimization (SQS run queue + dispatcher, Step Functions + SageMaker + publisher) | ✅ Validated (apply pending accounts) |
+| 7 | ECS cluster, ALB, `api` / `ui`, optimization (SQS run queue + dispatcher, Step Functions + ECS optimizer task + publisher) | ✅ Validated (apply pending accounts) |
 | 8 | Front door: Okta OIDC sign-in at the ALB, regional WAF, ACM, DNS outputs, Okta app settings | ✅ Validated (apply pending accounts) |
 | 9 | Monitoring, dashboards, Splunk shipping | ✅ Validated (apply pending accounts) |
 | 10 | Backup and DR | ✅ Validated (apply pending accounts) |
 | 11 | CI/CD pipelines, GitHub Environments | ✅ Validated (apply pending accounts) |
 | 12 | Promote platform to staging, then prod | ✅ Validated (apply pending accounts) |
-| 13 | Data platform: model refresh + write-back, drift monitor, Databricks access, governance (curves + baseline + `approval.json`) | ✅ Code done (flag off until WBD values) |
+| 13 | Data platform: Databricks export, Glue medallion + exports, model refresh → RDS results, drift monitor, governance (curves + baseline + `approval.json`) | ✅ Code done (flag off until WBD values) |
 | 14 | Release 2: LLM gateway + guardrails (`enable_genai`) | ✅ Code done (after Release 1 gate) |
 | 15 | Runbooks and handover | ✅ Written |
 
@@ -183,7 +193,7 @@ SSM: `/mmm/<env_short>/...`.
 | [07-branching-and-release](docs/07-branching-and-release.md) | Tags, promotion |
 | [08-backup-and-dr](docs/08-backup-and-dr.md) | RPO/RTO, RDS / S3 restore |
 | [09-cicd-pipelines](docs/09-cicd-pipelines.md) | Workflows, deploy, rollback |
-| [10-data-platform-and-model-governance](docs/10-data-platform-and-model-governance.md) | Model refresh, Databricks, SageMaker registry |
+| [10-data-platform-and-model-governance](docs/10-data-platform-and-model-governance.md) | Model refresh, Databricks export, Glue, SageMaker registry |
 | [11-release-1-readiness](docs/11-release-1-readiness.md) | Gate checklist |
 | [12-genai-bedrock](docs/12-genai-bedrock.md) | LLM gateway, guardrails |
 | [13-operations-and-handover](docs/13-operations-and-handover.md) | Schedule, alarms → runbooks |

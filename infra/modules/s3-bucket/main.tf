@@ -135,6 +135,21 @@ resource "aws_s3_bucket_notification" "this" {
   eventbridge = true
 }
 
+# Browser uploads with presigned URLs from the app domain (uploads bucket).
+resource "aws_s3_bucket_cors_configuration" "this" {
+  count = length(var.cors_allowed_origins) > 0 ? 1 : 0
+
+  bucket = aws_s3_bucket.this.id
+
+  cors_rule {
+    allowed_methods = ["PUT", "GET", "HEAD"]
+    allowed_origins = var.cors_allowed_origins
+    allowed_headers = ["content-type", "content-md5", "x-amz-*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
+}
+
 # ------------------------------------------------------------------ Bucket policy
 data "aws_iam_policy_document" "this" {
   source_policy_documents = compact([var.additional_policy_json])

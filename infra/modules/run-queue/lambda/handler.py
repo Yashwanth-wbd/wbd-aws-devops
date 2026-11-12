@@ -8,6 +8,9 @@ SQS event source -> for each run request:
 
 The limit is the SSM parameter MAX_RUNS_PARAMETER, read on every batch, so a change applies to the
 next batch. It is a soft limit: two concurrent batches can start at most one extra batch of runs.
+
+run_type is "optimize" (upload inventory + objective, the default) or "forecast" (upload future
+titles); both use the same queue, state machine and optimizer task.
 """
 
 import json
@@ -29,6 +32,7 @@ METRIC_NAMESPACE = os.environ["METRIC_NAMESPACE"]
 STATE_MACHINE_NAME = STATE_MACHINE_ARN.rsplit(":", 1)[-1]
 
 REQUIRED = ("run_id", "business_unit", "input_s3_uri")
+RUN_TYPES = ("optimize", "forecast")
 RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 sfn = boto3.client("stepfunctions")
@@ -73,6 +77,8 @@ def parse(record):
         return None, "run_id must be 1-80 letters, digits, '-' or '_'"
     if not str(body["input_s3_uri"]).startswith("s3://"):
         return None, "input_s3_uri must be an s3:// URI"
+    if body.get("run_type", "optimize") not in RUN_TYPES:
+        return None, f"run_type must be one of {', '.join(RUN_TYPES)}"
     return body, None
 
 
@@ -103,6 +109,7 @@ def lambda_handler(event, _context):
             continue
 
         payload = {k: body[k] for k in REQUIRED}
+        payload["run_type"] = body.get("run_type", "optimize")
         payload["dry_run"] = bool(body.get("dry_run", False))
         try:
             sfn.start_execution(stateMachineArn=STATE_MACHINE_ARN, name=run_id, input=json.dumps(payload))

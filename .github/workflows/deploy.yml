@@ -7,15 +7,16 @@
 #
 # Component        what a release changes                                    rollback
 #   api, ui        new ECS task definition revision (api: migration first)    previous revision
-#   optimizer      SSM /mmm/<env>/images/sagemaker-optimizer = image digest   previous value
+#   optimizer      new optimizer task revision (ecs/<env>/optimizer.json);    previous value
+#                  SSM /mmm/<env>/ecs/optimizer_task_definition = its ARN
 #   training       SSM /mmm/<env>/images/sagemaker-training (data platform)   previous value
 #   publisher      Lambda code -> new version -> alias "live"                  alias to previous version
-# The state machines read the image parameters at the start of every execution, so running jobs
-# are never changed. A component whose app folder is not in the commit is skipped.
+# The state machines read the release pointers at the start of every execution, so running
+# tasks and jobs are never changed. A component whose app folder is not in the commit is skipped.
 #
 # One job per run does everything after the approval gate: promote images -> (prod) RDS snapshot ->
-# migration -> ECS -> smoke test -> SageMaker image pointers -> publisher -> optimization dry run
-# through the run queue (dev/staging) -> release record.
+# migration -> ECS -> smoke test -> optimizer task revision -> release pointers -> publisher ->
+# optimization dry run through the run queue (dev/staging) -> release record.
 # Any failure rolls every changed component back.
 name: deploy
 
@@ -230,7 +231,7 @@ jobs:
         env:
           PUBLISHER: ${{ vars.PUBLISHER_FUNCTION }}
         run: |
-          : > "$STATE/services.tsv"; : > "$STATE/pointers.tsv"; : > "$STATE/digests.tsv"
+          : > "$STATE/services.tsv"; : > "$STATE/pointers.tsv"; : > "$STATE/tasks.tsv"; : > "$STATE/digests.tsv"
           for c in $COMPONENTS; do
             read -r kind repo _ target < <(scripts/deploy-components.sh "$c")
             if [ "$kind" = lambda ]; then
@@ -241,11 +242,14 @@ jobs:
             printf '%s\t%s\n' "$repo" "$digest" >> "$STATE/digests.tsv"
             case "$kind" in
               ecs)       printf '%s\t%s\t%s\n' "$target" "$repo" "$(scripts/ecs-deploy.sh current "$CLUSTER" "$PREFIX-$target")" >> "$STATE/services.tsv" ;;
+              task)      param="$SSM_PREFIX/ecs/${target}_task_definition"
+                         printf '%s\t%s\t%s\t%s\n' "$target" "$repo" "$param" \
+                           "$(aws ssm get-parameter --name "$param" --query Parameter.Value --output text)" >> "$STATE/tasks.tsv" ;;
               sagemaker) printf '%s\t%s\t%s\n' "$SSM_PREFIX/images/$target" "$REGISTRY/$repo@$digest" \
                            "$(aws ssm get-parameter --name "$SSM_PREFIX/images/$target" --query Parameter.Value --output text)" >> "$STATE/pointers.tsv" ;;
             esac
           done
-          column -t "$STATE/services.tsv" "$STATE/pointers.tsv" || true
+          column -t "$STATE/services.tsv" "$STATE/tasks.tsv" "$STATE/pointers.tsv" || true
 
       - name: RDS snapshot before migration (prod)
         if: needs.resolve.outputs.environment == 'prod' && needs.resolve.outputs.migrations == 'true' && contains(env.COMPONENTS, 'api')
@@ -285,7 +289,17 @@ jobs:
           SMOKE_CHECK_LOGIN: ${{ vars.SMOKE_CHECK_LOGIN || 'true' }}
         run: scripts/smoke.sh "$BASE_URL" "$EXPECT"
 
-      - name: SageMaker image pointers
+      # Registered only; the state machine picks the revision up through the pointer at the next run.
+      - name: Optimizer task revision
+        if: contains(env.COMPONENTS, 'optimizer')
+        run: |
+          while IFS=$'\t' read -r target repo param previous <&3; do
+            td=$(scripts/ecs-deploy.sh render "ecs/$ENVIRONMENT/$target.json" "$REGISTRY/$repo:$VERSION" "$VERSION")
+            printf '%s\t%s\t%s\n' "$param" "$td" "$previous" >> "$STATE/pointers.tsv"
+            echo "$target: registered $td"
+          done 3< "$STATE/tasks.tsv"
+
+      - name: Release pointers (optimizer task, SageMaker training image)
         run: |
           while IFS=$'\t' read -r param image _ <&3; do
             aws ssm put-parameter --name "$param" --type String --overwrite --value "$image" > /dev/null
@@ -310,12 +324,13 @@ jobs:
         env:
           QUEUE_URL: ${{ vars.OPTIMIZATION_QUEUE_URL }}
           STATE_MACHINE: ${{ vars.OPTIMIZATION_STATE_MACHINE_ARN }}
-          RESULTS_BUCKET: ${{ vars.RESULTS_BUCKET }}
+          UPLOADS_BUCKET: ${{ vars.UPLOADS_BUCKET }}
           MODELS_BUCKET: ${{ vars.MODELS_BUCKET }}
           BUSINESS_UNIT: ${{ vars.DRY_RUN_BUSINESS_UNIT }}
+          TASK_PARAM: ${{ vars.OPTIMIZER_TASK_PARAM }}
         run: |
-          scripts/dry-run-optimization.sh "$QUEUE_URL" "$STATE_MACHINE" "$RESULTS_BUCKET" "$MODELS_BUCKET" "$BUSINESS_UNIT" \
-            "$SSM_PREFIX/images/sagemaker-optimizer"
+          scripts/dry-run-optimization.sh "$QUEUE_URL" "$STATE_MACHINE" "$UPLOADS_BUCKET" "$MODELS_BUCKET" "$BUSINESS_UNIT" \
+            "${TASK_PARAM:-$SSM_PREFIX/ecs/optimizer_task_definition}"
 
       # ---------------------------------------------------------------- rollback
       - name: Roll back
@@ -361,7 +376,7 @@ jobs:
               triggered_by: $actor, approved_by: $approvers, change_ticket: $ticket, db_snapshot: $snapshot, run: $run,
               images:   [$digests  | split("\n")[] | select(length > 0) | split("\t") | { repository: .[0], digest: .[1] }],
               services: [$deployed | split("\n")[] | select(length > 0) | split("\t") | { service: .[0], previous: .[1], deployed: .[2] }],
-              sagemaker_images: [$pointers | split("\n")[] | select(length > 0) | split("\t") | { parameter: .[0], deployed: .[1], previous: .[2] }],
+              release_pointers: [$pointers | split("\n")[] | select(length > 0) | split("\t") | { parameter: .[0], deployed: .[1], previous: .[2] }],
               publisher: (if ($lambda | length) > 0 then ($lambda | split("\t") | { function: .[0], previous: .[1], deployed: (.[2] // null), code_sha256: $publisher_sha }) else null end) }
           ' | tee "$STATE/release-record.json"
           {

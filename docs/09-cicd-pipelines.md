@@ -9,13 +9,13 @@ or applies Terraform from a laptop after this step. No AWS keys or app secrets a
 |---|---|---|
 | `api-ci.yml` | PR or push to `main` touching `apps/api/**` | Calls `_python-service-ci.yml`: ruff, mypy, pytest (**80 %** coverage), Trivy; builds and scans `mmm/api`; on `main` pushes `sha-<7char>` to dev ECR |
 | `ui-ci.yml` | PR or push to `main` touching `apps/ui/**` | `npm ci`, lint, test, build; Trivy; on `main` pushes `mmm/ui` to dev ECR |
-| `optimizer-ci.yml` | PR or push to `main` touching `apps/sagemaker-optimizer/**` | Same Python CI for `mmm/sagemaker-optimizer` |
+| `optimizer-ci.yml` | PR or push to `main` touching `apps/optimizer/**` | Same Python CI for `mmm/optimizer` (the ECS inference & optimization task) |
 | `training-ci.yml` | PR or push to `main` touching `apps/sagemaker-training/**` | Same Python CI for `mmm/sagemaker-training` (skipped at deploy when data platform is off) |
 | `publisher-ci.yml` | PR or push to `main` touching `apps/results-publisher/**` | `_python-service-ci.yml` with `build_image: false` (tests only); `deploy.yml` zips and publishes the Lambda |
-| `deploy.yml` | CI on `main` finished (success), `v*` tag push, or manual | Promote images → (prod) RDS DB snapshot → migration → ECS → smoke → SSM SageMaker pointers → publisher Lambda → release record. Rolls back on failure |
+| `deploy.yml` | CI on `main` finished (success), `v*` tag push, or manual | Promote images → (prod) RDS DB snapshot → migration → ECS services → smoke → optimizer task revision → release pointers (SSM) → publisher Lambda → release record. Rolls back on failure |
 | `terraform.yml` | PR / push touching `infra/**` or `data/model-thresholds.yaml` (drift thresholds), nightly 03:00 UTC, manual | PR: fmt, validate, tflint, Checkov, plan dev + staging. `main`: apply dev → staging → prod (approvals). Nightly: drift check |
 | `repo-checks.yml` | every PR and push to `main` | Trivy secret scan, Semgrep on `apps/`, shellcheck, LF line endings, actionlint, ECS template check, env sync check |
-| `databricks.yml` | push to `main` touching `data/databricks/**`, manual | Databricks Asset Bundle validate + deploy (OIDC). Skipped if `data/databricks/databricks.yml` is missing |
+| `glue.yml` | push to `main` touching `data/glue/jobs/**` (dev), manual (staging / prod with approval) | Syntax check, then upload the Glue job scripts to `s3://<glue-assets>/scripts/` (only jobs Terraform created). Skipped while the folder is empty or the data platform is off |
 | `model-governance.yml` | hourly, manual | SageMaker registry evaluate / promote / rollback ([10 §7](10-data-platform-and-model-governance.md#7-model-governance-model-governanceyml)) |
 | `_python-service-ci.yml`, `_terraform-apply.yml` | called by the workflows above | Shared steps |
 
@@ -34,8 +34,8 @@ flowchart LR
 ```
 
 - **Dev** deploys only the component whose CI finished (`workflow_run`). `api-ci` sets
-  `run_migrations=true`; other CIs deploy their component only (for example `optimizer-ci` updates
-  the SageMaker SSM pointer on the next successful deploy that includes `optimizer`).
+  `run_migrations=true`; other CIs deploy their component only (for example `optimizer-ci` makes
+  `deploy.yml` register a new `optimizer` task revision and move the SSM pointer to it).
 - **Release tags** deploy all present components: `api`, `ui`, `optimizer`, `training` (if data
   platform is on in that account), `publisher`.
 - **Staging**: `promote-images.sh find-build` picks the newest dev image built from the tagged
@@ -52,7 +52,7 @@ flowchart LR
 |---|---|---|---|
 | `api` | ECS service `api` | `mmm/api` | `apps/api` |
 | `ui` | ECS service `ui` | `mmm/ui` | `apps/ui` |
-| `optimizer` | SSM `/mmm/<env_short>/images/sagemaker-optimizer` | `mmm/sagemaker-optimizer` | `apps/sagemaker-optimizer` |
+| `optimizer` | ECS task `mmm-<env>-optimizer` (new revision) + SSM `/mmm/<env_short>/ecs/optimizer_task_definition` | `mmm/optimizer` | `apps/optimizer` |
 | `training` | SSM `…/sagemaker-training` | `mmm/sagemaker-training` | `apps/sagemaker-training` |
 | `publisher` | Lambda `mmm-<env>-results-publisher`, alias `live` | (zip, not an image) | `apps/results-publisher` |
 
@@ -74,17 +74,22 @@ If `apps/<folder>` is missing in the checkout, that component is skipped with a 
    and `APP_VERSION`; `ecs-deploy.sh update` waits for `rolloutState = COMPLETED`.
 6. **Smoke test** `scripts/smoke.sh` against `SMOKE_BASE_URL` or `APP_URL`: `/api/health` → 200;
    `/` → 302 to the Okta authorize endpoint (12 × 10 s by default; only while `SMOKE_CHECK_LOGIN = true`).
-7. **SageMaker pointers**: write `registry/repo@digest` to SSM for `optimizer` / `training`.
-8. **Publisher**: `lambda-release.sh build` + `publish` → new version, alias `live` moved.
-9. **Optimization dry run** (dev and staging, when `optimizer` or `publisher` changed;
-   `SMOKE_DRY_RUN=false` skips it): `scripts/dry-run-optimization.sh` sends one request
-   `dryrun-<run>-<attempt>` with `dry_run = true` for `DRY_RUN_BUSINESS_UNIT` to the run queue
-   (`OPTIMIZATION_QUEUE_URL`), waits up to 10 minutes for the dispatcher to start the execution of
-   the same name, then up to 20 minutes for it to finish. This also proves the queue and dispatcher work.
-   It is skipped while no optimizer image was released or that BU has no approved curves yet.
-10. **Rollback** on failure after step 5 started: previous ECS task defs, previous SSM values,
-    previous Lambda version. Migrations are **not** reverted (expand-then-contract).
-11. **Release record:** JSON artifact + job summary (version, digests, revisions, approvers,
+7. **Optimizer task revision**: render `ecs/<env>/optimizer.json` with the new `mmm/optimizer`
+   image (`ecs-deploy.sh render`), `register-task-definition`; the new ARN is the next value of SSM
+   `/mmm/<env_short>/ecs/optimizer_task_definition`. No service: the next run uses it.
+8. **Release pointers**: write the optimizer task ARN and `registry/repo@digest` of `training` to SSM.
+9. **Publisher**: `lambda-release.sh build` + `publish` → new version, alias `live` moved.
+10. **Optimization dry run** (dev and staging, when `optimizer` or `publisher` changed;
+   `SMOKE_DRY_RUN=false` skips it): `scripts/dry-run-optimization.sh` puts a small input under
+   `s3://<uploads>/<bu>/runs/<run_id>/input/` and sends one request `dryrun-<run>-<attempt>` with
+   `dry_run = true` for `DRY_RUN_BUSINESS_UNIT` to the run queue (`OPTIMIZATION_QUEUE_URL`), waits up
+   to 10 minutes for the dispatcher to start the execution of the same name, then up to 20 minutes
+   for it to finish. This also proves the queue, dispatcher and the ECS task launch work. It is
+   skipped while the optimizer pointer is still `:unset` or that BU has no approved curves yet.
+11. **Rollback** on failure after step 5 started: previous ECS task defs (services), previous SSM
+    values (incl. the optimizer task ARN), previous Lambda version. Migrations are **not** reverted
+    (expand-then-contract).
+12. **Release record:** JSON artifact + job summary (version, digests, revisions, approvers,
     change ticket, DB snapshot id).
 
 ### Who owns what in a task definition
@@ -92,7 +97,7 @@ If `apps/<folder>` is missing in the checkout, that component is skipped with a 
 | Owner | Fields | Where |
 |---|---|---|
 | Terraform | roles, CPU and memory, environment variables, secrets (ARNs only), logging, volumes | `infra/environments/<env>/ecs.tf` |
-| App team (via DevOps review) | `command`, `entryPoint`, `stopTimeout` of the `app` container | `ecs/<env>/<service>.json` (synced to staging/prod by `scripts/sync-environments.ps1`) |
+| App team (via DevOps review) | `command`, `entryPoint`, `stopTimeout` of the `app` container | `ecs/<env>/<service>.json` and `optimizer.json` (synced to staging/prod by `scripts/sync-environments.ps1`) |
 | Pipeline | `image`, `APP_VERSION` | `deploy.yml` via `ecs-deploy.sh` |
 
 A Terraform change to a task definition creates a new revision, but running services don't pick
@@ -117,8 +122,6 @@ gh auth login
 # Model approvers (Step 13)
 .\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment prod -ReviewerTeams wbd-release-approvers `
   -ModelApproverTeams wbd-model-approvers -SkipVariables
-# Databricks bundle deploy principal (when data platform is on)
-.\scripts\setup-github.ps1 -Repo Yashwanth-wbd/wbd-aws-devops -Environment dev -DatabricksClientId <sp-client-id>
 ```
 
 | Environment | Required reviewers | Prevent self-review | Allowed refs |
@@ -139,12 +142,12 @@ gh auth login
 | `ECS_CLUSTER`, `APP_SUBNET_IDS`, `DATA_CLIENTS_SG_ID` | deploy, migration |
 | `APP_URL`, `DB_INSTANCE_ID`, `PUBLISHER_FUNCTION` | smoke test, prod snapshot, Lambda release |
 | `SMOKE_CHECK_LOGIN` | smoke test: `true` once `okta_sign_in_enabled = true` (re-run `setup-github.ps1` after that apply) |
-| `SAGEMAKER_IMAGE_PARAM_PREFIX` | deploy (SSM `/mmm/<env_short>/images`) |
+| `SAGEMAKER_IMAGE_PARAM_PREFIX` | deploy (SSM `/mmm/<env_short>/images`, training image) |
+| `OPTIMIZER_TASK_FAMILY`, `OPTIMIZER_TASK_PARAM` | deploy (optimizer task revision and its SSM pointer) |
 | `OPTIMIZATION_STATE_MACHINE_ARN`, `OPTIMIZATION_QUEUE_URL` | deploy dry run, runbooks |
-| `RESULTS_BUCKET`, `MODELS_BUCKET`, `DRY_RUN_BUSINESS_UNIT` | deploy dry run (dev, staging only) |
+| `UPLOADS_BUCKET`, `RESULTS_BUCKET`, `MODELS_BUCKET`, `DRY_RUN_BUSINESS_UNIT` | deploy dry run (dev, staging only) |
 | `SOURCE_ECR_READ_ROLE_ARN`, `SOURCE_ECR_REGISTRY` | staging/prod promotion |
-| `DATABRICKS_HOST` | `databricks.yml` (data platform) |
-| `DATABRICKS_CLIENT_ID` | `databricks.yml` (set by `-DatabricksClientId`, not in Terraform output) |
+| `GLUE_ASSETS_BUCKET` | `glue.yml` (data platform) |
 | `MODEL_REFRESH_STATE_MACHINE_ARN` | deploy (detect data platform) |
 
 **Optional environment variables:**
@@ -176,16 +179,16 @@ Secret scanning, Dependabot for actions/pip/npm, allow only selected actions. Ev
 
 ## 5. Contract with the app teams
 
-| Item | api | ui | sagemaker-optimizer | sagemaker-training | results-publisher |
+| Item | api | ui | optimizer | sagemaker-training | results-publisher |
 |---|---|---|---|---|---|
-| Folder | `apps/api` | `apps/ui` | `apps/sagemaker-optimizer` | `apps/sagemaker-training` | `apps/results-publisher` |
+| Folder | `apps/api` | `apps/ui` | `apps/optimizer` | `apps/sagemaker-training` | `apps/results-publisher` |
 | Toolchain | `uv` + `uv.lock`; ruff, mypy, pytest | Node 22 + `package-lock.json`; lint, test, build | same as api | same as api | Python; tests in CI, zip in deploy |
-| Container | `Dockerfile`; port **8080**; non-root; read-only root except `/tmp` | same | Processing image: reads `/opt/ml/processing/input`, `…/curves`, writes `…/output` | Training + `evaluate` processing mode | N/A (Lambda) |
-| Health | `GET /api/health` → 200 without auth; should include `APP_VERSION` when possible | `GET /healthz` → 200 (ALB target group) | n/a (batch job) | n/a | n/a |
-| ECS / runtime | `ecs/<env>/api.json` command | `ecs/<env>/ui.json` | Started by Step Functions `optimization` | Started by `model-refresh` (train + evaluate) | Handler `handler.lambda_handler` in deployed zip |
+| Container | `Dockerfile`; port **8080**; non-root; read-only root except `/tmp` | same | ECS task (no port): reads `INPUT_S3_URI` + `CURVES_S3_URI`, writes `OUTPUT_S3_URI`; exit 0 = success | Training + `evaluate` / `drift` processing mode | N/A (Lambda) |
+| Health | `GET /api/health` → 200 without auth; should include `APP_VERSION` when possible | `GET /healthz` → 200 (ALB target group) | n/a (batch task) | n/a | n/a |
+| ECS / runtime | `ecs/<env>/api.json` command | `ecs/<env>/ui.json` | `ecs/<env>/optimizer.json` command; started by Step Functions `optimization` (one task per run) | Started by `model-refresh` (train + evaluate) | Handler `handler.lambda_handler` in deployed zip |
 | Migrations | Alembic in API image; `ecs/<env>/migrate.json` | – | – | – | – |
-| Config | Env vars and secrets from ECS ([05](05-secrets-and-config.md)) | `API_BASE_PATH`, `LOGOUT_URL` from Terraform | `APP_ENV`, `RUN_ID`, `BUSINESS_UNIT`, `DRY_RUN` (`true`: load input + curves, write a small output, no solve) from state machine | `APP_ENV`, `BUSINESS_UNIT`; CLI arg `evaluate` for evaluation job | DB and `RESULTS_BUCKET` from Lambda env (Terraform); event field `dry_run` (`true`: check the DB connection, write no run) |
-| Shutdown | Finish in-flight HTTP on SIGTERM (~30 s) | Short stop timeout (~15 s) | SageMaker max runtime from tfvar | Training/processing max runtime from tfvar | Lambda timeout 120 s |
+| Config | Env vars and secrets from ECS ([05](05-secrets-and-config.md)) | `API_BASE_PATH`, `LOGOUT_URL` from Terraform | `APP_ENV`, `MODELS_BUCKET`, `RESULTS_BUCKET`, `UPLOADS_BUCKET` (Terraform); `RUN_ID`, `BUSINESS_UNIT`, `RUN_TYPE` (`optimize` / `forecast`), `DRY_RUN` (`true`: load input + curves, write a small output, no solve) from the state machine | `APP_ENV`, `BUSINESS_UNIT`; CLI arg `evaluate` / `drift` | DB and buckets from Lambda env (Terraform); events `optimization_run` (success or failure) and `model_results`; field `dry_run` (`true`: check the DB connection, write no run) |
+| Shutdown | Finish in-flight HTTP on SIGTERM (~30 s) | Short stop timeout (~15 s) | `optimizer_max_runtime_seconds` (state timeout); `stopTimeout` 120 s | Training/processing max runtime from tfvar | Lambda timeout 120 s |
 
 ## 6. Everyday operations
 
@@ -200,7 +203,7 @@ git tag -a v1.4.0 -m "CHG0012345 MMM release 1.4.0" <same commit>; git push orig
 gh workflow run deploy.yml --ref main -f environment=dev -f image_tag=sha-1a2b3c4 -f run_migrations=false
 gh workflow run deploy.yml --ref v1.3.2 -f environment=prod -f run_migrations=false   # prod: run on the release tag
 
-# Roll back SageMaker pointer or publisher only
+# Roll back the optimizer task, training image pointer or publisher only
 gh workflow run deploy.yml --ref main -f environment=staging -f components=optimizer -f run_migrations=false -f image_tag=v1.3.2-rc1
 
 # Immediate ECS rollback without the pipeline (break-glass, DevOps profile)

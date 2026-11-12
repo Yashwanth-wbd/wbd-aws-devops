@@ -1,8 +1,8 @@
 # ================================================================== Step 7 - ECS compute
 # Two long-running services behind the ALB: ui (web app) and api (REST + interactive what-if on
-# the approved response curves). Full optimization runs are not done in ECS: the API puts a request
-# on the run queue (run-queue.tf); the dispatcher starts the optimization state machine
-# (optimization.tf) when a slot is free, which runs a SageMaker Processing job.
+# the approved response curves). Full optimization / forecast runs: the API puts a request on the
+# run queue (run-queue.tf); the dispatcher starts the optimization state machine (optimization.tf)
+# when a slot is free, which runs the optimizer as a one-off ECS Fargate task (ecs:runTask.sync).
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
@@ -109,10 +109,11 @@ data "aws_iam_policy_document" "task_api" {
     resources = [local.bucket_arns["results"], "${local.bucket_arns["results"]}/*"]
   }
 
+  # User uploads (<bu>/runs/<run_id>/input/*): the API signs the browser's presigned PUT and reads the file back.
   statement {
-    sid       = "WriteRunInputs"
-    actions   = ["s3:PutObject"]
-    resources = ["${local.bucket_arns["results"]}/runs/*/input/*"]
+    sid       = "RunInputUploads"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${local.bucket_arns["uploads"]}/*"]
   }
 
   statement {
@@ -180,9 +181,12 @@ data "aws_iam_policy_document" "task_migrate" {
   dynamic "statement" {
     for_each = var.enable_db_bootstrap ? [1] : []
     content {
-      sid       = "BootstrapDbUserSecrets"
-      actions   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
-      resources = [module.secrets.secret_arns["rds/migrate"], module.secrets.secret_arns["rds/proxy"]]
+      sid     = "BootstrapDbUserSecrets"
+      actions = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
+      resources = concat(
+        [module.secrets.secret_arns["rds/migrate"], module.secrets.secret_arns["rds/proxy"]],
+        var.enable_data_platform ? [module.secrets.secret_arns["rds/etl"]] : [],
+      )
     }
   }
 
@@ -216,9 +220,9 @@ data "aws_iam_policy_document" "task_platform_check" {
   }
 
   statement {
-    sid       = "ReadImagePointers"
+    sid       = "ReadReleasePointers"
     actions   = ["ssm:GetParameter"]
-    resources = [for p in aws_ssm_parameter.sagemaker_image : p.arn]
+    resources = concat([aws_ssm_parameter.optimizer_task.arn], [for p in aws_ssm_parameter.sagemaker_image : p.arn])
   }
 
   statement {
@@ -249,6 +253,7 @@ module "svc_api" {
   container_port = local.app_port
   environment = merge(local.common_env, {
     MODELS_BUCKET                  = module.buckets["models"].bucket_name
+    UPLOADS_BUCKET                 = module.buckets["uploads"].bucket_name
     EXPORTS_BUCKET                 = module.buckets["exports"].bucket_name
     APPROVED_BUCKET                = module.buckets["approved-worm"].bucket_name
     DB_USER                        = "mmm_app"
@@ -330,7 +335,7 @@ module "task_migrate" {
     MIGRATE_SECRET_ID = module.secrets.secret_arns["rds/migrate"]
     APP_SECRET_ID     = module.secrets.secret_arns["rds/proxy"]
     HOME              = "/tmp"
-  } : {})
+  } : {}, var.enable_db_bootstrap && var.enable_data_platform ? { ETL_SECRET_ID = module.secrets.secret_arns["rds/etl"] } : {})
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]
 
@@ -364,6 +369,7 @@ module "task_platform_check" {
     HOME                           = "/tmp"
     OPTIMIZATION_STATE_MACHINE_ARN = module.optimization_sfn.state_machine_arn
     OPTIMIZATION_QUEUE_URL         = module.run_queue.queue_url
+    OPTIMIZER_TASK_PARAM           = aws_ssm_parameter.optimizer_task.name
     IMAGE_PARAMETER_NAMES          = join(",", [for p in aws_ssm_parameter.sagemaker_image : p.name])
     APP_URL                        = local.app_url
   })

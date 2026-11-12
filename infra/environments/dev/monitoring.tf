@@ -8,7 +8,14 @@ locals {
     var.enable_data_platform ? { model-refresh = module.refresh_sfn[0].state_machine_arn, model-monitor = module.monitor_sfn[0].state_machine_arn } : {},
   )
 
-  lambda_functions = concat([module.publisher.function_name, module.run_queue.dispatcher_function_name], var.enable_genai ? [module.llm_gateway[0].proxy_function_name] : [])
+  # Built from the name (as in the module), so monitoring does not wait for the export Lambda.
+  databricks_export_function = var.enable_data_platform ? "${local.name_prefix}-databricks-export" : null
+
+  lambda_functions = concat(
+    [module.publisher.function_name, module.run_queue.dispatcher_function_name],
+    var.enable_data_platform ? [local.databricks_export_function] : [],
+    var.enable_genai ? [module.llm_gateway[0].proxy_function_name] : [],
+  )
 
   # RDS for PostgreSQL max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000); unknown class = no connections alarm
   rds_memory_gib = {
@@ -36,13 +43,16 @@ locals {
       sfn-optimization = module.optimization_sfn.log_group_name
       publisher        = module.publisher.log_group_name
       run-dispatcher   = module.run_queue.log_group_name
-      sagemaker-jobs   = aws_cloudwatch_log_group.sagemaker["ProcessingJobs"].name
+      optimizer        = module.task_optimizer.log_group_name
     },
     var.ship_vpc_flow_logs ? { vpc-flow = module.network.flow_log_group_name } : {},
     var.enable_data_platform ? {
       sfn-model-refresh = module.refresh_sfn[0].log_group_name
       sfn-model-monitor = module.monitor_sfn[0].log_group_name
+      sagemaker-jobs    = aws_cloudwatch_log_group.sagemaker["ProcessingJobs"].name
       sagemaker-train   = aws_cloudwatch_log_group.sagemaker["TrainingJobs"].name
+      glue-jobs         = module.glue[0].log_group_name
+      databricks-export = module.databricks_export[0].log_group_name
     } : {},
     var.enable_genai ? { for k, v in module.llm_gateway[0].log_group_names : "llm-${k}" => v } : {},
   )
@@ -72,6 +82,11 @@ module "monitoring" {
   run_queue_name       = module.run_queue.queue_name
   run_dlq_name         = module.run_queue.dlq_name
   drift_business_units = var.enable_data_platform ? var.business_units : []
+
+  # v4: optimizer task that fails to start, Glue job / Data Quality failures, export Lambda on the data-pipeline dashboard
+  optimizer_task_family           = module.task_optimizer.task_definition_family
+  glue_job_names                  = var.enable_data_platform ? values(module.glue[0].job_names) : []
+  databricks_export_function_name = local.databricks_export_function
 
   # Weekly schedule: alarm after 7 days without a successful refresh
   model_refresh_overdue_days = var.enable_data_platform && var.enable_model_refresh_schedule ? 7 : null

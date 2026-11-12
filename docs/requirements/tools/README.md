@@ -1,6 +1,6 @@
 # Requirement-document tools
 
-Helper scripts used to read the client requirement files and to (re)generate the `_2` / `_3` documents.
+Helper scripts used to read the client requirement files and to (re)generate the `_2` / `_3` / `_4` documents.
 They are not part of the platform or the pipelines. Run them with `uv` (no install needed):
 
 ```powershell
@@ -18,12 +18,18 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v3.py $req
 # v2 versions (history): build_v2.py, checked with check_v2.py
 uv run --no-project --with openpyxl --with python-docx python .\check_v2.py $req
 
-# Regenerate devops_3_client_question.xlsx (inputs only WBD can provide; edit INPUTS / DECISIONS first)
+# Regenerate aws_resource_list_4.xlsx (full v4 list per environment from ROWS + summary, v4-only detail V4_NEW /
+# V4_CHANGED, removed_vs_v3 from REMOVED) and wbd_mmm_ecs_final_4.docx; --xlsx-only leaves the docx alone
+uv run --no-project --with openpyxl --with python-docx python .\build_v4.py $req [--xlsx-only]
+
+# Regenerate devops_4_client_question.xlsx (full v4 list: v3 questions still needed + new v4 ones, each tagged
+# New in v4 / Changed by v4 / From v3; obsolete v3 questions on removed_vs_v3).
+# The v3 version of this script (devops_3_client_question.xlsx) is in git history.
 uv run --no-project --with openpyxl python .\build_client_questions.py $req
 ```
 
-Regenerating `devops_3_client_question.xlsx` overwrites the values typed into it – once WBD starts
+Regenerating `devops_4_client_question.xlsx` overwrites the values typed into it – once WBD starts
 answering, edit the workbook directly instead.
 
-For a new requirement (v4), copy `build_v3.py` to `build_v4.py`, change the output names to `_4`,
-and edit the `ROWS`, `REMOVED`, `STATUS`, `IMPL` and `DECISIONS` lists and the docx sections.
+For a new requirement (v5), copy `build_v4.py` to `build_v5.py`, change the output names to `_5`,
+and edit the `ROWS`, `REMOVED` and `DECISIONS` lists and the docx sections.

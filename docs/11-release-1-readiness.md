@@ -68,12 +68,13 @@ Infrastructure code is identical (CI runs this on every push):
 ## 3. G2 – Data-team platform and model governance
 
 Run *Validate Step 13 → With AWS* in each environment (see [docs/10 §9](10-data-platform-and-model-governance.md#9-enabling-verification-troubleshooting)).
-When the data team ships the bundle, confirm `databricks.yml` deployed to each target.
+When the data engineers ship the Glue scripts, confirm `glue.yml` uploaded them to each environment.
 
 | Check | dev | staging | prod |
 |---|---|---|---|
-| `databricks.yml` deployed the refresh job (or bundle absent and waived) | ☐ | ☐ | ☐ |
-| EventBridge connection secret set; test refresh reaches Databricks | ☐ | ☐ | ☐ |
+| `glue.yml` uploaded the job scripts to `glue-assets/scripts/` (no seed script left) | ☐ | ☐ | ☐ |
+| `databricks/export-sp` filled and `databricks_export_job_ids` set; `StartExport` reaches Databricks and the export lands in `raw/databricks/<bu>/` | ☐ | ☐ | ☐ |
+| Bronze → Silver (Data Quality passes) → Gold → export-training / export-rds succeed; `mmm_etl` rows visible in RDS | ☐ | ☐ | ☐ |
 | Scheduled or on-demand refresh starts `mmm-<env>-model-refresh` | ☐ | ☐ | ☐ |
 | Upload without the business-unit KMS key to landing is denied | ☐ | ☐ | ☐ |
 | On-demand trigger (`scripts/trigger-model-refresh.sh`) starts one execution per BU | ☐ | ☐ | ☐ |
@@ -84,7 +85,7 @@ When the data team ships the bundle, confirm `databricks.yml` deployed to each t
 | Failing package tagged `governance_status=failed` and **Rejected** | ☐ | ☐ | ☐ |
 | Passing package waits in `<env>-model-promotion`, approved by someone other than the requester | ☐ | ☐ | ☐ |
 | Approval publishes `models/baseline/<bu>/` and writes `approval.json` next to `evaluation.json` | ☐ | ☐ | ☐ |
-| Databricks write-back job ran after registration (`WritebackDone`), Gold tables updated | ☐ | ☐ | ☐ |
+| `PublishModelResults` wrote predictions, lift and evaluation to RDS after registration | ☐ | ☐ | ☐ |
 | Model monitor run per BU succeeds; `ModelDrift` metric visible; then `enable_model_monitor_schedule = true` | ☐ | ☐ | ☐ |
 | Model rollback re-publishes previous curves and baseline (docs/10 §7) | ☐ | – | ☐ |
 | `data/model-thresholds.yaml` holds the **signed-off Week-1 thresholds** (not placeholders) | ☐ (one file for all) | | |

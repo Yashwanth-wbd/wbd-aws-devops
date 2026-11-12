@@ -1,6 +1,6 @@
 # Runbook: roll back
 
-Decide **what** is bad first: app image (`api` / `ui`), SageMaker optimizer/training image pointers,
+Decide **what** is bad first: app image (`api` / `ui`), the optimizer task pointer or the SageMaker training image pointer,
 results publisher Lambda, database schema/data, infrastructure, model refresh pipeline, model
 governance, or GenAI. Practise each in staging (Release 1 gate R9).
 
@@ -8,7 +8,8 @@ governance, or GenAI. Practise each in staging (Release 1 gate R9).
 |---|---|---|
 | App (`api`, `ui`) | Redeploy the previous version with `deploy.yml` dispatch, migrations off | 5–10 min |
 | App, pipeline unavailable | `aws ecs update-service --task-definition <previous revision>` ([break-glass.md](break-glass.md) in prod) | 3–5 min |
-| SageMaker optimizer / training image | `deploy.yml` dispatch with previous tag, or restore previous SSM values | 2–5 min |
+| Optimizer task / SageMaker training image | `deploy.yml` dispatch with previous tag, or restore previous SSM values | 2–5 min |
+| Glue job script | Revert the PR under `data/glue/jobs/`, `glue.yml` uploads the previous script | 5 min |
 | Results publisher | `scripts/lambda-release.sh switch mmm-<env>-results-publisher <version>` (version from release record) | 1–2 min |
 | Infrastructure | Revert the PR, merge, approve the apply | 15–30 min |
 | Database data | RDS point-in-time restore ([db-restore.md](db-restore.md)) | 30–60 min |
@@ -42,17 +43,21 @@ Afterwards redeploy the same version through the pipeline so the release record 
 schema. If a migration itself destroyed data, restore ([db-restore.md](db-restore.md)); the prod
 deploy made cluster snapshot `mmm-prd-predeploy-<version>-<run>` right before it.
 
-## SageMaker images (SSM)
+## Release pointers (SSM): optimizer task, SageMaker training image
 
-The release record lists previous SSM values for `/mmm/<env_short>/images/sagemaker-optimizer` and
-`sagemaker-training`. Either dispatch `deploy.yml` with the previous image tag, or (emergency):
+The release record (`release_pointers`) lists the previous values of
+`/mmm/<env_short>/ecs/optimizer_task_definition` (task definition ARN) and
+`/mmm/<env_short>/images/sagemaker-training` (image digest URI). Either dispatch `deploy.yml` with
+the previous image tag, or (emergency):
 
 ```bash
-aws ssm put-parameter --name /mmm/$E/images/sagemaker-optimizer --value '<previous digest URI>' --overwrite
+aws ecs list-task-definitions --family-prefix $P-optimizer --sort DESC --max-items 5
+aws ssm put-parameter --name /mmm/$E/ecs/optimizer_task_definition --value '<previous task definition ARN>' --overwrite
+aws ssm put-parameter --name /mmm/$E/images/sagemaker-training --value '<previous digest URI>' --overwrite
 ```
 
-New optimization runs pick up the pointer immediately; in-flight Step Functions executions keep
-the image they resolved at start.
+New runs pick up the pointer immediately; in-flight Step Functions executions keep the task
+revision / image they resolved at start.
 
 ## Results publisher (Lambda)
 

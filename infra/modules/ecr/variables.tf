@@ -1,7 +1,7 @@
 variable "repositories" {
   description = "Repository names in this account's registry."
   type        = list(string)
-  default     = ["mmm/api", "mmm/ui", "mmm/sagemaker-optimizer", "mmm/sagemaker-training"]
+  default     = ["mmm/api", "mmm/ui", "mmm/optimizer", "mmm/sagemaker-training"]
 
   validation {
     condition     = alltrue([for r in var.repositories : can(regex("^mmm/[a-z0-9-]+$", r))])

@@ -49,11 +49,14 @@ Lambda `-errors`. Full list with thresholds: [monitoring README](../infra/module
 |---|---|
 | `api-no-healthy-targets`, `ui-no-healthy-targets`, `api-5xx-rate`, `availability`, EventBridge `ecs-deployment-failed`, `ecs-service-error` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [rollback.md](runbooks/rollback.md) |
 | `whatif-p95` | [ecs-task-stuck.md](runbooks/ecs-task-stuck.md), [scale-planning-season.md](runbooks/scale-planning-season.md) |
-| `optimization-failed`, `results-publisher-errors`, `optimization-runtime-max`, `optimization-standard-p95` | [optimization-run-failed.md](runbooks/optimization-run-failed.md); runtime: [scale-planning-season.md](runbooks/scale-planning-season.md) (`optimizer_instance_type`) |
+| `optimization-failed`, `results-publisher-errors`, `optimization-runtime-max`, `optimization-standard-p95` | [optimization-run-failed.md](runbooks/optimization-run-failed.md); runtime: [scale-planning-season.md](runbooks/scale-planning-season.md) (`optimizer_cpu` / `optimizer_memory`) |
+| EventBridge `optimizer-task-not-started` | [optimization-run-failed.md](runbooks/optimization-run-failed.md) (image pull, secret, Fargate capacity) |
 | `runs-oldest-request`, `runs-expired-requests` | [scale-planning-season.md](runbooks/scale-planning-season.md) (`max_concurrent_runs`); [optimization-run-failed.md](runbooks/optimization-run-failed.md) if runs are not finishing |
 | `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles` | [optimization-run-failed.md](runbooks/optimization-run-failed.md) (dispatcher, DLQ redrive) |
 | `optimization-throttled`, `model-refresh-throttled`, `model-monitor-throttled` | [scale-planning-season.md](runbooks/scale-planning-season.md) (Step Functions quota) |
-| `model-refresh-failed`, `model-refresh-overdue` | [model-refresh-failed.md](runbooks/model-refresh-failed.md); write-back step: [write-back-failed.md](runbooks/write-back-failed.md) |
+| `model-refresh-failed`, `model-refresh-overdue` | [model-refresh-failed.md](runbooks/model-refresh-failed.md) |
+| `databricks-export-errors` | [databricks-export-failed.md](runbooks/databricks-export-failed.md) |
+| EventBridge `glue-job-failed`, `glue-data-quality-failed` | [glue-job-failed.md](runbooks/glue-job-failed.md) |
 | `model-monitor-failed`, `model-drift-<bu>` | [model-drift.md](runbooks/model-drift.md) |
 | EventBridge `model-package-state` (version created / approved / rejected) | [model-rollback.md](runbooks/model-rollback.md); a rejection lists the failed thresholds |
 | `rds-cpu`, `rds-connections`, `rds-read-latency`, `rds-write-latency`, `rds-free-storage` | Larger `rds_instance_class` or `rds_max_allocated_storage` / tune queries (PR; class change = short outage, Multi-AZ fails over first); [db-restore.md](runbooks/db-restore.md) if data is affected |

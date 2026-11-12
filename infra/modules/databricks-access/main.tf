@@ -44,14 +44,20 @@ resource "aws_iam_role" "uc" {
   tags = local.tags
 }
 
+locals {
+  all_prefixes = concat(var.write_prefixes, var.read_only_prefixes)
+}
+
 data "aws_iam_policy_document" "uc" {
-  statement {
-    sid = "Buckets"
-    actions = [
-      "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
-      "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
-    ]
-    resources = concat(var.bucket_arns, [for b in var.bucket_arns : "${b}/*"])
+  # Export job output only: Databricks writes the raw extract, nothing else in this account.
+  # GetObject / DeleteObject are what the external-location validation and job retries need.
+  dynamic "statement" {
+    for_each = { for i, p in var.write_prefixes : tostring(i) => p }
+    content {
+      sid       = "WriteObjects${statement.key}"
+      actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      resources = ["${statement.value.bucket_arn}/${statement.value.prefix}*"]
+    }
   }
 
   dynamic "statement" {
@@ -64,10 +70,10 @@ data "aws_iam_policy_document" "uc" {
   }
 
   dynamic "statement" {
-    for_each = { for i, p in var.read_only_prefixes : tostring(i) => p }
+    for_each = { for i, p in local.all_prefixes : tostring(i) => p }
     content {
-      sid       = "ReadOnlyList${statement.key}"
-      actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+      sid       = "List${statement.key}"
+      actions   = ["s3:ListBucket"]
       resources = [statement.value.bucket_arn]
 
       condition {
@@ -76,6 +82,12 @@ data "aws_iam_policy_document" "uc" {
         values   = ["${statement.value.prefix}*"]
       }
     }
+  }
+
+  statement {
+    sid       = "BucketLocation"
+    actions   = ["s3:GetBucketLocation"]
+    resources = distinct([for p in local.all_prefixes : p.bucket_arn])
   }
 
   statement {

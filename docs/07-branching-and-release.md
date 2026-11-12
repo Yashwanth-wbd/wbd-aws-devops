@@ -29,11 +29,13 @@ teams.
 
 | Track | Workflow | Promotion |
 |---|---|---|
-| Databricks bundle (`data/databricks/databricks.yml`) | `databricks.yml` | `main` → dev; manual dispatch → staging/prod (GitHub Environment approval). Skipped while `data/databricks/` is absent |
+| Glue job scripts (`data/glue/jobs/`) | `glue.yml` | `main` → dev; manual dispatch → staging/prod (GitHub Environment approval). Skipped while `data/glue/jobs/` is empty. The Databricks export job is deployed by WBD, not from this repo |
 | Model packages (SageMaker Model Registry) | `model-governance.yml` | Hourly/dispatch evaluate on `main`; human approve in `<env>-model-promotion`. Not tied to `v*` tags—see [10 §7](10-data-platform-and-model-governance.md#7-model-governance-model-governanceyml) |
 
 The **same container image digest** moves through dev → staging → prod for `api` and `ui`.
-SageMaker images are referenced by digest in SSM (`/mmm/<env_short>/images/sagemaker-*`).
+The optimizer task runs the task definition revision in SSM `/mmm/<env_short>/ecs/optimizer_task_definition`
+(image by digest); the SageMaker training image is referenced by digest in SSM
+(`/mmm/<env_short>/images/sagemaker-training`).
 The publisher Lambda ships as a zip (new version + alias `live`). ECR tag immutability prevents
 a tag from ever pointing at a different digest.
 

@@ -27,6 +27,48 @@ locals {
         paths   = { resource = "$.resources[0]", event = "$.detail.eventName" }
       }
     },
+    # Fargate could not start an optimization run (capacity / vCPU quota, image pull, secrets);
+    # the state machine fails the run too - this says why.
+    var.optimizer_task_family == null ? {} : {
+      optimizer-task-not-started = {
+        description = "Optimizer task failed to start (Fargate vCPU quota, image pull or network) - runbooks/optimization-run-failed.md"
+        pattern = {
+          source        = ["aws.ecs"]
+          "detail-type" = ["ECS Task State Change"]
+          detail = {
+            group      = ["family:${coalesce(var.optimizer_task_family, "-")}"]
+            lastStatus = ["STOPPED"]
+            stopCode   = ["TaskFailedToStart"]
+          }
+        }
+        message = "\"Optimizer task could not start: <reason> (task <task>)\""
+        paths   = { reason = "$.detail.stoppedReason", task = "$.detail.taskArn" }
+      }
+    },
+    length(var.glue_job_names) == 0 ? {} : {
+      glue-job-failed = {
+        description = "A Glue job of the data platform failed or timed out - runbooks/glue-job-failed.md"
+        pattern = {
+          source        = ["aws.glue"]
+          "detail-type" = ["Glue Job State Change"]
+          detail        = { jobName = var.glue_job_names, state = ["FAILED", "TIMEOUT", "ERROR"] }
+        }
+        message = "\"Glue job <job> <state> (run <run>): <message>\""
+        paths   = { job = "$.detail.jobName", state = "$.detail.state", run = "$.detail.jobRunId", message = "$.detail.message" }
+      }
+    },
+    length(var.glue_job_names) == 0 ? {} : {
+      glue-data-quality-failed = {
+        description = "Glue Data Quality rules failed in the Silver layer - the refresh stops; data engineers check the source data (runbooks/glue-job-failed.md)"
+        pattern = {
+          source        = ["aws.glue-dataquality"]
+          "detail-type" = ["Data Quality Evaluation Results Available"]
+          detail        = { context = { jobName = var.glue_job_names }, state = ["FAILED"] }
+        }
+        message = "\"Glue Data Quality FAILED in <job> (score <score>, ruleset <ruleset>)\""
+        paths   = { job = "$.detail.context.jobName", score = "$.detail.score", ruleset = "$.detail.rulesetNames[0]" }
+      }
+    },
     var.enable_guardduty_alerts ? {
       guardduty-high = {
         description = "GuardDuty finding with severity >= 7 in this account"

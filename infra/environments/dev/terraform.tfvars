@@ -106,9 +106,15 @@ enable_application_signals = false
 enable_db_bootstrap        = false
 enable_platform_check_task = true
 
+# Optimizer task (ECS Fargate, one per run): 4 vCPU / 16 GB / 50 GiB scratch
 # add actual value
-optimizer_instance_type       = "ml.m5.xlarge"
-optimizer_max_runtime_seconds = 3600
+optimizer_cpu                   = 4096
+optimizer_memory                = 16384
+optimizer_ephemeral_storage_gib = 50
+optimizer_max_runtime_seconds   = 3600
+# User uploads (presigned PUT from the browser)
+# add actual value
+uploads_retention_days = 90
 # Run queue: runs allowed at the same time (SSM optimization/max_concurrent_runs) and queue wait limit
 # add actual value
 max_concurrent_runs    = 5
@@ -170,22 +176,31 @@ enable_databricks_privatelink = false
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 # add actual value
 databricks_privatelink_service_name = "com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000"
-# Service principal used by the model-refresh state machine (its OAuth secret is set on the connection, docs/05)
+# WBD Databricks export job per business unit (the service principal is in mmm/dev/databricks/export-sp, docs/05)
 # add actual value
-databricks_sp_client_id = "00000000-0000-0000-0000-00000000c001"
-# Lakeflow job that builds the training snapshot (databricks.yml output)
+databricks_export_job_ids = {
+  usnetworks = 0
+  streaming  = 0
+  theatrical = 0
+}
+# Glue medallion and export jobs
+glue_version = "5.0"
 # add actual value
-databricks_refresh_job_id = 0
+glue_worker_type         = "G.1X"
+glue_number_of_workers   = 2
+glue_job_timeout_minutes = 120
+# false if WBD already manages the account's Glue Data Catalog encryption
+manage_glue_catalog_encryption = true
 # add actual value
 training_instance_type       = "ml.m5.2xlarge"
 training_max_runtime_seconds = 14400
 # add actual value
+evaluation_instance_type       = "ml.m5.xlarge"
+evaluation_max_runtime_seconds = 3600
+# add actual value
 model_refresh_schedule        = "cron(0 6 ? * MON *)"
 model_refresh_timezone        = "America/New_York"
 enable_model_refresh_schedule = false
-# Databricks job that writes predictions and lift back to Gold (databricks.yml output)
-# add actual value
-databricks_writeback_job_id = 0
 # Drift check per business unit (daily); auto refresh off = alarm only, a person decides
 # add actual value
 model_monitor_schedule        = "cron(0 7 * * ? *)"

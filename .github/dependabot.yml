@@ -1,6 +1,6 @@
 # Weekly dependency and monthly base-image update PRs (docs/13 §2). The app teams add their
-# folders (apps/api, apps/ui, apps/sagemaker-optimizer, apps/sagemaker-training,
-# apps/results-publisher) here once those apps are in the repo.
+# folders (apps/api, apps/ui, apps/optimizer, apps/sagemaker-training,
+# apps/results-publisher) and data/glue/jobs (pip, if it gets a requirements.txt) here once they are in the repo.
 version: 2
 updates:
   - package-ecosystem: github-actions

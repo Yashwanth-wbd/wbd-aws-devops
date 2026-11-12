@@ -23,12 +23,12 @@ echo "== Optimization run queue (sqs endpoint)"
 aws sqs get-queue-attributes --queue-url "$OPTIMIZATION_QUEUE_URL" \
   --attribute-names ApproximateNumberOfMessages KmsMasterKeyId --query 'Attributes.ApproximateNumberOfMessages' --output text
 
-echo "== SageMaker image pointers (ssm endpoint)"
-IFS=, read -ra params <<< "$IMAGE_PARAMETER_NAMES"
+echo "== Release pointers: optimizer task, SageMaker training image (ssm endpoint)"
+IFS=, read -ra params <<< "$OPTIMIZER_TASK_PARAM${IMAGE_PARAMETER_NAMES:+,$IMAGE_PARAMETER_NAMES}"
 for p in "${params[@]}"; do
   v=$(aws ssm get-parameter --name "$p" --query Parameter.Value --output text)
   case "$v" in
-    *:unset) echo "$p = $v (no image deployed yet)" ;;
+    *:unset) echo "$p = $v (nothing released yet)" ;;
     *) echo "$p = $v" ;;
   esac
 done

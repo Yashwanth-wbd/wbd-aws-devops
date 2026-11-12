@@ -200,6 +200,14 @@ resource "aws_ecs_task_definition" "this" {
     name = "tmp"
   }
 
+  dynamic "ephemeral_storage" {
+    for_each = var.ephemeral_storage_gib == null ? [] : [var.ephemeral_storage_gib]
+
+    content {
+      size_in_gib = ephemeral_storage.value
+    }
+  }
+
   dynamic "volume" {
     for_each = var.enable_application_signals ? [1] : []
 

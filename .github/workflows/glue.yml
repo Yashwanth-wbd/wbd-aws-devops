@@ -1,0 +1,88 @@
+# Glue job scripts (data/glue/jobs/<job>.py, owned by the data engineers) -> s3://<glue-assets>/scripts/.
+# Terraform creates the jobs (modules/glue) with ScriptLocation scripts/<job>.py and a seed script;
+# this workflow replaces the seed with the real code. The next job run picks it up (running runs
+# are not changed). DevOps only ships the scripts; their contents are not reviewed here.
+#
+#   main (data/glue/** changed) -> upload to dev
+#   dispatch                    -> upload to the chosen environment (staging/prod wait for approval)
+#
+# Auth: GitHub OIDC -> AWS_DEPLOY_ROLE_ARN (put/get scripts/* in the glue-assets bucket, glue:GetJob).
+# GitHub Environment variable: GLUE_ASSETS_BUCKET (terraform output github_environment_variables,
+# data platform only). Skipped while data/glue/jobs/ is absent or the data platform is off.
+name: glue
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - data/glue/jobs/**
+      - .github/workflows/glue.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, staging, prod]
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  JOBS_DIR: data/glue/jobs
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment || 'dev' }}
+    concurrency:
+      group: glue-${{ inputs.environment || 'dev' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TARGET: ${{ inputs.environment || 'dev' }}
+      BUCKET: ${{ vars.GLUE_ASSETS_BUCKET }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - id: present
+        run: |
+          if ! ls "$JOBS_DIR"/*.py > /dev/null 2>&1; then
+            echo "::notice::no scripts in $JOBS_DIR - Glue upload skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$BUCKET" ]; then
+            echo "::notice::GLUE_ASSETS_BUCKET is not set for $TARGET (data platform off) - Glue upload skipped"; echo "yes=false" >> "$GITHUB_OUTPUT"
+          else echo "yes=true" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Python syntax check
+        run: python3 -m py_compile "$JOBS_DIR"/*.py
+
+      - if: steps.present.outputs.yes == 'true'
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: glue-${{ github.run_id }}
+
+      - if: steps.present.outputs.yes == 'true'
+        name: Upload scripts
+        run: |
+          # Only scripts of jobs Terraform created (<prefix>-glue-<job>) are uploaded.
+          # wbd-mmm-<env>-glue-assets-<region> -> mmm-<env>
+          prefix="${BUCKET#wbd-}"; prefix="${prefix%%-glue-assets-*}"
+          {
+            echo "### Glue scripts \`$TARGET\` (commit ${GITHUB_SHA::7})"; echo
+            echo "| Job | Script | SHA-256 |"; echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for f in "$JOBS_DIR"/*.py; do
+            job=$(basename "$f" .py)
+            if ! aws glue get-job --job-name "$prefix-glue-$job" > /dev/null 2>&1; then
+              echo "::warning::$f skipped: no Glue job $prefix-glue-$job in $TARGET"; continue
+            fi
+            aws s3 cp "$f" "s3://$BUCKET/scripts/$job.py" --only-show-errors \
+              --metadata "commit=$GITHUB_SHA"
+            echo "| $prefix-glue-$job | s3://$BUCKET/scripts/$job.py | $(sha256sum "$f" | cut -c1-12) |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$job -> s3://$BUCKET/scripts/$job.py"
+          done

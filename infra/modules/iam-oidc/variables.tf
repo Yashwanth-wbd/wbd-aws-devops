@@ -113,11 +113,19 @@ variable "deploy_lambda_functions" {
 }
 
 variable "deploy_dry_run" {
-  description = "Let the deploy role run a dry run after a release: write its input under runs/dryrun-*/ in the results bucket, list curves/ in the models bucket, send the request to <name_prefix>-optimization-requests and watch the dryrun-* execution of <name_prefix>-optimization. null = off (prod)."
+  description = "Let the deploy role run a dry run after a release: write its input under <bu>/runs/dryrun-*/ in the uploads bucket, list curves/ in the models bucket, send the request to <name_prefix>-optimization-requests and watch the dryrun-* execution of <name_prefix>-optimization. null = off (prod)."
   type = object({
-    results_bucket_arn = string
+    uploads_bucket_arn = string
     models_bucket_arn  = string
     sqs_kms_key_arn    = string
+  })
+  default = null
+}
+
+variable "deploy_glue_scripts" {
+  description = "Let the deploy role release the Glue job scripts (glue.yml): write scripts/* in the glue-assets bucket and read the <name_prefix>-* jobs. null = off (data platform off)."
+  type = object({
+    assets_bucket_arn = string
   })
   default = null
 }

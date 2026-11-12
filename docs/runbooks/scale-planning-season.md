@@ -25,20 +25,19 @@ aws cloudwatch get-metric-statistics --namespace MMM/Optimization --metric-name 
   --start-time <season start> --end-time <season end> --period 3600 --statistics Sum
 ```
 
-Needed vCPU at peak ≈ `api_max × 1 + ui_max × 0.25` (Fargate sizes in `ecs.tf`). SageMaker
-Processing uses `optimizer_instance_type` (not ECS): at most `max_concurrent_runs` jobs run at once,
-so the SageMaker Processing instance quota for that type must be at least `max_concurrent_runs`.
-Ask for Fargate and SageMaker quota increases if headroom is below 20 % (takes days).
+Needed Fargate vCPU at peak ≈ `api_max × 1 + ui_max × 0.25 + max_concurrent_runs × optimizer_cpu / 1024`
+(the optimizer runs one Fargate task per run; sizes in `ecs.tf` and tfvars). The Fargate On-Demand
+vCPU quota must cover that sum. Ask for a quota increase if headroom is below 20 % (takes days).
 
 ## 2. Raise the limits (PR)
 
 | What | Where | Example change for prod |
 |---|---|---|
 | API / UI task counts | `infra/environments/dev/ecs.tf` → `ecs_sizing` (edit dev, sync) | `api_max` 10 → 16, `ui_max` 6 → 8 |
-| Concurrent optimization runs | `max_concurrent_runs` in env tfvars (SSM parameter, the dispatcher reads it on every batch) | prod 50 → 80 (SageMaker quota first) |
+| Concurrent optimization runs | `max_concurrent_runs` in env tfvars (SSM parameter, the dispatcher reads it on every batch) | prod 50 → 80 (Fargate vCPU quota first) |
 | Queue wait before a request is dropped | `max_queue_wait_minutes` (5–50) | 30 → 45 |
 | RDS instance | `rds_instance_class` / `rds_max_allocated_storage` in env tfvars | prod `db.r6g.xlarge` → `db.r6g.2xlarge` (WBD approval; applied in the maintenance window or with a Multi-AZ failover, about 1–2 min of errors) |
-| Optimizer Processing | `optimizer_instance_type` in tfvars | `ml.m5.xlarge` → `ml.m5.2xlarge` |
+| Optimizer task size | `optimizer_cpu` / `optimizer_memory` / `optimizer_ephemeral_storage_gib` in tfvars | prod 8 vCPU / 32 GB → 16 vCPU / 64 GB |
 | Training (data platform) | `training_instance_type` | one size up |
 | GenAI | `genai_reserved_concurrency` in tfvars | raise if token alarms fire |
 | External LLM quotas | `genai_token_quotas` | per-BU increase with WBD |

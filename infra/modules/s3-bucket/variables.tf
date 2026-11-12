@@ -75,6 +75,17 @@ variable "enable_eventbridge" {
   default     = false
 }
 
+variable "cors_allowed_origins" {
+  description = "Origins (https://<app domain>) allowed to PUT / GET with presigned URLs from the browser. Empty = no CORS configuration."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for o in var.cors_allowed_origins : startswith(o, "https://") && o != "https://*"])
+    error_message = "cors_allowed_origins must be https origins (no wildcard)."
+  }
+}
+
 variable "additional_policy_json" {
   description = "Extra bucket-policy JSON merged in (e.g. cross-account read for Databricks)."
   type        = string

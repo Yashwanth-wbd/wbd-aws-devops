@@ -17,7 +17,8 @@ First stop: the failed step's log and the run summary. The common errors and fix
 | | RDS snapshot (prod) | Fix IAM or instance state (`DB_INSTANCE_ID`); snapshot id `mmm-<env>-predeploy-...` |
 | | Database migration | Nothing deployed yet. Read migration log; fix forward with a new rc. Prod: pre-deploy snapshot exists |
 | | Deploy services / circuit breaker | Automatic rollback already ran. [ecs-task-stuck.md](ecs-task-stuck.md) |
-| | SageMaker pointers / publisher | Rollback step restores SSM and Lambda alias; fix image or publisher code |
+| | Optimizer task revision | `ecs/<env>/optimizer.json` invalid or the family `mmm-<env>-optimizer` missing (Terraform not applied); nothing switched yet |
+| | Release pointers / publisher | Rollback step restores SSM (optimizer task, training image) and the Lambda alias; fix image or publisher code |
 | | Smoke test | Rolled back automatically. Check WAF (403), Okta redirect on `/` (503 = sign-in off but `SMOKE_CHECK_LOGIN=true`: re-run `setup-github.ps1`), `/api/health` 200 |
 | | Optimization dry run | Rolled back automatically. `not started after 600s`: run queue / dispatcher ([optimization-run-failed.md](optimization-run-failed.md) §0); otherwise the execution failed (§1–3) |
 | | Roll back (itself failed) | SEV1 in prod: manual rollback [rollback.md](rollback.md) now |
@@ -27,7 +28,7 @@ First stop: the failed step's log and the run summary. The common errors and fix
 | | nightly drift | CloudTrail for out-of-band changes; import or revert via PR |
 | `repo-checks` | secret scan | [security-incident.md](security-incident.md) – rotate first |
 | | environment sync | Edit `dev` / `ecs/dev`, run `.\scripts\sync-environments.ps1`, commit |
-| `databricks.yml` | bundle deploy | Data team; needs `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, connection secret |
+| `glue.yml` | syntax check / upload | Data team fixes the script; `AccessDenied`: `deploy_glue_scripts` not applied or `GLUE_ASSETS_BUCKET` wrong; "no Glue job" warning: file name must equal the job key |
 | `model-governance.yml` | evaluate / promote / rollback | [docs/10 §9](../10-data-platform-and-model-governance.md#9-troubleshooting) |
 
 ## Terraform state lock

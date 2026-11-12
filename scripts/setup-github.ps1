@@ -12,9 +12,6 @@
   required reviewers (WBD model approvers), prevent self-review, main only. model-governance.yml
   approves a model package (gha-model-approve role) only from a job in that environment.
 
-  -DatabricksClientId sets DATABRICKS_CLIENT_ID (the Databricks deploy service principal that
-  databricks.yml federates to with GitHub OIDC) on the Environment.
-
   Variables come from `terraform output -json github_environment_variables` (Environment level) and
   `github_repository_variables` (repository level, used by PR plans and the drift check), so the
   Terraform state must be readable (SSO DevOps profile). Nothing secret is set.
@@ -42,7 +39,6 @@ param(
   [string]$SourceEcrRegistry,
   [string[]]$ModelApproverTeams = @(),
   [string[]]$ModelApproverUsers = @(),
-  [string]$DatabricksClientId,
   [switch]$SkipVariables
 )
 
@@ -139,11 +135,6 @@ foreach ($p in $repoVars.PSObject.Properties) {
   Invoke-Gh @('variable', 'set', $p.Name, '--repo', $Repo, '--body', [string]$p.Value) | Out-Null
   Write-Host "  repo $($p.Name) = $($p.Value)"
 }
-if ($DatabricksClientId) {
-  Invoke-Gh @('variable', 'set', 'DATABRICKS_CLIENT_ID', '--repo', $Repo, '--env', $Environment, '--body', $DatabricksClientId) | Out-Null
-  Write-Host "  env  DATABRICKS_CLIENT_ID = $DatabricksClientId"
-}
-
 # Promotion source (previous environment's registry) - staging and prod only
 if ($Environment -ne 'dev') {
   if ($SourceEcrReadRoleArn -and $SourceEcrRegistry) {

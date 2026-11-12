@@ -59,7 +59,7 @@ variable "interface_endpoints" {
 }
 
 variable "additional_interface_endpoints" {
-  description = "Extra interface endpoint suffixes added to interface_endpoints (Release 2 adds execute-api and bedrock-runtime for the LLM gateway)."
+  description = "Extra interface endpoint suffixes added to interface_endpoints (data platform adds glue; Release 2 adds execute-api and bedrock-runtime for the LLM gateway)."
   type        = list(string)
   default     = []
 }
@@ -90,6 +90,12 @@ variable "alb_ingress_cidrs" {
 
 variable "create_genai_security_group" {
   description = "Create the LLM gateway proxy security group: no inbound, HTTPS out (Release 2)."
+  type        = bool
+  default     = false
+}
+
+variable "create_data_platform_security_groups" {
+  description = "Create the glue (self-referencing, for Glue jobs in the VPC) and databricks_export (HTTPS out) security groups (data platform)."
   type        = bool
   default     = false
 }

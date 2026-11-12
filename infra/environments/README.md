@@ -36,12 +36,12 @@ is larger than the baseline Release 1 stack.
 | `variables.tf` | All inputs, grouped by step |
 | `main.tf` | Locals and Steps 3–6 (foundation, network, secrets, ECR, buckets, RDS PostgreSQL) |
 | `ecs.tf` | Step 7: ECS cluster, services `api` / `ui`, migrate and platform-check tasks |
-| `optimization.tf` | Step 7b: optimization state machine, SageMaker Processing role, publisher Lambda, image SSM params |
+| `optimization.tf` | Step 7b: optimization state machine (`ecs:runTask.sync`), optimizer task definition + role, task SSM pointer, publisher Lambda, training image SSM param |
 | `run-queue.tf` | Step 7b: SQS run queue + DLQ and the dispatcher Lambda that limits concurrent runs |
 | `frontdoor.tf` | Step 8: ALB with Okta OIDC sign-in, regional WAF, optional Route 53 alias |
 | `monitoring.tf` | Step 9: alert topic, alarms, event alerts, dashboard, Splunk shipping |
 | `backup.tf` | Step 10: AWS Backup vault, plan, tag selection |
-| `data.tf` | Step 13: model refresh (with Databricks write-back) and model monitor (drift) state machines, Databricks access (when `enable_data_platform`) |
+| `data.tf` | Step 13: Databricks access (write-only UC role) and export Lambda, Glue (catalog, jobs, Data Quality), model refresh and model monitor (drift) state machines, SageMaker training and registry (when `enable_data_platform`) |
 | `genai.tf` | Step 14: guardrails + LLM gateway (when `enable_genai`) |
 | `outputs.tf` | IDs and ARNs for GitHub Environment variables and validation |
 | `terraform.tfvars` | Values for this account; placeholders marked `# add actual value` |

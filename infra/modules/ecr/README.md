@@ -8,7 +8,7 @@ The container image repositories of **one account**. Every environment has its o
 
 | Resource | Notes |
 |---|---|
-| `aws_ecr_repository` × 4 | `mmm/api`, `mmm/ui` (ECS services), `mmm/sagemaker-optimizer`, `mmm/sagemaker-training` (SageMaker job images; training is used with the data platform). |
+| `aws_ecr_repository` × 4 | `mmm/api`, `mmm/ui` (ECS services), `mmm/optimizer` (one-off ECS optimizer task), `mmm/sagemaker-training` (SageMaker training / evaluation image, used with the data platform). |
 | `aws_ecr_registry_scanning_configuration` | Amazon Inspector **enhanced, continuous** scanning for `mmm/*`. Images are re-checked whenever a new CVE is published, not only on push. |
 | `aws_ecr_lifecycle_policy` per repository | Untagged images are deleted after 7 days. The newest 50 `v*` release images and the newest 30 `sha-*` build images (dev) are kept. |
 

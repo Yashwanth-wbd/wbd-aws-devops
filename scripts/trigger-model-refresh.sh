@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start an on-demand model refresh: sends an mmm.refresh event to the default EventBridge bus of
 # the account your AWS credentials point to; the rule mmm-<env>-model-refresh-on-demand starts one
-# mmm-<env>-model-refresh execution per business unit (Databricks features -> train -> evaluate -> register).
+# mmm-<env>-model-refresh execution per business unit (Databricks export -> Glue Bronze/Silver/Gold -> Glue exports -> train -> evaluate -> register -> publish results).
 #
 #   scripts/trigger-model-refresh.sh <dev|staging|prod> <business_unit|all> [reason]
 #

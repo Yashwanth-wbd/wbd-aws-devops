@@ -144,7 +144,7 @@ resource "aws_iam_role_policy_attachment" "apply_admin" {
   policy_arn = "arn:${local.partition}:iam::aws:policy/AdministratorAccess"
 }
 
-# ------------------------------------------------------------------ gha-deploy: ECS, SageMaker image pointers, Lambda alias
+# ------------------------------------------------------------------ gha-deploy: ECS, release pointers, Glue scripts, Lambda alias
 data "aws_iam_policy_document" "deploy" {
   #checkov:skip=CKV_AWS_356:RegisterTaskDefinition and the Describe/List calls do not support resource-level permissions.
   #checkov:skip=CKV_AWS_111:RegisterTaskDefinition does not support resource-level permissions.
@@ -235,12 +235,59 @@ data "aws_iam_policy_document" "deploy" {
     resources = [local.ecr_repo_arns]
   }
 
-  # SageMaker jobs have no long-running service: a release is the image URI in these parameters,
-  # which the state machines read at the start of every execution.
+  # Jobs have no long-running service: a release is a pointer the state machines read at the start
+  # of every execution - images/* (SageMaker training image URI) and ecs/* (optimizer task definition ARN).
   statement {
-    sid       = "SageMakerImagePointers"
-    actions   = ["ssm:GetParameter", "ssm:PutParameter", "ssm:GetParameterHistory"]
-    resources = ["arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter/mmm/${var.env_short}/images/*"]
+    sid     = "ReleasePointers"
+    actions = ["ssm:GetParameter", "ssm:PutParameter", "ssm:GetParameterHistory"]
+    resources = [
+      "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter/mmm/${var.env_short}/images/*",
+      "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter/mmm/${var.env_short}/ecs/*",
+    ]
+  }
+
+  # Glue release (glue.yml): the job scripts are files at fixed keys under scripts/ of the glue-assets
+  # bucket; every job run reads the current file, so a release is an upload (rollback = upload the previous one).
+  dynamic "statement" {
+    for_each = var.deploy_glue_scripts == null ? [] : [1]
+    content {
+      sid       = "GlueScripts"
+      actions   = ["s3:PutObject", "s3:GetObject"]
+      resources = ["${var.deploy_glue_scripts.assets_bucket_arn}/scripts/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_glue_scripts == null ? [] : [1]
+    content {
+      sid       = "GlueScriptsList"
+      actions   = ["s3:ListBucket"]
+      resources = [var.deploy_glue_scripts.assets_bucket_arn]
+
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["scripts/*"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_glue_scripts == null ? [] : [1]
+    content {
+      sid       = "GlueScriptsKey"
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+      resources = [var.s3_kms_key_arn]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.deploy_glue_scripts == null ? [] : [1]
+    content {
+      sid       = "GlueJobsRead"
+      actions   = ["glue:GetJob", "glue:GetJobs"]
+      resources = ["arn:${local.partition}:glue:${local.region}:${local.account_id}:job/${var.name_prefix}-*"]
+    }
   }
 
   # Lambda release: new code -> new version -> alias "live" moves (rollback = alias back).
@@ -293,7 +340,7 @@ data "aws_iam_policy_document" "deploy" {
     content {
       sid       = "DryRunInput"
       actions   = ["s3:PutObject"]
-      resources = ["${var.deploy_dry_run.results_bucket_arn}/runs/dryrun-*"]
+      resources = ["${var.deploy_dry_run.uploads_bucket_arn}/*/runs/dryrun-*"]
     }
   }
 

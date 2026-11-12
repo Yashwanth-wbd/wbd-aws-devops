@@ -83,6 +83,24 @@ variable "publisher_function_name" {
   default     = null
 }
 
+variable "optimizer_task_family" {
+  description = "Task definition family of the ECS inference and optimization task (optimization dashboard, alert when a run task cannot start). null = off."
+  type        = string
+  default     = null
+}
+
+variable "glue_job_names" {
+  description = "Glue jobs of the data platform (data-pipeline dashboard, alerts on failed / timed-out runs and failed Data Quality checks). Empty = no data-pipeline dashboard."
+  type        = list(string)
+  default     = []
+}
+
+variable "databricks_export_function_name" {
+  description = "Databricks export Lambda (data-pipeline dashboard). null = not shown."
+  type        = string
+  default     = null
+}
+
 variable "llm_gateway_api_name" {
   description = "LLM gateway REST API name (GenAI dashboard). null = no GenAI dashboard."
   type        = string

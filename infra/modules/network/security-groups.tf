@@ -11,9 +11,14 @@ locals {
       rds          = "RDS PostgreSQL - from RDS Proxy only"
       sagemaker    = "SageMaker jobs - traffic between job instances, HTTPS to VPC endpoints and S3 only"
       lambda       = "VPC Lambda functions (results publisher, run dispatcher) - no inbound, HTTPS to VPC endpoints and S3"
+      optimizer    = "ECS inference and optimization tasks - no inbound, HTTPS to VPC endpoints and S3 only"
     },
     var.enable_resolver_forwarding ? { resolver = "Route 53 Resolver outbound endpoint - DNS to WBD servers" } : {},
     var.create_genai_security_group ? { genai = "LLM gateway proxy Lambda - no inbound, HTTPS out to the approved LLM providers and VPC endpoints" } : {},
+    var.create_data_platform_security_groups ? {
+      glue              = "AWS Glue jobs - all traffic between the workers of a job, HTTPS to VPC endpoints and S3"
+      databricks_export = "Databricks export Lambda - no inbound, HTTPS out to the Databricks workspace and VPC endpoints"
+    } : {},
   )
 
   # One rule per allowed CIDR and port; 80 only redirects to 443 at the ALB.
@@ -32,6 +37,7 @@ locals {
     rds_proxy_from_clients   = { sg = "rds_proxy", description = "PostgreSQL from data clients", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "data_clients", enabled = true }
     rds_from_proxy           = { sg = "rds", description = "PostgreSQL from RDS Proxy", protocol = "tcp", port = 5432, cidr = null, prefix_list = null, source_sg = "rds_proxy", enabled = true }
     sagemaker_from_self      = { sg = "sagemaker", description = "Between instances of one job (distributed training)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "sagemaker", enabled = true }
+    glue_from_self           = { sg = "glue", description = "Between the workers of one Glue job (Spark)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "glue", enabled = var.create_data_platform_security_groups }
   }
 
   ingress_rules = merge(local.static_ingress_rules, local.alb_ingress_rules)
@@ -56,6 +62,12 @@ locals {
     lambda_to_endpoints       = { sg = "lambda", description = "HTTPS to interface endpoints (logs, STS, KMS)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     lambda_to_s3              = { sg = "lambda", description = "HTTPS to S3 gateway endpoint (run evidence)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
     genai_https_out           = { sg = "genai", description = "HTTPS to the approved LLM providers and VPC endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_genai_security_group }
+    optimizer_to_endpoints    = { sg = "optimizer", description = "HTTPS to interface endpoints (ECR, logs, STS, KMS, SageMaker API)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
+    optimizer_to_s3           = { sg = "optimizer", description = "HTTPS to S3 gateway endpoint (ECR layers, inputs, curves, outputs)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
+    glue_to_self              = { sg = "glue", description = "Between the workers of one Glue job (Spark)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "glue", enabled = var.create_data_platform_security_groups }
+    glue_to_endpoints         = { sg = "glue", description = "HTTPS to interface endpoints (Glue, logs, STS, KMS, Secrets Manager)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = var.create_data_platform_security_groups }
+    glue_to_s3                = { sg = "glue", description = "HTTPS to S3 gateway endpoint (raw data, Delta tables, training data)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = var.create_data_platform_security_groups }
+    databricks_export_out     = { sg = "databricks_export", description = "HTTPS to the Databricks workspace (Jobs API) and VPC endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_data_platform_security_groups }
   }
 
   resolver_egress_rules = {

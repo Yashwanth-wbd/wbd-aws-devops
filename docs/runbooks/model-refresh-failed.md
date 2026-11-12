@@ -2,8 +2,10 @@
 
 A model refresh is one Step Functions execution of `mmm-<env>-model-refresh` per business unit,
 started by EventBridge Scheduler (`mmm-<env_short>-refresh-<bu>`) or an `mmm.refresh` event
-(`scripts/trigger-model-refresh.sh`). It runs the Databricks job (training snapshot), SageMaker
-training, evaluation and registration (`PendingManualApproval`). Use this runbook when the
+(`scripts/trigger-model-refresh.sh`). It runs the Databricks export (raw Parquet to landing), the
+Glue jobs Bronze → Silver (Data Quality) → Gold → export-training + export-rds, SageMaker
+training, evaluation, registration (`PendingManualApproval`) and the results publisher
+(`model_results` → RDS). Use this runbook when the
 `mmm-<env>-model-refresh-failed` alarm fires or a scheduled refresh produced no new model package.
 
 A failed refresh does **not** affect planners: the optimizer keeps using the last approved model
@@ -30,20 +32,22 @@ gives the ARN. Logs: `/aws/states/mmm-<env>-model-refresh`.
 | Step (state machine) | Logs / resources |
 |---|---|
 | GetTrainingImage | SSM `/mmm/<env_short>/images/sagemaker-training` – must be `<registry>/<repo>@<digest>`, not `:unset` |
-| StartDatabricksJob / GetDatabricksRun | EventBridge connection `mmm-<env>-databricks` (state `AUTHORIZED`); Databricks workspace → Jobs → run id from the execution history |
-| DatabricksFailed | The Databricks job failed – data engineers own the job; snapshot path `s3://<training-data>/<bu>/<refresh_id>/` |
+| StartExport / GetExportStatus / ExportFailed | Export Lambda `mmm-<env_short>-databricks-export` log; Databricks workspace → Jobs → run id (`$.export.run_id`) – [databricks-export-failed.md](databricks-export-failed.md) |
+| Bronze / Silver / Gold | Glue job `mmm-<env_short>-glue-<job>` run, log group `/aws-glue/jobs/mmm-<env_short>`; Silver Data Quality result – [glue-job-failed.md](glue-job-failed.md) |
+| GlueExports (ExportTraining, ExportRds) | Same Glue logs; snapshot `s3://<training-data>/<bu>/<refresh_id>/`; export-rds connects as `mmm_etl` through RDS Proxy |
 | TrainModel | CloudWatch `/aws/sagemaker/TrainingJobs`; console → SageMaker → Training jobs |
 | EvaluateModel | CloudWatch `/aws/sagemaker/ProcessingJobs`; report `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json` |
 | RegisterModel | Model package group `mmm-<env_short>-<bu>` must exist (created by Terraform per BU) |
-| StartDatabricksWriteback / GetWritebackRun / WritebackFailed | The model is already registered; only the Gold write-back failed – [write-back-failed.md](write-back-failed.md) |
+| PublishModelResults | The model is already registered; only the RDS write failed – publisher log `/aws/lambda/mmm-<env_short>-results-publisher`; re-invoke it with the same payload (execution history) once fixed |
 
 ## 3. Common causes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `States.Http.StatusCode.401/403` | Databricks service principal secret expired or rotated, or IP access list blocks Step Functions | Update the connection credentials ([rotation.md](rotation.md)); WBD Databricks admins check the access list |
-| `States.Http.StatusCode.400/404` | Wrong `databricks_refresh_job_id` or job deleted | Fix the job id in `terraform.tfvars` (PR) |
-| `DatabricksJobFailed` | Source data missing or the job's data-quality checks failed | Hand over to the data engineers with the Databricks run URL |
+| `DatabricksExportError` 401/403 | Export service principal secret expired or rotated, or the IP access list blocks the NAT IPs | Update `mmm/<env>/databricks/export-sp` ([rotation.md](rotation.md)); WBD Databricks admins check the access list |
+| `DatabricksExportError` no job id / 400 / 404 | `databricks_export_job_ids` missing the BU or `0`, or job deleted | WBD gives the job ID; set it in `terraform.tfvars` (PR) |
+| `DatabricksExportFailed` | The WBD export job failed (source data, permissions on `raw/databricks/`) | [databricks-export-failed.md](databricks-export-failed.md) |
+| `Glue.*` / `States.TaskFailed` on a Glue state | Job script error, Data Quality rule failed, out of memory, ENI / subnet IPs | [glue-job-failed.md](glue-job-failed.md) |
 | Training / evaluation `States.TaskFailed` | Bad image, out of memory, empty snapshot | Job log; redeploy the training image ([deploy.md](deploy.md)) or raise `training_instance_type` |
 | `ResourceLimitExceeded` | SageMaker quota | Service Quotas; retry ([scale-planning-season.md](scale-planning-season.md)) |
 

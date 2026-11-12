@@ -1,4 +1,4 @@
-# Reusable CI for a Python component (api, sagemaker-optimizer, sagemaker-training, results-publisher).
+# Reusable CI for a Python component (api, optimizer, sagemaker-training, results-publisher).
 # PR and main: lint, type-check, tests with a coverage gate, dependency + image scan.
 # main only: push the scanned image as sha-<7char> to the dev ECR (deploy.yml picks it up).
 # build_image = false (Lambda code): tests and dependency audit only; deploy.yml zips the code.

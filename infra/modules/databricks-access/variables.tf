@@ -20,13 +20,21 @@ variable "self_assume_enabled" {
   default     = false
 }
 
-variable "bucket_arns" {
-  description = "Buckets Unity Catalog reads and writes (landing, lakehouse, training-data)."
-  type        = list(string)
+variable "write_prefixes" {
+  description = "Where the Databricks export job may write (read / write / delete, nothing else): { bucket_arn, prefix }, e.g. the landing bucket raw/databricks/."
+  type = list(object({
+    bucket_arn = string
+    prefix     = string
+  }))
+
+  validation {
+    condition     = length(var.write_prefixes) > 0 && alltrue([for p in var.write_prefixes : endswith(p.prefix, "/")])
+    error_message = "write_prefixes needs at least one entry; every prefix must end with '/'."
+  }
 }
 
 variable "read_only_prefixes" {
-  description = "Extra read-only access for Unity Catalog: { bucket_arn, prefix } (e.g. the models bucket evaluation/ for the write-back job)."
+  description = "Extra read-only access for Unity Catalog: { bucket_arn, prefix }. Empty in v4 (no write-back job)."
   type = list(object({
     bucket_arn = string
     prefix     = string
@@ -35,7 +43,7 @@ variable "read_only_prefixes" {
 }
 
 variable "kms_key_arns" {
-  description = "Keys of those buckets (s3 key and per-business-unit keys)."
+  description = "Keys the export job encrypts with (landing: s3 key and the per-business-unit keys)."
   type        = list(string)
 }
 

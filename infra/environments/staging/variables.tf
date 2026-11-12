@@ -187,7 +187,13 @@ variable "genai_token_quotas" {
 variable "ecr_repositories" {
   description = "ECR repositories in this account."
   type        = list(string)
-  default     = ["mmm/api", "mmm/ui", "mmm/sagemaker-optimizer", "mmm/sagemaker-training"]
+  default     = ["mmm/api", "mmm/ui", "mmm/optimizer", "mmm/sagemaker-training"]
+}
+
+variable "uploads_retention_days" {
+  description = "Days user uploads (optimization / forecast inputs) are kept in the uploads bucket."
+  type        = number
+  default     = 90
 }
 
 variable "log_retention_days" {
@@ -269,10 +275,22 @@ variable "enable_platform_check_task" {
   default     = true
 }
 
-variable "optimizer_instance_type" {
-  description = "SageMaker Processing instance of one optimization run (also used for model evaluation)."
-  type        = string
-  default     = "ml.m5.xlarge"
+variable "optimizer_cpu" {
+  description = "CPU units of one optimizer task (Fargate; 4096 = 4 vCPU)."
+  type        = number
+  default     = 4096
+}
+
+variable "optimizer_memory" {
+  description = "Memory (MiB) of one optimizer task; must be valid for optimizer_cpu on Fargate."
+  type        = number
+  default     = 16384
+}
+
+variable "optimizer_ephemeral_storage_gib" {
+  description = "Ephemeral storage (GiB, 21-200) of one optimizer task for input and solver files."
+  type        = number
+  default     = 50
 }
 
 variable "optimizer_max_runtime_seconds" {
@@ -422,7 +440,7 @@ variable "enable_vault_lock" {
 
 # ------------------------------------------------------------------ Step 13 - Data-team platform and model refresh
 variable "enable_data_platform" {
-  description = "Per-BU keys, lakehouse and training-data buckets, Databricks access, model-refresh state machine, schedules, SageMaker training and Model Registry."
+  description = "Per-BU keys, lakehouse / training-data / glue-assets buckets, Databricks export (Unity Catalog role + export Lambda), Glue medallion and export jobs, model-refresh and model-monitor state machines, schedules, SageMaker training and Model Registry."
   type        = bool
   default     = false
 }
@@ -461,14 +479,52 @@ variable "databricks_privatelink_service_name" {
   default     = null
 }
 
-variable "databricks_sp_client_id" {
-  description = "Application ID of the Databricks service principal the model-refresh state machine uses (OAuth M2M; its secret is set on the EventBridge connection out-of-band)."
-  type        = string
+variable "databricks_export_job_ids" {
+  description = "ID of the WBD Databricks export job per business unit (owned and deployed by WBD; SSM databricks/export_job_ids). The job writes raw Parquet to landing raw/databricks/<bu>/<refresh_id>/."
+  type        = map(number)
+  default     = {}
 }
 
-variable "databricks_refresh_job_id" {
-  description = "ID of the Databricks Lakeflow job that builds the training snapshot (deployed by databricks.yml)."
+variable "glue_version" {
+  description = "AWS Glue version of the medallion and export jobs (Spark 3.5 + Delta Lake in 5.0)."
+  type        = string
+  default     = "5.0"
+}
+
+variable "glue_worker_type" {
+  description = "Glue worker type (G.1X = 4 vCPU / 16 GB, G.2X = 8 vCPU / 32 GB)."
+  type        = string
+  default     = "G.1X"
+}
+
+variable "glue_number_of_workers" {
+  description = "Workers per Glue job run (2 is the minimum)."
   type        = number
+  default     = 2
+}
+
+variable "glue_job_timeout_minutes" {
+  description = "Hard stop of one Glue job run."
+  type        = number
+  default     = 120
+}
+
+variable "manage_glue_catalog_encryption" {
+  description = "Set the account's Glue Data Catalog encryption (one setting per account and region; false if WBD already manages it)."
+  type        = bool
+  default     = true
+}
+
+variable "evaluation_instance_type" {
+  description = "SageMaker Processing instance of the model evaluation and drift check."
+  type        = string
+  default     = "ml.m5.xlarge"
+}
+
+variable "evaluation_max_runtime_seconds" {
+  description = "Hard stop of one evaluation or drift-check job."
+  type        = number
+  default     = 3600
 }
 
 variable "training_instance_type" {
@@ -499,11 +555,6 @@ variable "enable_model_refresh_schedule" {
   description = "Schedules ENABLED (true) or DISABLED (false; on-demand refresh only)."
   type        = bool
   default     = false
-}
-
-variable "databricks_writeback_job_id" {
-  description = "ID of the Databricks job that writes predictions and lift from models/evaluation/ back to the Gold tables (deployed by databricks.yml)."
-  type        = number
 }
 
 variable "model_monitor_schedule" {

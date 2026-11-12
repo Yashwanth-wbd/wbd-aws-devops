@@ -71,10 +71,13 @@ module "iam_oidc" {
 
   # Post-release dry run through the run queue (not in prod)
   deploy_dry_run = local.is_prod ? null : {
-    results_bucket_arn = local.bucket_arns["results"]
+    uploads_bucket_arn = local.bucket_arns["uploads"]
     models_bucket_arn  = local.bucket_arns["models"]
     sqs_kms_key_arn    = module.kms.key_arns["sqs"]
   }
+
+  # Step 13: glue.yml uploads the Glue job scripts (data/glue/jobs/) to the glue-assets bucket
+  deploy_glue_scripts = var.enable_data_platform ? { assets_bucket_arn = local.bucket_arns["glue-assets"] } : null
 
   state_bucket_name   = local.state_bucket_name
   state_kms_key_arn   = var.state_kms_key_arn
@@ -122,8 +125,11 @@ module "network" {
   alb_ingress_cidrs = var.alb_ingress_cidrs
 
   # Step 14: LLM gateway proxy security group and the private API Gateway / Bedrock endpoints
-  create_genai_security_group    = var.enable_genai
-  additional_interface_endpoints = local.genai_interface_endpoints
+  create_genai_security_group = var.enable_genai
+
+  # Step 13: Glue (self-referencing job ENIs) and Databricks export Lambda security groups, Glue endpoint
+  create_data_platform_security_groups = var.enable_data_platform
+  additional_interface_endpoints       = concat(local.genai_interface_endpoints, var.enable_data_platform ? ["glue"] : [])
 }
 
 # ================================================================== Step 5 - Secrets and configuration
@@ -139,6 +145,11 @@ locals {
       "okta/alb-client" = { description = "Okta OIDC app client secret {\"client_secret\": \"...\"} from the WBD Identity team - read by Terraform for the ALB sign-in" }
     },
     { for v in var.third_party_vendors : "thirdparty/${v}" => { description = "${v} API credentials from WBD data owners" } },
+    # Step 13: Databricks export service principal (OAuth M2M) and the Glue export-rds DB user
+    var.enable_data_platform ? {
+      "databricks/export-sp" = { description = "Databricks service principal {\"client_id\": \"...\", \"client_secret\": \"...\"} from the WBD Databricks team - may only run the export job" }
+      "rds/etl"              = { description = "ETL DB user {username: mmm_etl, password} for RDS Proxy (Glue export-rds; reference tables only)" }
+    } : {},
     # Step 14: one API key per approved external LLM provider, read only by the LLM gateway proxy
     var.enable_genai ? { for p in keys(var.llm_providers) : "llm/${p}" => { description = "${p} API key {\"api_key\": \"...\"} - only the LLM gateway proxy can read it" } } : {},
   )
@@ -151,6 +162,9 @@ locals {
       "optimization/max_concurrent_runs" = { value = tostring(var.max_concurrent_runs), description = "Optimization runs allowed at the same time - read by the run dispatcher" }
     },
     { for bu, q in var.genai_token_quotas : "genai/token_quota/${bu}" => { value = tostring(q), description = "Daily GenAI token quota for BU ${bu}" } },
+    var.enable_data_platform ? {
+      "databricks/export_job_ids" = { value = jsonencode(var.databricks_export_job_ids), description = "WBD Databricks export job ID per business unit (JSON) - read by the export Lambda" }
+    } : {},
   )
 }
 
@@ -194,7 +208,7 @@ locals {
       enabled                 = true
       prefix_expiration_days  = {}
     }
-    # Run evidence: optimization inputs/outputs, solver logs (written by the SageMaker job)
+    # Run evidence: optimizer outputs and solver logs (written by the ECS optimizer task)
     results = {
       glacier_transition_days = null
       expiration_days         = null
@@ -237,7 +251,8 @@ locals {
       enabled                 = var.enable_data_platform
       prefix_expiration_days  = {}
     }
-    # Step 13: Delta tables (bronze/silver/gold) managed by Unity Catalog; monitoring/ = drift-check feature exports
+    # Step 13: Delta tables (bronze/silver/gold) written by the Glue jobs, catalogued in the Glue Data Catalog;
+    # monitoring/ = drift-check feature exports
     lakehouse = {
       glacier_transition_days = null
       expiration_days         = null
@@ -246,8 +261,28 @@ locals {
       enabled                 = var.enable_data_platform
       prefix_expiration_days  = { "monitoring/" = 90 }
     }
+    # User files: <bu>/runs/<run_id>/input/* through presigned PUT from the browser (CORS: app URL only)
+    uploads = {
+      glacier_transition_days = null
+      expiration_days         = var.uploads_retention_days
+      object_lock             = null
+      enable_eventbridge      = false
+      enabled                 = true
+      prefix_expiration_days  = {}
+    }
+    # Step 13: Glue job scripts (scripts/, uploaded by glue.yml) and Spark temp/shuffle files (temp/)
+    glue-assets = {
+      glacier_transition_days = null
+      expiration_days         = null
+      object_lock             = null
+      enable_eventbridge      = false
+      enabled                 = var.enable_data_platform
+      prefix_expiration_days  = { "temp/" = 7 }
+    }
   }
-  data_buckets = { for k, v in local.all_data_buckets : k => v if v.enabled }
+
+  bucket_cors_origins = { uploads = [local.app_url] }
+  data_buckets        = { for k, v in local.all_data_buckets : k => v if v.enabled }
 
   bucket_extra_policies = var.enable_data_platform ? { landing = data.aws_iam_policy_document.landing_bu_keys.json } : {}
 }
@@ -266,6 +301,7 @@ module "buckets" {
   prefix_expiration_days  = each.value.prefix_expiration_days
   noncurrent_version_days = 90
   enable_eventbridge      = each.value.enable_eventbridge
+  cors_allowed_origins    = lookup(local.bucket_cors_origins, each.key, [])
   component               = "data"
   additional_policy_json  = lookup(local.bucket_extra_policies, each.key, "")
   additional_kms_key_arns = contains(["landing", "lakehouse", "training-data"], each.key) ? values(local.bu_key_arns) : []
@@ -298,7 +334,10 @@ module "rds" {
   log_retention_days       = var.log_retention_days
   permissions_boundary_arn = module.permission_boundary.policy_arn
 
-  proxy_user_secret_arns = [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]]
+  proxy_user_secret_arns = concat(
+    [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]],
+    var.enable_data_platform ? [module.secrets.secret_arns["rds/etl"]] : [],
+  )
 
   # Step 10: selected by the AWS Backup plan
   instance_tags = { backup = "true" }

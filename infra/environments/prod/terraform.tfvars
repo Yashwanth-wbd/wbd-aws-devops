@@ -113,8 +113,12 @@ enable_db_bootstrap        = false
 enable_platform_check_task = true
 
 # add actual value
-optimizer_instance_type       = "ml.m5.2xlarge"
-optimizer_max_runtime_seconds = 3600
+optimizer_cpu                   = 8192
+optimizer_memory                = 32768
+optimizer_ephemeral_storage_gib = 50
+optimizer_max_runtime_seconds   = 3600
+# add actual value
+uploads_retention_days = 90
 # add actual value
 max_concurrent_runs    = 50
 max_queue_wait_minutes = 30
@@ -170,18 +174,27 @@ databricks_account_id = "00000000-0000-0000-0000-000000000000"
 # add actual value
 databricks_privatelink_service_name = "com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000"
 # add actual value
-databricks_sp_client_id = "00000000-0000-0000-0000-00000000c003"
+databricks_export_job_ids = {
+  usnetworks = 0
+  streaming  = 0
+  theatrical = 0
+}
+glue_version = "5.0"
 # add actual value
-databricks_refresh_job_id = 0
+glue_worker_type               = "G.1X"
+glue_number_of_workers         = 10
+glue_job_timeout_minutes       = 120
+manage_glue_catalog_encryption = true
 # add actual value
 training_instance_type       = "ml.m5.2xlarge"
 training_max_runtime_seconds = 14400
 # add actual value
+evaluation_instance_type       = "ml.m5.xlarge"
+evaluation_max_runtime_seconds = 3600
+# add actual value
 model_refresh_schedule        = "cron(0 6 ? * MON *)"
 model_refresh_timezone        = "America/New_York"
 enable_model_refresh_schedule = false
-# add actual value
-databricks_writeback_job_id = 0
 # add actual value
 model_monitor_schedule        = "cron(0 7 * * ? *)"
 enable_model_monitor_schedule = false

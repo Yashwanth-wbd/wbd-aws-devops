@@ -119,7 +119,7 @@ locals {
           ["AWS/Billing", "EstimatedCharges", "Currency", "USD", { stat = "Maximum" }],
         ] },
         { title = "Estimated charges by service (USD)", region = "us-east-1", period = 21600, metrics = [
-          for s in ["AmazonECS", "AmazonRDS", "AmazonSageMaker", "AmazonEC2", "AmazonS3", "AmazonCloudWatch", "AWSLambda", "AmazonVPC"] :
+          for s in ["AmazonECS", "AmazonRDS", "AmazonSageMaker", "AWSGlue", "AmazonEC2", "AmazonS3", "AmazonCloudWatch", "AWSLambda", "AmazonVPC"] :
           ["AWS/Billing", "EstimatedCharges", "ServiceName", s, "Currency", "USD", { stat = "Maximum", label = s }]
         ] },
       ]
@@ -131,6 +131,15 @@ locals {
           { title = "Run duration by size (ms, p95, app metric)", metrics = [
             [var.app_metric_namespace, "OptimizeDurationMs", "Environment", var.environment, "RunSize", "standard", { stat = "p95" }],
             [".", ".", ".", ".", ".", "large", { stat = "p95" }],
+          ] },
+        ],
+        var.optimizer_task_family == null ? [] : [
+          { title = "Optimizer tasks: CPU / memory used (Container Insights)", metrics = [
+            ["ECS/ContainerInsights", "CpuUtilized", "ClusterName", var.ecs_cluster_name, "TaskDefinitionFamily", var.optimizer_task_family, { stat = "Maximum" }],
+            [".", "MemoryUtilized", ".", ".", ".", ".", { stat = "Maximum", yAxis = "right" }],
+          ] },
+          { title = "Optimizer tasks running", metrics = [
+            ["ECS/ContainerInsights", "TaskCount", "ClusterName", var.ecs_cluster_name, "TaskDefinitionFamily", var.optimizer_task_family, { stat = "Maximum" }],
           ] },
         ],
         var.publisher_function_name == null ? [] : [
@@ -166,6 +175,30 @@ locals {
         ],
       )
     } : {},
+    # Glue jobs publish job metrics with --enable-metrics (set by the glue module).
+    length(var.glue_job_names) == 0 ? {} : {
+      data-pipeline = concat(
+        [
+          { title = "Glue jobs: elapsed time per run (s)", period = 3600, metrics = [
+            for j in var.glue_job_names : ["Glue", "glue.driver.aggregate.elapsedTime", "JobName", j, "JobRunId", "ALL", "Type", "count", { stat = "Maximum", label = j }]
+          ] },
+          { title = "Glue jobs: failed tasks", period = 3600, metrics = [
+            for j in var.glue_job_names : ["Glue", "glue.driver.aggregate.numFailedTasks", "JobName", j, "JobRunId", "ALL", "Type", "count", { stat = "Sum", label = j }]
+          ] },
+          { title = "Glue jobs: records read", period = 3600, metrics = [
+            for j in var.glue_job_names : ["Glue", "glue.driver.aggregate.recordsRead", "JobName", j, "JobRunId", "ALL", "Type", "count", { stat = "Sum", label = j }]
+          ] },
+        ],
+        var.databricks_export_function_name == null ? [] : [
+          { title = "Databricks export Lambda", metrics = [
+            ["AWS/Lambda", "Invocations", "FunctionName", var.databricks_export_function_name, { stat = "Sum" }],
+            [".", "Errors", ".", ".", { stat = "Sum" }],
+            [".", "Duration", ".", ".", { stat = "p95", yAxis = "right" }],
+          ] },
+        ],
+        try(local.sfn_widgets["model-refresh"], []),
+      )
+    },
     var.llm_gateway_api_name == null ? {} : {
       genai = concat(
         [

@@ -42,21 +42,27 @@ only from the ALB; tasks and Lambda reach the database only through the RDS Prox
 
 Task roles are defined in `infra/environments/<env>/ecs.tf`.
 
-### Optimization pipeline (Step Functions + SageMaker + Lambda)
+### Optimization pipeline (Step Functions + ECS task + Lambda)
 
 | Role | May | May not |
 |---|---|---|
-| `mmm-<env>-optimization` (Step Functions) | Read the optimizer image from SSM, create/describe/stop SageMaker Processing jobs `<prefix>-opt-*`, invoke the results-publisher Lambda alias `live`, pass the SageMaker optimization role, use KMS grants for job volumes and S3 | Start executions (dispatcher only); change image pointers |
+| `mmm-<env>-optimization` (Step Functions) | Read the optimizer task pointer from SSM, `ecs:RunTask` of the `<prefix>-optimizer` family on the cluster (describe / stop / tag its tasks, the managed `.sync` EventBridge rule), pass the optimizer task role and the execution role to ECS, invoke the results-publisher Lambda alias `live` | Start executions (dispatcher only); change the pointer; run other task families |
 | `mmm-<env>-run-dispatcher` (Lambda) | Receive / delete messages of the run queue (SQS key decrypt), read SSM `optimization/max_concurrent_runs`, `ListExecutions` + `StartExecution` on the optimization state machine, `PutMetricData` in namespace `MMM/Optimization` | Anything else; it never reads run inputs |
-| SageMaker role `mmm-<env>-sagemaker-optimization` | Read models and results buckets, write run output under results, pull `mmm/sagemaker-optimizer` from ECR | Other buckets, other repos |
-| `mmm-<env>-results-publisher` (Lambda) | Connect to RDS Proxy as `mmm_app`, read finished run output under `results/runs/*` | Write S3, start jobs |
+| Optimizer task role `mmm-<env>-task-optimizer` | Read approved `curves/` in models, read user input files in uploads, write run evidence under `results/runs/*`, read the model registry, `PutMetricData` `MMM`; image `mmm/optimizer` is pulled by the execution role | Other buckets or prefixes, RDS, start jobs |
+| `mmm-<env>-results-publisher` (Lambda) | Connect to RDS Proxy as `mmm_app`, read finished run output under `results/runs/*`, with the data platform read `models/evaluation/*` (`model_results`) | Write S3, start jobs |
+
+The API task role may put and get objects in the uploads bucket (it hands out presigned PUT URLs
+to the browser under `<bu>/runs/<run_id>/input/`; the bucket CORS allows only the app URL).
 
 ### Model refresh (only when `enable_data_platform = true`)
 
 | Role | May | May not |
 |---|---|---|
-| `mmm-<env>-model-refresh` (Step Functions) | Call Databricks job APIs through the EventBridge connection (refresh and write-back jobs), run SageMaker training/evaluation jobs, register model packages `PendingManualApproval` | Approve models (governance pipeline only) |
-| `mmm-<env>-model-monitor` (Step Functions) | Call the Databricks export job, run the SageMaker `drift` Processing job, read its `drift.json`, `PutMetricData` `MMM/Models`, send `mmm.refresh` events to the default bus | Train or register models |
+| `mmm-<env>-model-refresh` (Step Functions) | Invoke the export Lambda, start / watch the `<prefix>-glue-*` jobs, run SageMaker training/evaluation jobs, register model packages `PendingManualApproval`, invoke the results publisher (`model_results`) | Approve models (governance pipeline only) |
+| `mmm-<env>-model-monitor` (Step Functions) | Invoke the export Lambda, start / watch the Glue jobs (`purpose = monitor`), run the SageMaker `drift` Processing job, read its `drift.json`, `PutMetricData` `MMM/Models`, send `mmm.refresh` events to the default bus | Train or register models |
+| `mmm-<env>-databricks-export-lambda` (Lambda role) | Read `databricks/export-sp` and SSM `databricks/export_job_ids`, call the Databricks Jobs API (`run-now`, `runs/get`), write only `_manifest.json` under landing `raw/databricks/` | Read data, any other secret |
+| Glue role `mmm-<env>-glue` | Read landing `raw/`, read / write lakehouse (incl. `monitoring/`), write training-data snapshots, read scripts and use `temp/` in glue-assets, the Glue catalog databases of the stack, the Silver Data Quality ruleset, `rds-db:connect` as `mmm_etl` | Other buckets, the app DB users |
+| Unity Catalog role `mmm-<env>-databricks-uc` | Write (put / delete / list) only under landing `raw/databricks/` with the BU keys | Read anything else, lifecycle or policies |
 | SageMaker role `mmm-<env>-sagemaker-training` | Read training-data, lakehouse and models, write artifacts, evaluation reports and drift results, register into model package groups `<prefix>-<bu>` | Publish curves or baselines (approver role only) |
 | `mmm-<env>-model-refresh-trigger` | `states:StartExecution` on the model-refresh and model-monitor state machines (Scheduler and on-demand EventBridge rule) | Anything else |
 
@@ -170,4 +176,6 @@ Step 9; if pinning is high, the backend team may need to adjust how settings are
 | Step Functions | Only the dispatcher starts optimization executions; refresh and monitor machines started only by the Scheduler/EventBridge trigger role |
 | SageMaker | Job roles scoped to named buckets and ECR repos; job names prefixed by environment |
 | SageMaker Model Registry | Package groups per BU; governance roles may read evaluation JSON and (on approve) write `curves/`, `baseline/` and `approval.json` |
-| Databricks | Unity Catalog role on landing, lakehouse, training-data; no ECS task holds Databricks tokens—the refresh state machine uses an EventBridge connection (OAuth secret set out of band) |
+| Databricks | Unity Catalog role may only write landing `raw/databricks/` (no read of AWS data); no ECS task holds Databricks tokens—only the export Lambda reads the service principal secret `databricks/export-sp` |
+| Glue | Own role and security configuration (KMS for S3, logs, bookmarks); jobs run in the private subnets through a Glue connection and the `glue` security group; the catalog databases are encrypted (`manage_glue_catalog_encryption`) |
+| ECS optimizer task | Started only by the optimization state machine (one task per run, no service, no exec); dedicated `optimizer` security group with egress to HTTPS endpoints only |

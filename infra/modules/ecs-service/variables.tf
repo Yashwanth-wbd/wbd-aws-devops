@@ -80,6 +80,17 @@ variable "memory" {
   default     = 1024
 }
 
+variable "ephemeral_storage_gib" {
+  description = "Task ephemeral storage in GiB (21-200). null = the Fargate default of 20 GiB."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.ephemeral_storage_gib == null || try(var.ephemeral_storage_gib >= 21 && var.ephemeral_storage_gib <= 200, false)
+    error_message = "ephemeral_storage_gib must be 21-200 (or null for the 20 GiB default)."
+  }
+}
+
 variable "container_port" {
   description = "Port the app listens on (null for one-off tasks such as migrate)."
   type        = number

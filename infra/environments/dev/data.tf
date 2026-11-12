@@ -1,11 +1,18 @@
-# ================================================================== Step 13 - Data-team platform and model refresh
-# Databricks (Lakeflow job) prepares the training snapshot; SageMaker trains and evaluates; the
-# model package is registered as PendingManualApproval and approved by a WBD approver through
-# model-governance.yml; the Databricks write-back job copies predictions and lift to Gold.
+# ================================================================== Step 13 - Data platform (Glue lakehouse) and model refresh
+# v4: Databricks is only the source catalog. Per business unit the model-refresh state machine
+#   1. starts the WBD Databricks export job through the export Lambda (Jobs API) - raw Parquet lands
+#      in landing raw/databricks/<bu>/<refresh_id>/ (Unity Catalog role: write there only),
+#   2. runs the Glue medallion: Bronze (ingested raw) -> Silver (cleansed, Data Quality) -> Gold
+#      (per-BU modeling tables, adstock and saturation), Delta Lake on the lakehouse bucket,
+#   3. Glue exports: Gold -> immutable Parquet training snapshot, Gold -> RDS PostgreSQL (in parallel),
+#   4. SageMaker trains and evaluates (baseline -> channel lift -> title adjustment inside the image),
+#      registers the model package as PendingManualApproval (approved by WBD in model-governance.yml),
+#   5. the results-publisher Lambda writes predictions, lift and evaluation results to RDS.
 # Orchestration: EventBridge Scheduler / "mmm.refresh" event -> model-refresh state machine.
-# Drift: a daily model-monitor state machine per BU compares new features with the approved
-# baseline (alarm; optional automatic refresh). DevOps owns the plumbing; the job code belongs to
-# the data team. Everything in this file exists only when enable_data_platform = true.
+# Drift: a daily model-monitor state machine per BU runs the same export + medallion, Glue
+# export-monitor writes the latest features and SageMaker compares them with the approved baseline.
+# DevOps owns the plumbing; job and model code belong to the data team. Everything in this file
+# exists only when enable_data_platform = true.
 locals {
   data_platform_kms_purposes = var.enable_data_platform ? [for bu in var.business_units : "s3-${bu}"] : []
   bu_key_arns                = var.enable_data_platform ? { for bu in var.business_units : bu => module.kms.key_arns["s3-${bu}"] } : {}
@@ -13,24 +20,24 @@ locals {
   data_count = var.enable_data_platform ? 1 : 0
 
   # Built from the name: the landing bucket policy can't reference the bucket module's own output.
-  landing_bucket_arn = "arn:${local.partition}:s3:::wbd-mmm-${local.env_short}-landing-${local.region_code}"
+  landing_bucket_name = "wbd-mmm-${local.env_short}-landing-${local.region_code}"
+  landing_bucket_arn  = "arn:${local.partition}:s3:::${local.landing_bucket_name}"
+  raw_export_prefix   = "raw/databricks/"
 
-  # Buckets Unity Catalog works on, and their keys.
-  data_bucket_names = ["landing", "lakehouse", "training-data"]
-  data_key_arns     = concat([module.kms.key_arns["s3"]], values(local.bu_key_arns))
+  data_key_arns = concat([module.kms.key_arns["s3"]], values(local.bu_key_arns))
 
   refresh_name         = "model-refresh"
-  refresh_sm_arn       = "arn:${local.partition}:states:${var.aws_region}:${local.account_id}:stateMachine:${local.name_prefix}-${local.refresh_name}"
   monitor_name         = "model-monitor"
-  monitor_sm_arn       = "arn:${local.partition}:states:${var.aws_region}:${local.account_id}:stateMachine:${local.name_prefix}-${local.monitor_name}"
   training_job_prefix  = "${local.name_prefix}-train"
   evaluate_job_prefix  = "${local.name_prefix}-eval"
   drift_job_prefix     = "${local.name_prefix}-drift"
-  databricks_api       = trimsuffix(var.databricks_host, "/")
   sagemaker_arn_prefix = "arn:${local.partition}:sagemaker:${var.aws_region}:${local.account_id}"
+
+  # Silver data-quality rules belong to the data engineers; the default only checks the table is not empty.
+  silver_ruleset_file = "${path.module}/../../../data/glue/dq/silver.dqdl"
 }
 
-# Files under landing/<bu>/ must be encrypted with that business unit's key.
+# Files under landing/<bu>/ and raw/databricks/<bu>/ must be encrypted with that business unit's key.
 data "aws_iam_policy_document" "landing_bu_keys" {
   dynamic "statement" {
     for_each = local.bu_key_arns
@@ -38,7 +45,7 @@ data "aws_iam_policy_document" "landing_bu_keys" {
       sid       = "RequireKeyOf${replace(title(statement.key), "-", "")}"
       effect    = "Deny"
       actions   = ["s3:PutObject"]
-      resources = ["${local.landing_bucket_arn}/${statement.key}/*"]
+      resources = ["${local.landing_bucket_arn}/${statement.key}/*", "${local.landing_bucket_arn}/${local.raw_export_prefix}${statement.key}/*"]
 
       principals {
         type        = "*"
@@ -54,7 +61,7 @@ data "aws_iam_policy_document" "landing_bu_keys" {
   }
 }
 
-# ------------------------------------------------------------------ Databricks: Unity Catalog role, PrivateLink, private DNS
+# ------------------------------------------------------------------ Databricks: Unity Catalog role (export target only), PrivateLink, private DNS
 module "databricks_access" {
   source = "../../modules/databricks-access"
   count  = local.data_count
@@ -63,11 +70,9 @@ module "databricks_access" {
   databricks_account_id = var.databricks_account_id
   self_assume_enabled   = var.databricks_self_assume_enabled
 
-  bucket_arns  = [for b in local.data_bucket_names : module.buckets[b].bucket_arn]
-  kms_key_arns = local.data_key_arns
-
-  # Write-back job reads predictions and lift from the evaluation output
-  read_only_prefixes = [{ bucket_arn = module.buckets["models"].bucket_arn, prefix = "evaluation/" }]
+  # The WBD export job writes the raw extract here and nowhere else in this account.
+  write_prefixes = [{ bucket_arn = module.buckets["landing"].bucket_arn, prefix = local.raw_export_prefix }]
+  kms_key_arns   = local.data_key_arns
 
   enable_privatelink         = var.enable_databricks_privatelink
   workspace_host             = var.databricks_host
@@ -79,44 +84,73 @@ module "databricks_access" {
   permissions_boundary_arn = module.permission_boundary.policy_arn
 }
 
-# ------------------------------------------------------------------ Databricks connection (OAuth M2M, no token in Terraform)
-# Terraform creates the connection with a placeholder secret. DevOps sets the real service
-# principal OAuth secret once (docs/05):
-#   aws events update-connection --name <name> --authorization-type OAUTH_CLIENT_CREDENTIALS \
-#     --auth-parameters 'OAuthParameters={ClientParameters={ClientID=<id>,ClientSecret=<secret>}, ...}'
-resource "aws_cloudwatch_event_connection" "databricks" {
+# ------------------------------------------------------------------ Databricks export Lambda (Jobs API run-now / runs get)
+module "databricks_export" {
+  source = "../../modules/databricks-export"
+  count  = local.data_count
+
+  name_prefix                  = local.name_prefix
+  databricks_host              = var.databricks_host
+  service_principal_secret_arn = module.secrets.secret_arns["databricks/export-sp"]
+  job_ids_parameter_name       = module.secrets.parameter_names["databricks/export_job_ids"]
+  job_ids_parameter_arn        = module.secrets.parameter_arns["databricks/export_job_ids"]
+
+  landing_bucket_arn = module.buckets["landing"].bucket_arn
+  manifest_prefix    = local.raw_export_prefix
+  business_unit_keys = local.bu_key_arns
+  default_key_arn    = module.kms.key_arns["s3"]
+
+  secrets_kms_key_arn = module.kms.key_arns["secrets"]
+  logs_kms_key_arn    = module.kms.key_arns["logs"]
+  log_retention_days  = var.log_retention_days
+
+  subnet_ids         = module.network.private_app_subnet_ids
+  security_group_ids = [module.network.security_group_ids["databricks_export"]]
+
+  alarm_topic_arn          = module.monitoring.alert_topic_arn
+  permissions_boundary_arn = module.permission_boundary.policy_arn
+}
+
+# ------------------------------------------------------------------ AWS Glue: catalog, jobs, data quality
+data "aws_subnet" "glue" {
   count = local.data_count
+  id    = module.network.private_app_subnet_ids[0]
+}
 
-  name               = "${local.name_prefix}-databricks"
-  description        = "Databricks workspace API (service principal OAuth) for the model-refresh and model-monitor state machines"
-  authorization_type = "OAUTH_CLIENT_CREDENTIALS"
+module "glue" {
+  source = "../../modules/glue"
+  count  = local.data_count
 
-  auth_parameters {
-    oauth {
-      authorization_endpoint = "${local.databricks_api}/oidc/v1/token"
-      http_method            = "POST"
+  name_prefix    = local.name_prefix
+  environment    = var.environment
+  business_units = var.business_units
 
-      client_parameters {
-        client_id     = var.databricks_sp_client_id
-        client_secret = "set-out-of-band"
-      }
+  assets_bucket_name        = module.buckets["glue-assets"].bucket_name
+  landing_bucket_name       = module.buckets["landing"].bucket_name
+  lakehouse_bucket_name     = module.buckets["lakehouse"].bucket_name
+  training_data_bucket_name = module.buckets["training-data"].bucket_name
+  data_kms_key_arns         = local.data_key_arns
+  s3_kms_key_arn            = module.kms.key_arns["s3"]
+  logs_kms_key_arn          = module.kms.key_arns["logs"]
+  log_retention_days        = var.log_retention_days
 
-      oauth_http_parameters {
-        body {
-          key   = "grant_type"
-          value = "client_credentials"
-        }
-        body {
-          key   = "scope"
-          value = "all-apis"
-        }
-      }
-    }
-  }
+  glue_version              = var.glue_version
+  worker_type               = var.glue_worker_type
+  number_of_workers         = var.glue_number_of_workers
+  timeout_minutes           = var.glue_job_timeout_minutes
+  silver_ruleset            = fileexists(local.silver_ruleset_file) ? file(local.silver_ruleset_file) : "Rules = [ RowCount > 0 ]"
+  manage_catalog_encryption = var.manage_glue_catalog_encryption
 
-  lifecycle {
-    ignore_changes = [auth_parameters[0].oauth[0].client_parameters[0].client_secret]
-  }
+  subnet_id          = module.network.private_app_subnet_ids[0]
+  availability_zone  = data.aws_subnet.glue[0].availability_zone
+  security_group_ids = [module.network.security_group_ids["glue"], module.network.security_group_ids["data_clients"]]
+
+  db_host     = module.rds.proxy_endpoint
+  db_name     = module.rds.db_name
+  db_user     = "mmm_etl"
+  db_user_arn = "${local.proxy_dbuser_arn}/mmm_etl"
+
+  permissions_boundary_arn = module.permission_boundary.policy_arn
 }
 
 # ------------------------------------------------------------------ Training execution role + model registry
@@ -139,264 +173,269 @@ module "sagemaker_training" {
   permissions_boundary_arn = module.permission_boundary.policy_arn
 }
 
-# ------------------------------------------------------------------ Model-refresh state machine
+# ------------------------------------------------------------------ Shared state builders
 locals {
   snapshot_uri   = "States.Format('s3://wbd-mmm-${local.env_short}-training-data-${local.region_code}/{}/{}/', $.business_unit, $.refresh_id)"
   evaluation_uri = "States.Format('s3://wbd-mmm-${local.env_short}-models-${local.region_code}/evaluation/{}/{}/', $.business_unit, $.refresh_id)"
+  raw_uri        = "States.Format('s3://${local.landing_bucket_name}/${local.raw_export_prefix}{}/{}/', $.business_unit, $.refresh_id)"
 
   sagemaker_vpc = {
     Subnets          = module.network.private_app_subnet_ids
     SecurityGroupIds = [module.network.security_group_ids["sagemaker"]]
   }
 
-  databricks_retry = [{
-    ErrorEquals     = ["States.Http.StatusCode.429", "States.Http.StatusCode.503"]
-    IntervalSeconds = 30
+  lambda_retry = [
+    { ErrorEquals = ["DatabricksRetryable"], IntervalSeconds = 30, MaxAttempts = 4, BackoffRate = 2 },
+    { ErrorEquals = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], IntervalSeconds = 5, MaxAttempts = 3, BackoffRate = 2 },
+  ]
+
+  glue_retry = [{
+    ErrorEquals     = ["Glue.ConcurrentRunsExceededException", "Glue.ThrottlingException", "Glue.InternalServiceException"]
+    IntervalSeconds = 60
     MaxAttempts     = 3
     BackoffRate     = 2
   }]
 
+  export_function_arn = var.enable_data_platform ? module.databricks_export[0].function_arn : ""
+  glue_jobs           = var.enable_data_platform ? module.glue[0].job_names : {}
+
+  monitor_raw_uri = "States.Format('s3://${local.landing_bucket_name}/${local.raw_export_prefix}{}/monitor-{}/', $.business_unit, $.monitor_id)"
+
+  # Export via the Databricks Jobs API: start, then poll every minute until the run is terminal.
+  # p = state-name prefix; request_id = refresh_id | monitor_id (idempotency token of run-now).
+  # Values are JSON (the state sets have different keys); jsondecode() where they are used.
+  export_states = { for purpose, cfg in {
+    refresh = { p = "", id = "$.refresh_id", next = "Bronze", uri = local.raw_uri }
+    monitor = { p = "Monitor", id = "$.monitor_id", next = "MonitorBronze", uri = local.monitor_raw_uri }
+    } : purpose => jsonencode({
+      "${cfg.p}StartExport" = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = local.export_function_arn
+          Payload = {
+            action            = "start"
+            purpose           = purpose
+            "business_unit.$" = "$.business_unit"
+            "output_uri.$"    = cfg.uri
+            "request_id.$"    = cfg.id
+          }
+        }
+        ResultSelector = { "run_id.$" = "$.Payload.run_id" }
+        ResultPath     = "$.export"
+        Retry          = local.lambda_retry
+        Next           = "${cfg.p}WaitForExport"
+      }
+      "${cfg.p}WaitForExport" = { Type = "Wait", Seconds = 60, Next = "${cfg.p}GetExportStatus" }
+      "${cfg.p}GetExportStatus" = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = local.export_function_arn
+          Payload = {
+            action            = "status"
+            "run_id.$"        = "$.export.run_id"
+            "business_unit.$" = "$.business_unit"
+            "output_uri.$"    = cfg.uri
+          }
+        }
+        ResultSelector = { "status.$" = "$.Payload" }
+        ResultPath     = "$.export.run"
+        Retry          = local.lambda_retry
+        Next           = "${cfg.p}ExportDone"
+      }
+      "${cfg.p}ExportDone" = {
+        Type = "Choice"
+        Choices = [
+          { Variable = "$.export.run.status.succeeded", BooleanEquals = true, Next = cfg.next },
+          { Variable = "$.export.run.status.done", BooleanEquals = true, Next = "${cfg.p}ExportFailed" },
+        ]
+        Default = "${cfg.p}WaitForExport"
+      }
+      "${cfg.p}ExportFailed" = { Type = "Fail", Error = "DatabricksExportFailed", Cause = "The Databricks export job did not succeed; see the export Lambda log and the run in the Databricks workspace (runbooks/databricks-export-failed.md)." }
+  }) }
+
+  # One Glue job run (.sync) per state; arguments are the per-run values, the job has the rest (JSON, as above).
+  glue_step = { for k, cfg in {
+    Bronze                = { job = "bronze", next = "Silver", monitor = false, args = { "--raw_uri.$" = local.raw_uri } }
+    Silver                = { job = "silver", next = "Gold", monitor = false, args = {} }
+    Gold                  = { job = "gold", next = "GlueExports", monitor = false, args = {} }
+    ExportTraining        = { job = "export-training", next = null, monitor = false, args = { "--snapshot_uri.$" = local.snapshot_uri } }
+    ExportRds             = { job = "export-rds", next = null, monitor = false, args = {} }
+    MonitorBronze         = { job = "bronze", next = "MonitorSilver", monitor = true, args = { "--raw_uri.$" = local.monitor_raw_uri } }
+    MonitorSilver         = { job = "silver", next = "MonitorGold", monitor = true, args = {} }
+    MonitorGold           = { job = "gold", next = "ExportMonitorFeatures", monitor = true, args = {} }
+    ExportMonitorFeatures = { job = "export-monitor", next = "GetTrainingImage", monitor = true, args = { "--monitor_uri.$" = local.features_uri } }
+    } : k => jsonencode(merge(
+      {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = lookup(local.glue_jobs, cfg.job, "")
+          Arguments = merge({
+            "--business_unit.$" = "$.business_unit"
+            "--run_id.$"        = cfg.monitor ? "$.monitor_id" : "$.refresh_id"
+            "--purpose"         = cfg.monitor ? "monitor" : "refresh"
+          }, cfg.args)
+        }
+        ResultSelector = { "run_id.$" = "$.Id", "state.$" = "$.JobRunState" }
+        ResultPath     = "$.glue.${replace(cfg.job, "-", "_")}"
+        Retry          = local.glue_retry
+      },
+      jsondecode(cfg.next == null ? jsonencode({ End = true }) : jsonencode({ Next = cfg.next })),
+  )) }
+}
+
+# ------------------------------------------------------------------ Model-refresh state machine
+locals {
   refresh_definition = var.enable_data_platform ? {
     Comment        = "MMM model refresh per business unit (${var.environment})"
     StartAt        = "Init"
-    TimeoutSeconds = 6 * 3600
-    States = {
-      # refresh_id names the snapshot, jobs and evaluation (SageMaker job names: max 63 characters)
-      Init = {
-        Type       = "Pass"
-        Parameters = { "business_unit.$" = "$.business_unit", "refresh_id.$" = "States.UUID()" }
-        Next       = "GetTrainingImage"
-      }
-      GetTrainingImage = {
-        Type           = "Task"
-        Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
-        Parameters     = { Name = aws_ssm_parameter.sagemaker_image["training"].name }
-        ResultSelector = { "uri.$" = "$.Parameter.Value" }
-        ResultPath     = "$.image"
-        Next           = "StartDatabricksJob"
-      }
-      # Lakeflow job: features + training snapshot for one business unit
-      StartDatabricksJob = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::http:invoke"
-        Parameters = {
-          ApiEndpoint    = "${local.databricks_api}/api/2.2/jobs/run-now"
-          Method         = "POST"
-          Authentication = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-          RequestBody = {
-            job_id = var.databricks_refresh_job_id
-            job_parameters = {
-              "business_unit.$" = "$.business_unit"
-              "snapshot_uri.$"  = local.snapshot_uri
+    TimeoutSeconds = 8 * 3600
+    States = merge(
+      {
+        # refresh_id names the raw export, snapshot, jobs and evaluation (SageMaker job names: max 63 characters)
+        Init = {
+          Type       = "Pass"
+          Parameters = { "business_unit.$" = "$.business_unit", "refresh_id.$" = "States.UUID()" }
+          Next       = "GetTrainingImage"
+        }
+        GetTrainingImage = {
+          Type           = "Task"
+          Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
+          Parameters     = { Name = aws_ssm_parameter.sagemaker_image["training"].name }
+          ResultSelector = { "uri.$" = "$.Parameter.Value" }
+          ResultPath     = "$.image"
+          Next           = "StartExport"
+        }
+      },
+      jsondecode(local.export_states["refresh"]),
+      {
+        Bronze = jsondecode(local.glue_step["Bronze"])
+        Silver = jsondecode(local.glue_step["Silver"])
+        Gold   = jsondecode(local.glue_step["Gold"])
+        # Glue exports: training snapshot and RDS reference tables at the same time
+        GlueExports = {
+          Type = "Parallel"
+          Branches = [
+            { StartAt = "ExportTraining", States = { ExportTraining = jsondecode(local.glue_step["ExportTraining"]) } },
+            { StartAt = "ExportRds", States = { ExportRds = jsondecode(local.glue_step["ExportRds"]) } },
+          ]
+          ResultPath = null
+          Next       = "TrainModel"
+        }
+        TrainModel = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::sagemaker:createTrainingJob.sync"
+          Parameters = {
+            "TrainingJobName.$"    = "States.Format('${local.training_job_prefix}-{}', $.refresh_id)"
+            RoleArn                = module.sagemaker_training[0].role_arn
+            AlgorithmSpecification = { "TrainingImage.$" = "$.image.uri", TrainingInputMode = "File" }
+            Environment            = { APP_ENV = var.environment, "BUSINESS_UNIT.$" = "$.business_unit" }
+            InputDataConfig = [{
+              ChannelName = "train"
+              DataSource  = { S3DataSource = { S3DataType = "S3Prefix", "S3Uri.$" = local.snapshot_uri, S3DataDistributionType = "FullyReplicated" } }
+            }]
+            OutputDataConfig = {
+              "S3OutputPath.$" = "States.Format('s3://wbd-mmm-${local.env_short}-models-${local.region_code}/artifacts/{}/', $.business_unit)"
+              KmsKeyId         = module.kms.key_arns["s3"]
             }
-          }
-        }
-        ResultSelector = { "run_id.$" = "$.ResponseBody.run_id" }
-        ResultPath     = "$.databricks"
-        Retry = [{
-          ErrorEquals     = ["States.Http.StatusCode.429", "States.Http.StatusCode.503"]
-          IntervalSeconds = 30
-          MaxAttempts     = 3
-          BackoffRate     = 2
-        }]
-        Next = "WaitForDatabricks"
-      }
-      WaitForDatabricks = { Type = "Wait", Seconds = 60, Next = "GetDatabricksRun" }
-      GetDatabricksRun = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::http:invoke"
-        Parameters = {
-          ApiEndpoint     = "${local.databricks_api}/api/2.2/jobs/runs/get"
-          Method          = "GET"
-          Authentication  = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-          QueryParameters = { "run_id.$" = "States.Format('{}', $.databricks.run_id)" }
-        }
-        ResultSelector = { "state.$" = "$.ResponseBody.state" }
-        ResultPath     = "$.databricks.run"
-        Retry = [{
-          ErrorEquals     = ["States.Http.StatusCode.429", "States.Http.StatusCode.503"]
-          IntervalSeconds = 30
-          MaxAttempts     = 3
-          BackoffRate     = 2
-        }]
-        Next = "DatabricksDone"
-      }
-      DatabricksDone = {
-        Type = "Choice"
-        Choices = [
-          {
-            And = [
-              { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-              { Variable = "$.databricks.run.state.result_state", IsPresent = true },
-              { Variable = "$.databricks.run.state.result_state", StringEquals = "SUCCESS" },
-            ]
-            Next = "TrainModel"
-          },
-          {
-            Or = [
-              { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-              { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "INTERNAL_ERROR" },
-              { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "SKIPPED" },
-            ]
-            Next = "DatabricksFailed"
-          },
-        ]
-        Default = "WaitForDatabricks"
-      }
-      DatabricksFailed = { Type = "Fail", Error = "DatabricksJobFailed", Cause = "The Databricks refresh job did not succeed; see the run in the Databricks workspace." }
-      TrainModel = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::sagemaker:createTrainingJob.sync"
-        Parameters = {
-          "TrainingJobName.$"    = "States.Format('${local.training_job_prefix}-{}', $.refresh_id)"
-          RoleArn                = module.sagemaker_training[0].role_arn
-          AlgorithmSpecification = { "TrainingImage.$" = "$.image.uri", TrainingInputMode = "File" }
-          Environment            = { APP_ENV = var.environment, "BUSINESS_UNIT.$" = "$.business_unit" }
-          InputDataConfig = [{
-            ChannelName = "train"
-            DataSource  = { S3DataSource = { S3DataType = "S3Prefix", "S3Uri.$" = local.snapshot_uri, S3DataDistributionType = "FullyReplicated" } }
-          }]
-          OutputDataConfig = {
-            "S3OutputPath.$" = "States.Format('s3://wbd-mmm-${local.env_short}-models-${local.region_code}/artifacts/{}/', $.business_unit)"
-            KmsKeyId         = module.kms.key_arns["s3"]
-          }
-          ResourceConfig = {
-            InstanceCount  = 1
-            InstanceType   = var.training_instance_type
-            VolumeSizeInGB = 50
-            VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
-          }
-          StoppingCondition                     = { MaxRuntimeInSeconds = var.training_max_runtime_seconds }
-          VpcConfig                             = local.sagemaker_vpc
-          EnableInterContainerTrafficEncryption = true
-          Tags                                  = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
-        }
-        ResultSelector = { "name.$" = "$.TrainingJobName", "artifact.$" = "$.ModelArtifacts.S3ModelArtifacts" }
-        ResultPath     = "$.training"
-        Next           = "EvaluateModel"
-      }
-      # Same image, argument "evaluate": writes evaluation.json (metrics) next to the hold-out results.
-      EvaluateModel = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
-        Parameters = {
-          "ProcessingJobName.$" = "States.Format('${local.evaluate_job_prefix}-{}', $.refresh_id)"
-          RoleArn               = module.sagemaker_training[0].role_arn
-          AppSpecification      = { "ImageUri.$" = "$.image.uri", ContainerArguments = ["evaluate"] }
-          Environment           = { APP_ENV = var.environment, "BUSINESS_UNIT.$" = "$.business_unit" }
-          ProcessingResources = {
-            ClusterConfig = {
+            ResourceConfig = {
               InstanceCount  = 1
-              InstanceType   = var.optimizer_instance_type
-              VolumeSizeInGB = 30
+              InstanceType   = var.training_instance_type
+              VolumeSizeInGB = 50
               VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
             }
+            StoppingCondition                     = { MaxRuntimeInSeconds = var.training_max_runtime_seconds }
+            VpcConfig                             = local.sagemaker_vpc
+            EnableInterContainerTrafficEncryption = true
+            Tags                                  = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
           }
-          ProcessingInputs = [
-            { InputName = "model", S3Input = { "S3Uri.$" = "$.training.artifact", LocalPath = "/opt/ml/processing/model", S3DataType = "S3Prefix", S3InputMode = "File" } },
-            { InputName = "data", S3Input = { "S3Uri.$" = local.snapshot_uri, LocalPath = "/opt/ml/processing/data", S3DataType = "S3Prefix", S3InputMode = "File" } },
-          ]
-          ProcessingOutputConfig = {
-            KmsKeyId = module.kms.key_arns["s3"]
-            Outputs  = [{ OutputName = "evaluation", S3Output = { "S3Uri.$" = local.evaluation_uri, LocalPath = "/opt/ml/processing/evaluation", S3UploadMode = "EndOfJob" } }]
-          }
-          StoppingCondition = { MaxRuntimeInSeconds = var.optimizer_max_runtime_seconds }
-          NetworkConfig     = { EnableInterContainerTrafficEncryption = true, VpcConfig = local.sagemaker_vpc }
+          ResultSelector = { "name.$" = "$.TrainingJobName", "artifact.$" = "$.ModelArtifacts.S3ModelArtifacts" }
+          ResultPath     = "$.training"
+          Next           = "EvaluateModel"
         }
-        ResultPath = null
-        Next       = "RegisterModel"
-      }
-      RegisterModel = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:createModelPackage"
-        Parameters = {
-          "ModelPackageGroupName.$"   = "States.Format('${local.name_prefix}-{}', $.business_unit)"
-          ModelApprovalStatus         = "PendingManualApproval"
-          "ModelPackageDescription.$" = "States.Format('Refresh {} (training job {})', $.refresh_id, $.training.name)"
-          InferenceSpecification = {
-            Containers                 = [{ "Image.$" = "$.image.uri", "ModelDataUrl.$" = "$.training.artifact" }]
-            SupportedContentTypes      = ["application/json"]
-            SupportedResponseMIMETypes = ["application/json"]
+        # Same image, argument "evaluate": baseline -> channel lift -> title adjustment; writes
+        # evaluation.json (metrics), predictions/ and lift/ next to the hold-out results.
+        EvaluateModel = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
+          Parameters = {
+            "ProcessingJobName.$" = "States.Format('${local.evaluate_job_prefix}-{}', $.refresh_id)"
+            RoleArn               = module.sagemaker_training[0].role_arn
+            AppSpecification      = { "ImageUri.$" = "$.image.uri", ContainerArguments = ["evaluate"] }
+            Environment           = { APP_ENV = var.environment, "BUSINESS_UNIT.$" = "$.business_unit" }
+            ProcessingResources = {
+              ClusterConfig = {
+                InstanceCount  = 1
+                InstanceType   = var.evaluation_instance_type
+                VolumeSizeInGB = 30
+                VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
+              }
+            }
+            ProcessingInputs = [
+              { InputName = "model", S3Input = { "S3Uri.$" = "$.training.artifact", LocalPath = "/opt/ml/processing/model", S3DataType = "S3Prefix", S3InputMode = "File" } },
+              { InputName = "data", S3Input = { "S3Uri.$" = local.snapshot_uri, LocalPath = "/opt/ml/processing/data", S3DataType = "S3Prefix", S3InputMode = "File" } },
+            ]
+            ProcessingOutputConfig = {
+              KmsKeyId = module.kms.key_arns["s3"]
+              Outputs  = [{ OutputName = "evaluation", S3Output = { "S3Uri.$" = local.evaluation_uri, LocalPath = "/opt/ml/processing/evaluation", S3UploadMode = "EndOfJob" } }]
+            }
+            StoppingCondition = { MaxRuntimeInSeconds = var.evaluation_max_runtime_seconds }
+            NetworkConfig     = { EnableInterContainerTrafficEncryption = true, VpcConfig = local.sagemaker_vpc }
           }
-          ModelMetrics = {
-            ModelQuality = {
-              Statistics = { ContentType = "application/json", "S3Uri.$" = "States.Format('{}evaluation.json', ${local.evaluation_uri})" }
+          ResultPath = null
+          Next       = "RegisterModel"
+        }
+        RegisterModel = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:createModelPackage"
+          Parameters = {
+            "ModelPackageGroupName.$"   = "States.Format('${local.name_prefix}-{}', $.business_unit)"
+            ModelApprovalStatus         = "PendingManualApproval"
+            "ModelPackageDescription.$" = "States.Format('Refresh {} (training job {})', $.refresh_id, $.training.name)"
+            InferenceSpecification = {
+              Containers                 = [{ "Image.$" = "$.image.uri", "ModelDataUrl.$" = "$.training.artifact" }]
+              SupportedContentTypes      = ["application/json"]
+              SupportedResponseMIMETypes = ["application/json"]
+            }
+            ModelMetrics = {
+              ModelQuality = {
+                Statistics = { ContentType = "application/json", "S3Uri.$" = "States.Format('{}evaluation.json', ${local.evaluation_uri})" }
+              }
+            }
+            CustomerMetadataProperties = {
+              "training_job.$"      = "$.training.name"
+              "databricks_run_id.$" = "States.Format('{}', $.export.run_id)"
+              "refresh_id.$"        = "$.refresh_id"
             }
           }
-          CustomerMetadataProperties = {
-            "training_job.$"      = "$.training.name"
-            "databricks_run_id.$" = "States.Format('{}', $.databricks.run_id)"
-            "refresh_id.$"        = "$.refresh_id"
-          }
+          ResultSelector = { "model_package_arn.$" = "$.ModelPackageArn" }
+          ResultPath     = "$.registered"
+          Next           = "PublishModelResults"
         }
-        ResultSelector = { "model_package_arn.$" = "$.ModelPackageArn" }
-        ResultPath     = "$.registered"
-        Next           = "StartDatabricksWriteback"
-      }
-      # Write-back job: predictions/ and lift/ of the evaluation output -> Gold monitoring tables
-      # (tagged with model_package_arn; the approval status lives in the registry).
-      StartDatabricksWriteback = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::http:invoke"
-        Parameters = {
-          ApiEndpoint    = "${local.databricks_api}/api/2.2/jobs/run-now"
-          Method         = "POST"
-          Authentication = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-          RequestBody = {
-            job_id = var.databricks_writeback_job_id
-            job_parameters = {
+        # Results publisher: model predictions, lift and evaluation results -> RDS for this dataset
+        # (tagged with model_package_arn; the approval status lives in the registry).
+        PublishModelResults = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::lambda:invoke"
+          Parameters = {
+            FunctionName = module.publisher.alias_arn
+            Payload = {
+              event                 = "model_results"
               "business_unit.$"     = "$.business_unit"
               "refresh_id.$"        = "$.refresh_id"
-              "results_uri.$"       = local.evaluation_uri
               "model_package_arn.$" = "$.registered.model_package_arn"
+              "evaluation_uri.$"    = local.evaluation_uri
             }
           }
+          ResultPath = null
+          Retry      = slice(local.lambda_retry, 1, 2)
+          Next       = "RefreshComplete"
         }
-        ResultSelector = { "run_id.$" = "$.ResponseBody.run_id" }
-        ResultPath     = "$.writeback"
-        Retry          = local.databricks_retry
-        Next           = "WaitForWriteback"
-      }
-      WaitForWriteback = { Type = "Wait", Seconds = 60, Next = "GetWritebackRun" }
-      GetWritebackRun = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::http:invoke"
-        Parameters = {
-          ApiEndpoint     = "${local.databricks_api}/api/2.2/jobs/runs/get"
-          Method          = "GET"
-          Authentication  = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-          QueryParameters = { "run_id.$" = "States.Format('{}', $.writeback.run_id)" }
-        }
-        ResultSelector = { "state.$" = "$.ResponseBody.state" }
-        ResultPath     = "$.writeback.run"
-        Retry          = local.databricks_retry
-        Next           = "WritebackDone"
-      }
-      WritebackDone = {
-        Type = "Choice"
-        Choices = [
-          {
-            And = [
-              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-              { Variable = "$.writeback.run.state.result_state", IsPresent = true },
-              { Variable = "$.writeback.run.state.result_state", StringEquals = "SUCCESS" },
-            ]
-            Next = "RefreshComplete"
-          },
-          {
-            Or = [
-              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "INTERNAL_ERROR" },
-              { Variable = "$.writeback.run.state.life_cycle_state", StringEquals = "SKIPPED" },
-            ]
-            Next = "WritebackFailed"
-          },
-        ]
-        Default = "WaitForWriteback"
-      }
-      WritebackFailed = { Type = "Fail", Error = "WritebackFailed", Cause = "The model package is registered, but the Databricks write-back job did not succeed (runbooks/write-back-failed.md)." }
-      RefreshComplete = { Type = "Succeed" }
-    }
+        RefreshComplete = { Type = "Succeed" }
+      },
+    )
   } : null
 }
 
@@ -409,29 +448,16 @@ data "aws_iam_policy_document" "refresh_sfn" {
     resources = [aws_ssm_parameter.sagemaker_image["training"].arn]
   }
 
-  # HTTP Task: only the Databricks workspace, only through the connection.
   statement {
-    sid       = "CallDatabricks"
-    actions   = ["states:InvokeHTTPEndpoint"]
-    resources = [local.refresh_sm_arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "states:HTTPEndpoint"
-      values   = ["${local.databricks_api}/api/2.2/jobs/*"]
-    }
+    sid       = "InvokeLambdas"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [module.databricks_export[0].function_arn, module.publisher.alias_arn]
   }
 
   statement {
-    sid       = "UseConnection"
-    actions   = ["events:RetrieveConnectionCredentials"]
-    resources = [aws_cloudwatch_event_connection.databricks[0].arn]
-  }
-
-  statement {
-    sid       = "ConnectionSecret"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_cloudwatch_event_connection.databricks[0].secret_arn]
+    sid       = "RunGlueJobs"
+    actions   = ["glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns", "glue:BatchStopJobRun"]
+    resources = [for k in ["bronze", "silver", "gold", "export-training", "export-rds"] : module.glue[0].job_arns[k]]
   }
 
   statement {
@@ -567,7 +593,7 @@ resource "aws_scheduler_schedule" "refresh" {
   }
 }
 
-# On demand: scripts/trigger-model-refresh.sh (or the data team) puts
+# On demand (manual or from the app): scripts/trigger-model-refresh.sh, the data team or the API puts
 #   {"source": "mmm.refresh", "detail-type": "Model Refresh Requested", "detail": {"business_unit": "<bu>"}}
 resource "aws_cloudwatch_event_rule" "refresh_on_demand" {
   count = local.data_count
@@ -598,8 +624,9 @@ resource "aws_cloudwatch_event_target" "refresh_on_demand" {
 }
 
 # ------------------------------------------------------------------ Model-monitor (drift) state machine
-# Per BU, daily: Databricks exports the latest features -> SageMaker Processing (training image,
-# argument "drift") compares them with the approved baseline (models/baseline/<bu>/, written by
+# Per BU, daily: Databricks export (purpose monitor) -> Glue Bronze / Silver / Gold -> Glue
+# export-monitor writes the latest features -> SageMaker Processing (training image, argument
+# "drift") compares them with the approved baseline (models/baseline/<bu>/, written by
 # model-governance on approval) -> drift.json -> metric ModelDrift -> alarm above the threshold;
 # with auto_refresh_on_drift the state machine also requests a model refresh.
 locals {
@@ -612,192 +639,141 @@ locals {
   features_uri       = "States.Format('s3://wbd-mmm-${local.env_short}-lakehouse-${local.region_code}/monitoring/{}/{}/', $.business_unit, $.monitor_date)"
   drift_output_uri   = "States.Format('s3://${local.models_bucket_name}/monitoring/{}/{}/', $.business_unit, $.monitor_date)"
 
-  monitor_states = var.enable_data_platform ? {
-    ApplyDefaults = {
-      Type       = "Pass"
-      Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"drift_threshold\":${var.model_drift_threshold},\"auto_refresh\":${var.auto_refresh_on_drift}}'), $, false)" }
-      OutputPath = "$.args"
-      Next       = "Init"
-    }
-    Init = {
-      Type = "Pass"
-      Parameters = {
-        "business_unit.$"   = "$.business_unit"
-        "drift_threshold.$" = "$.drift_threshold"
-        "auto_refresh.$"    = "$.auto_refresh"
-        "monitor_id.$"      = "States.UUID()"
-        "monitor_date.$"    = local.monitor_date
+  monitor_states = var.enable_data_platform ? merge(
+    {
+      ApplyDefaults = {
+        Type       = "Pass"
+        Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"drift_threshold\":${var.model_drift_threshold},\"auto_refresh\":${var.auto_refresh_on_drift}}'), $, false)" }
+        OutputPath = "$.args"
+        Next       = "Init"
       }
-      Next = "GetTrainingImage"
-    }
-    GetTrainingImage = {
-      Type           = "Task"
-      Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
-      Parameters     = { Name = aws_ssm_parameter.sagemaker_image["training"].name }
-      ResultSelector = { "uri.$" = "$.Parameter.Value" }
-      ResultPath     = "$.image"
-      Next           = "StartDatabricksExport"
-    }
-    # Same Lakeflow job as the refresh, purpose = monitor: latest features only, no training snapshot
-    StartDatabricksExport = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::http:invoke"
-      Parameters = {
-        ApiEndpoint    = "${local.databricks_api}/api/2.2/jobs/run-now"
-        Method         = "POST"
-        Authentication = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-        RequestBody = {
-          job_id = var.databricks_refresh_job_id
-          job_parameters = {
-            "business_unit.$" = "$.business_unit"
-            purpose           = "monitor"
-            "snapshot_uri.$"  = local.features_uri
+      Init = {
+        Type = "Pass"
+        Parameters = {
+          "business_unit.$"   = "$.business_unit"
+          "drift_threshold.$" = "$.drift_threshold"
+          "auto_refresh.$"    = "$.auto_refresh"
+          "monitor_id.$"      = "States.UUID()"
+          "monitor_date.$"    = local.monitor_date
+        }
+        Next = "MonitorStartExport"
+      }
+    },
+    jsondecode(local.export_states["monitor"]),
+    {
+      MonitorBronze         = jsondecode(local.glue_step["MonitorBronze"])
+      MonitorSilver         = jsondecode(local.glue_step["MonitorSilver"])
+      MonitorGold           = jsondecode(local.glue_step["MonitorGold"])
+      ExportMonitorFeatures = jsondecode(local.glue_step["ExportMonitorFeatures"])
+      GetTrainingImage = {
+        Type           = "Task"
+        Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
+        Parameters     = { Name = aws_ssm_parameter.sagemaker_image["training"].name }
+        ResultSelector = { "uri.$" = "$.Parameter.Value" }
+        ResultPath     = "$.image"
+        Next           = "CheckDrift"
+      }
+      # Training image, argument "drift": writes drift.json {"score": 0-1, "checks": {...}}
+      CheckDrift = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
+        Parameters = {
+          "ProcessingJobName.$" = "States.Format('${local.drift_job_prefix}-{}', $.monitor_id)"
+          RoleArn               = module.sagemaker_training[0].role_arn
+          AppSpecification      = { "ImageUri.$" = "$.image.uri", ContainerArguments = ["drift"] }
+          Environment = {
+            APP_ENV             = var.environment
+            "BUSINESS_UNIT.$"   = "$.business_unit"
+            "DRIFT_THRESHOLD.$" = "States.Format('{}', $.drift_threshold)"
           }
-        }
-      }
-      ResultSelector = { "run_id.$" = "$.ResponseBody.run_id" }
-      ResultPath     = "$.databricks"
-      Retry          = local.databricks_retry
-      Next           = "WaitForExport"
-    }
-    WaitForExport = { Type = "Wait", Seconds = 60, Next = "GetExportRun" }
-    GetExportRun = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::http:invoke"
-      Parameters = {
-        ApiEndpoint     = "${local.databricks_api}/api/2.2/jobs/runs/get"
-        Method          = "GET"
-        Authentication  = { ConnectionArn = aws_cloudwatch_event_connection.databricks[0].arn }
-        QueryParameters = { "run_id.$" = "States.Format('{}', $.databricks.run_id)" }
-      }
-      ResultSelector = { "state.$" = "$.ResponseBody.state" }
-      ResultPath     = "$.databricks.run"
-      Retry          = local.databricks_retry
-      Next           = "ExportDone"
-    }
-    ExportDone = {
-      Type = "Choice"
-      Choices = [
-        {
-          And = [
-            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-            { Variable = "$.databricks.run.state.result_state", IsPresent = true },
-            { Variable = "$.databricks.run.state.result_state", StringEquals = "SUCCESS" },
-          ]
-          Next = "CheckDrift"
-        },
-        {
-          Or = [
-            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "TERMINATED" },
-            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "INTERNAL_ERROR" },
-            { Variable = "$.databricks.run.state.life_cycle_state", StringEquals = "SKIPPED" },
-          ]
-          Next = "ExportFailed"
-        },
-      ]
-      Default = "WaitForExport"
-    }
-    ExportFailed = { Type = "Fail", Error = "DatabricksExportFailed", Cause = "The Databricks feature export (purpose=monitor) did not succeed; see the run in the Databricks workspace." }
-    # Training image, argument "drift": writes drift.json {"score": 0-1, "checks": {...}}
-    CheckDrift = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
-      Parameters = {
-        "ProcessingJobName.$" = "States.Format('${local.drift_job_prefix}-{}', $.monitor_id)"
-        RoleArn               = module.sagemaker_training[0].role_arn
-        AppSpecification      = { "ImageUri.$" = "$.image.uri", ContainerArguments = ["drift"] }
-        Environment = {
-          APP_ENV             = var.environment
-          "BUSINESS_UNIT.$"   = "$.business_unit"
-          "DRIFT_THRESHOLD.$" = "States.Format('{}', $.drift_threshold)"
-        }
-        ProcessingResources = {
-          ClusterConfig = {
-            InstanceCount  = 1
-            InstanceType   = var.optimizer_instance_type
-            VolumeSizeInGB = 30
-            VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
+          ProcessingResources = {
+            ClusterConfig = {
+              InstanceCount  = 1
+              InstanceType   = var.evaluation_instance_type
+              VolumeSizeInGB = 30
+              VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
+            }
           }
+          ProcessingInputs = [
+            { InputName = "baseline", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/baseline/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/baseline", S3DataType = "S3Prefix", S3InputMode = "File" } },
+            { InputName = "curves", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/curves/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/curves", S3DataType = "S3Prefix", S3InputMode = "File" } },
+            { InputName = "features", S3Input = { "S3Uri.$" = local.features_uri, LocalPath = "/opt/ml/processing/features", S3DataType = "S3Prefix", S3InputMode = "File" } },
+          ]
+          ProcessingOutputConfig = {
+            KmsKeyId = module.kms.key_arns["s3"]
+            Outputs  = [{ OutputName = "drift", S3Output = { "S3Uri.$" = local.drift_output_uri, LocalPath = "/opt/ml/processing/drift", S3UploadMode = "EndOfJob" } }]
+          }
+          StoppingCondition = { MaxRuntimeInSeconds = var.evaluation_max_runtime_seconds }
+          NetworkConfig     = { EnableInterContainerTrafficEncryption = true, VpcConfig = local.sagemaker_vpc }
+          Tags              = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
         }
-        ProcessingInputs = [
-          { InputName = "baseline", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/baseline/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/baseline", S3DataType = "S3Prefix", S3InputMode = "File" } },
-          { InputName = "curves", S3Input = { "S3Uri.$" = "States.Format('s3://${local.models_bucket_name}/curves/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/curves", S3DataType = "S3Prefix", S3InputMode = "File" } },
-          { InputName = "features", S3Input = { "S3Uri.$" = local.features_uri, LocalPath = "/opt/ml/processing/features", S3DataType = "S3Prefix", S3InputMode = "File" } },
+        ResultPath = null
+        Next       = "ReadDrift"
+      }
+      ReadDrift = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::aws-sdk:s3:getObject"
+        Parameters = {
+          Bucket  = local.models_bucket_name
+          "Key.$" = "States.Format('monitoring/{}/{}/drift.json', $.business_unit, $.monitor_date)"
+        }
+        ResultSelector = { "result.$" = "States.StringToJson($.Body)" }
+        ResultPath     = "$.drift"
+        Next           = "PublishDrift"
+      }
+      PublishDrift = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::aws-sdk:cloudwatch:putMetricData"
+        Parameters = {
+          Namespace = "MMM/Models"
+          MetricData = [{
+            MetricName = "ModelDrift"
+            Dimensions = [{ Name = "BusinessUnit", "Value.$" = "$.business_unit" }, { Name = "Check", Value = "overall" }]
+            "Value.$"  = "$.drift.result.score"
+          }]
+        }
+        ResultPath = null
+        Next       = "DriftDecision"
+      }
+      DriftDecision = {
+        Type = "Choice"
+        Choices = [
+          {
+            And = [
+              { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold" },
+              { Variable = "$.auto_refresh", BooleanEquals = true },
+            ]
+            Next = "BuildRefreshRequest"
+          },
+          { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold", Next = "DriftDetected" },
         ]
-        ProcessingOutputConfig = {
-          KmsKeyId = module.kms.key_arns["s3"]
-          Outputs  = [{ OutputName = "drift", S3Output = { "S3Uri.$" = local.drift_output_uri, LocalPath = "/opt/ml/processing/drift", S3UploadMode = "EndOfJob" } }]
+        Default = "NoDrift"
+      }
+      NoDrift       = { Type = "Succeed" }
+      DriftDetected = { Type = "Succeed", Comment = "Drift above the threshold: alarm model-drift-<bu> fires; a person decides on a refresh (runbooks/model-drift.md)." }
+      BuildRefreshRequest = {
+        Type       = "Pass"
+        Parameters = { "business_unit.$" = "$.business_unit", reason = "drift", "monitor_date.$" = "$.monitor_date" }
+        ResultPath = "$.refresh_request"
+        Next       = "RequestRefresh"
+      }
+      # Same event as scripts/trigger-model-refresh.sh -> rule <prefix>-model-refresh-on-demand
+      RequestRefresh = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::aws-sdk:eventbridge:putEvents"
+        Parameters = {
+          Entries = [{
+            Source       = "mmm.refresh"
+            DetailType   = "Model Refresh Requested"
+            "Detail.$"   = "States.JsonToString($.refresh_request)"
+            EventBusName = "default"
+          }]
         }
-        StoppingCondition = { MaxRuntimeInSeconds = var.optimizer_max_runtime_seconds }
-        NetworkConfig     = { EnableInterContainerTrafficEncryption = true, VpcConfig = local.sagemaker_vpc }
-        Tags              = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
+        ResultPath = null
+        End        = true
       }
-      ResultPath = null
-      Next       = "ReadDrift"
-    }
-    ReadDrift = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::aws-sdk:s3:getObject"
-      Parameters = {
-        Bucket  = local.models_bucket_name
-        "Key.$" = "States.Format('monitoring/{}/{}/drift.json', $.business_unit, $.monitor_date)"
-      }
-      ResultSelector = { "result.$" = "States.StringToJson($.Body)" }
-      ResultPath     = "$.drift"
-      Next           = "PublishDrift"
-    }
-    PublishDrift = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::aws-sdk:cloudwatch:putMetricData"
-      Parameters = {
-        Namespace = "MMM/Models"
-        MetricData = [{
-          MetricName = "ModelDrift"
-          Dimensions = [{ Name = "BusinessUnit", "Value.$" = "$.business_unit" }, { Name = "Check", Value = "overall" }]
-          "Value.$"  = "$.drift.result.score"
-        }]
-      }
-      ResultPath = null
-      Next       = "DriftDecision"
-    }
-    DriftDecision = {
-      Type = "Choice"
-      Choices = [
-        {
-          And = [
-            { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold" },
-            { Variable = "$.auto_refresh", BooleanEquals = true },
-          ]
-          Next = "BuildRefreshRequest"
-        },
-        { Variable = "$.drift.result.score", NumericGreaterThanPath = "$.drift_threshold", Next = "DriftDetected" },
-      ]
-      Default = "NoDrift"
-    }
-    NoDrift       = { Type = "Succeed" }
-    DriftDetected = { Type = "Succeed", Comment = "Drift above the threshold: alarm model-drift-<bu> fires; a person decides on a refresh (runbooks/model-drift.md)." }
-    BuildRefreshRequest = {
-      Type       = "Pass"
-      Parameters = { "business_unit.$" = "$.business_unit", reason = "drift", "monitor_date.$" = "$.monitor_date" }
-      ResultPath = "$.refresh_request"
-      Next       = "RequestRefresh"
-    }
-    # Same event as scripts/trigger-model-refresh.sh -> rule <prefix>-model-refresh-on-demand
-    RequestRefresh = {
-      Type     = "Task"
-      Resource = "arn:${local.partition}:states:::aws-sdk:eventbridge:putEvents"
-      Parameters = {
-        Entries = [{
-          Source       = "mmm.refresh"
-          DetailType   = "Model Refresh Requested"
-          "Detail.$"   = "States.JsonToString($.refresh_request)"
-          EventBusName = "default"
-        }]
-      }
-      ResultPath = null
-      End        = true
-    }
-  } : null
+    },
+  ) : null
 }
 
 data "aws_iam_policy_document" "monitor_sfn" {
@@ -810,27 +786,15 @@ data "aws_iam_policy_document" "monitor_sfn" {
   }
 
   statement {
-    sid       = "CallDatabricks"
-    actions   = ["states:InvokeHTTPEndpoint"]
-    resources = [local.monitor_sm_arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "states:HTTPEndpoint"
-      values   = ["${local.databricks_api}/api/2.2/jobs/*"]
-    }
+    sid       = "InvokeExport"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [module.databricks_export[0].function_arn]
   }
 
   statement {
-    sid       = "UseConnection"
-    actions   = ["events:RetrieveConnectionCredentials"]
-    resources = [aws_cloudwatch_event_connection.databricks[0].arn]
-  }
-
-  statement {
-    sid       = "ConnectionSecret"
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [aws_cloudwatch_event_connection.databricks[0].secret_arn]
+    sid       = "RunGlueJobs"
+    actions   = ["glue:StartJobRun", "glue:GetJobRun", "glue:GetJobRuns", "glue:BatchStopJobRun"]
+    resources = [for k in ["bronze", "silver", "gold", "export-monitor"] : module.glue[0].job_arns[k]]
   }
 
   statement {
@@ -901,7 +865,7 @@ module "monitor_sfn" {
 
   name_prefix            = local.name_prefix
   name                   = local.monitor_name
-  definition             = jsonencode({ Comment = "MMM model drift check per business unit (${var.environment})", StartAt = "ApplyDefaults", TimeoutSeconds = 3 * 3600, States = local.monitor_states })
+  definition             = jsonencode({ Comment = "MMM model drift check per business unit (${var.environment})", StartAt = "ApplyDefaults", TimeoutSeconds = 6 * 3600, States = local.monitor_states })
   role_policy_json       = data.aws_iam_policy_document.monitor_sfn[0].json
   include_execution_data = !local.is_prod
   component              = "model-refresh"

@@ -2,10 +2,10 @@
 
 The optimization **run queue** (v3): planners' run requests wait in SQS and a small dispatcher
 Lambda starts the optimization state machine only while fewer than `max_concurrent_runs` runs are
-running. This protects the SageMaker quota and cost during the planning season and gives every
+running. This protects the Fargate capacity and cost during the planning season and gives every
 request a fair place in line.
 
-**Status:** implemented (v3 architecture).
+**Status:** implemented (v3; v4 adds `run_type`).
 
 ## Flow
 
@@ -33,13 +33,14 @@ extra batch can start. The dispatcher also publishes `RunningRuns` for the dashb
 ## Message contract (API team)
 
 ```json
-{"run_id": "r-20260601-0001", "business_unit": "usnetworks",
- "input_s3_uri": "s3://<results-bucket>/runs/r-20260601-0001/input/", "requested_by": "jdoe@wbd.com",
+{"run_id": "r-20260601-0001", "business_unit": "usnetworks", "run_type": "optimize",
+ "input_s3_uri": "s3://<uploads-bucket>/usnetworks/runs/r-20260601-0001/input/", "requested_by": "jdoe@wbd.com",
  "dry_run": false}
 ```
 
-`run_id` = 1-80 characters `[A-Za-z0-9_-]` (it becomes the execution name). The API writes the input
-to S3 first, then sends the message, and shows the run as **queued** until `DescribeExecution` on
+`run_id` = 1-80 characters `[A-Za-z0-9_-]` (it becomes the execution name). `run_type` =
+`optimize` (default) or `forecast`; anything else is an invalid body. The browser uploads the input
+to the uploads bucket first (presigned PUT signed by the API), then the API sends the message, and shows the run as **queued** until `DescribeExecution` on
 `<state machine ARN with :execution:>…:<run_id>` returns a status.
 
 ## What it creates

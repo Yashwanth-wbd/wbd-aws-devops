@@ -79,17 +79,14 @@ Prod deploy role trust policy (org/repo placeholders match dev tfvars until WBD 
 | `mmm-<env>-gha-model-eval` | `repo:<org>/<repo>:ref:refs/heads/main` |
 | `mmm-<env>-gha-model-approve` | `repo:<org>/<repo>:environment:<env>-model-promotion` |
 
-## 4. Databricks bundle deploy (separate from model governance)
+## 4. Data platform (Glue scripts, Databricks)
 
-`databricks.yml` deploys the Asset Bundle in `data/databricks/` using **Databricks GitHub OIDC
-workload identity** (`DATABRICKS_AUTH_TYPE=github-oidc`), not the AWS `gha-model-*` roles.
-GitHub Environment variables **`DATABRICKS_HOST`** (Terraform output) and
-**`DATABRICKS_CLIENT_ID`** (deploy service principal; set with
-`setup-github.ps1 -DatabricksClientId`) must exist when the bundle folder is present.
-
-The **model-refresh** Step Functions state machine calls Databricks with the **EventBridge
-connection** OAuth client (`databricks_sp_client_id` + secret set out of band—see
-[05-secrets-and-config.md](05-secrets-and-config.md)). That path does not use GitHub OIDC.
+`glue.yml` uploads the Glue job scripts with the same **`mmm-<env>-gha-deploy`** role (environment
+subject); with the data platform on, that role may `glue:GetJob` and put objects under
+`scripts/` of the `glue-assets` bucket only. GitHub never talks to Databricks: the WBD export job
+is deployed by WBD, and the **model-refresh** state machine starts it through the export Lambda
+with the OAuth M2M service principal in Secrets Manager `mmm/<env>/databricks/export-sp` (filled
+out of band—see [05-secrets-and-config.md](05-secrets-and-config.md)).
 
 ## 5. Using it in a workflow
 

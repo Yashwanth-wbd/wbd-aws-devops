@@ -105,17 +105,18 @@ output "ecs" {
 }
 
 output "optimization" {
-  description = "Optimization state machine, run queue, SageMaker role, image pointers and results publisher."
+  description = "Optimization state machine, run queue, optimizer task (family, role, release pointer) and results publisher."
   value = {
-    state_machine_arn = module.optimization_sfn.state_machine_arn
-    queue_url         = module.run_queue.queue_url
-    dlq_arn           = module.run_queue.dlq_arn
-    dispatcher        = module.run_queue.dispatcher_function_name
-    max_runs_param    = module.secrets.parameter_names["optimization/max_concurrent_runs"]
-    sagemaker_role    = module.sagemaker_optimization.role_arn
-    image_parameters  = { for k, p in aws_ssm_parameter.sagemaker_image : k => p.name }
-    publisher         = module.publisher.function_name
-    publisher_alias   = module.publisher.alias_arn
+    state_machine_arn     = module.optimization_sfn.state_machine_arn
+    queue_url             = module.run_queue.queue_url
+    dlq_arn               = module.run_queue.dlq_arn
+    dispatcher            = module.run_queue.dispatcher_function_name
+    max_runs_param        = module.secrets.parameter_names["optimization/max_concurrent_runs"]
+    optimizer_task_family = module.task_optimizer.task_definition_family
+    optimizer_task_role   = module.task_optimizer.task_role_arn
+    optimizer_task_param  = aws_ssm_parameter.optimizer_task.name
+    publisher             = module.publisher.function_name
+    publisher_alias       = module.publisher.alias_arn
   }
 }
 
@@ -185,7 +186,7 @@ output "monitoring" {
     alarms = concat(
       module.monitoring.alarm_names, module.optimization_sfn.alarm_names, [module.publisher.alarm_name],
       module.run_queue.alarm_names,
-      var.enable_data_platform ? concat(module.refresh_sfn[0].alarm_names, module.monitor_sfn[0].alarm_names, [for a in aws_cloudwatch_metric_alarm.model_drift : a.alarm_name]) : [],
+      var.enable_data_platform ? concat(module.refresh_sfn[0].alarm_names, module.monitor_sfn[0].alarm_names, [module.databricks_export[0].alarm_name], [for a in aws_cloudwatch_metric_alarm.model_drift : a.alarm_name]) : [],
     )
     event_rules         = module.monitoring.event_rule_names
     splunk_stream       = module.log_shipping.delivery_stream_name
@@ -215,19 +216,23 @@ output "github_environment_variables" {
       OPTIMIZATION_QUEUE_URL         = module.run_queue.queue_url
       # smoke.sh checks the Okta redirect only once sign-in is on (before that the ALB answers 503)
       SMOKE_CHECK_LOGIN = tostring(var.okta_sign_in_enabled)
-      # deploy.yml writes the SageMaker image URIs here
+      # deploy.yml registers a new optimizer task revision and writes its ARN to the pointer
+      OPTIMIZER_TASK_FAMILY = module.task_optimizer.task_definition_family
+      OPTIMIZER_TASK_PARAM  = aws_ssm_parameter.optimizer_task.name
+      # deploy.yml writes the SageMaker training image URI here (data platform)
       SAGEMAKER_IMAGE_PARAM_PREFIX = "/mmm/${local.env_short}/images"
     },
     local.is_prod ? {} : {
       # deploy.yml post-release dry run (scripts/dry-run-optimization.sh)
+      UPLOADS_BUCKET        = module.buckets["uploads"].bucket_name
       RESULTS_BUCKET        = module.buckets["results"].bucket_name
       MODELS_BUCKET         = module.buckets["models"].bucket_name
       DRY_RUN_BUSINESS_UNIT = var.business_units[0]
     },
     var.enable_data_platform ? {
       MODEL_REFRESH_STATE_MACHINE_ARN = module.refresh_sfn[0].state_machine_arn
-      # databricks.yml (bundle deploy); DATABRICKS_CLIENT_ID is set by setup-github.ps1 -DatabricksClientId
-      DATABRICKS_HOST = var.databricks_host
+      # glue.yml uploads data/glue/jobs/*.py to s3://<bucket>/scripts/
+      GLUE_ASSETS_BUCKET = module.buckets["glue-assets"].bucket_name
     } : {},
   )
 }
@@ -264,16 +269,23 @@ output "backup" {
 
 # ------------------------------------------------------------------ Step 13 - Data-team platform and model refresh
 output "data_platform" {
-  description = "Buckets, per-BU keys, Databricks access, model refresh and registry values (null while enable_data_platform = false)."
+  description = "Buckets, per-BU keys, Databricks export, Glue, model refresh and registry values (null while enable_data_platform = false)."
   value = var.enable_data_platform ? {
     landing_bucket         = module.buckets["landing"].bucket_name
+    raw_export_prefix      = local.raw_export_prefix
     lakehouse_bucket       = module.buckets["lakehouse"].bucket_name
     training_data_bucket   = module.buckets["training-data"].bucket_name
+    glue_assets_bucket     = module.buckets["glue-assets"].bucket_name
     business_unit_keys     = local.bu_key_arns
     uc_role_arn            = module.databricks_access[0].uc_role_arn
     uc_external_id         = module.databricks_access[0].uc_external_id
     workspace_endpoint_id  = module.databricks_access[0].workspace_endpoint_id
-    databricks_connection  = aws_cloudwatch_event_connection.databricks[0].name
+    export_function        = module.databricks_export[0].function_name
+    export_job_ids_param   = module.secrets.parameter_names["databricks/export_job_ids"]
+    glue_role              = module.glue[0].role_arn
+    glue_jobs              = module.glue[0].job_names
+    glue_databases         = module.glue[0].database_names
+    glue_dq_ruleset        = module.glue[0].ruleset_name
     refresh_state_machine  = module.refresh_sfn[0].state_machine_arn
     refresh_schedules      = [for s in aws_scheduler_schedule.refresh : s.name]
     refresh_event_rule     = aws_cloudwatch_event_rule.refresh_on_demand[0].name

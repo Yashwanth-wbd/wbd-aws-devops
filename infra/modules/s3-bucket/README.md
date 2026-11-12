@@ -26,6 +26,7 @@ One hardened, reusable S3 bucket. The environment stack calls it once per purpos
 | Glacier transition | `glacier_transition_days` | `landing`: 365 days; `training-data`: 180 days; objects are kept, never expired |
 | Expiry | `expiration_days` | `exports`: 30 days |
 | Prefix expiry | `prefix_expiration_days` | `lakehouse`: `monitoring/` 90 days (drift-check feature exports) |
+| CORS | `cors_allowed_origins` | `uploads`: PUT / GET / HEAD from the app URL only, headers `content-type`, `content-md5`, `x-amz-*`, exposes `ETag` |
 | EventBridge events | `enable_eventbridge` | `landing`: object events on the default bus (no rule consumes them yet; ready for a data-arrival trigger) |
 | Extra policy | `additional_policy_json` | Optional, e.g. a cross-account read |
 | Cross-region replication | `replication = { destination_bucket_arn, destination_kms_key_arn, permissions_boundary_arn }` | Not used for now: Step 12 uses the AWS Backup cross-region copy instead (docs/08 section 2). Turn it on for `results` / `approved-worm` only if WBD needs RPO in minutes |
@@ -57,6 +58,7 @@ on, in the DR region.
 | `prefix_expiration_days` | map(number) | `{}` |
 | `noncurrent_version_days` | number | `90` |
 | `enable_eventbridge` | bool | `false` |
+| `cors_allowed_origins` | list(string) | `[]` (uploads: the app URL, for the browser's presigned PUT; https only, no wildcard) |
 | `additional_policy_json` | string | `""` |
 | `replication` | object | `null` |
 | `component` | string | `"s3"` |

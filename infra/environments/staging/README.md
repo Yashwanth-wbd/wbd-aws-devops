@@ -22,7 +22,7 @@ then run the sync.** Only `backend.tf`, `terraform.tfvars` and this README belon
 | GitHub Environment | no reviewers | **EY delivery lead approves** |
 | Run queue | `max_concurrent_runs = 5` | `max_concurrent_runs = 20` |
 | Okta OIDC | own Okta app (`terraform output okta_app_settings`) | own app for staging (own `okta_client_id`, own `okta/alb-client` secret) |
-| Data platform (`enable_data_platform`) | bundles from `main` via `databricks.yml` | same workflow on manual dispatch / tags `v*` only; model promotion needs `staging-model-promotion` |
+| Data platform (`enable_data_platform`) | Glue scripts from `main` via `glue.yml`; `glue_number_of_workers = 2` | `glue.yml` on manual dispatch only (approval); `glue_number_of_workers = 5`; model promotion needs `staging-model-promotion` |
 
 First `terraform plan` on an empty account: run `.\scripts\mock-plan.ps1 -Environment staging` for
 the current resource count (includes the third AZ and backup vault deny policy).

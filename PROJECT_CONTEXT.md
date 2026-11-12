@@ -7,6 +7,17 @@
 Last updated: 6 Nov 2026 (v3 architecture from `wbd_Presentation_3.pptx` implemented and validated
 offline, pushed to `main` as `59333f0`; v2 was `89382f2` + `bf4a051`).
 
+> **v4 (12 Nov 2026) supersedes parts of this file.** The optimizer is now an ECS Fargate task
+> (`mmm/optimizer`, SSM `ecs/optimizer_task_definition`) instead of a SageMaker Processing job; user
+> input files go to the new `uploads` bucket; Databricks is only the source (export Lambda + write-only
+> UC role) and the lakehouse runs on **Glue** (bronze → silver with Data Quality → gold → exports);
+> model results go to RDS through the publisher instead of a Databricks write-back; the EventBridge
+> connection, `databricks.yml`, `DATABRICKS_CLIENT_ID` / `-DatabricksClientId`,
+> `databricks_sp_client_id` / `_refresh_job_id` / `_writeback_job_id` and `optimizer_instance_type` are
+> gone. Current state: [`Project_memory.md`](Project_memory.md) sections 1.0 / 1.0a and
+> [`docs/requirements/PROJECT_CONTEXT_4.md`](docs/requirements/PROJECT_CONTEXT_4.md); details in
+> `docs/09`, `docs/10`.
+
 ---
 
 ## 0. How to resume in a new chat

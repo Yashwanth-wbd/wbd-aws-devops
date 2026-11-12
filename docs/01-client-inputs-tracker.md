@@ -6,8 +6,10 @@ supplies a value, update it everywhere it appears, set its status to **Received*
 `terraform plan` for the affected environment.
 
 The client-facing version of this list (only what WBD must provide, with dev / staging / prod
-columns to fill) is `docs/requirements/devops_3_client_question.xlsx` (requirement 3: Okta OIDC, RDS
-sizing, run limits, write-back, drift; the `_2` workbook is kept for history).
+columns to fill) is `docs/requirements/devops_4_client_question.xlsx`: every input requirement 4
+needs, tagged New in v4 (Databricks export job and service principal, Glue sizing, optimizer task
+size, uploads, ...), Changed by v4 or From v3; obsolete v3 questions are on its `removed_vs_v3` sheet
+(the `_2` / `_3` workbooks are kept for history).
 
 ```powershell
 # list every remaining placeholder
@@ -115,17 +117,20 @@ git grep -n -A1 "add actual value"
 | Databricks workspace host | `https://dbc-00000000-0000.cloud.databricks.com` | tfvars, SSM `/mmm/<env>/databricks/host` | WBD Databricks | Open |
 | Databricks account ID | `00000000-0000-0000-0000-000000000000` | Unity Catalog IAM role trust | WBD Databricks | Open |
 | Databricks PrivateLink service name | `com.amazonaws.vpce.us-east-1.vpce-svc-00000000000000000` | databricks-access module | WBD Databricks | Open |
-| Databricks service principal client ID (model-refresh Step Functions) | dev `…00000000c001` | tfvars `databricks_sp_client_id`, EventBridge connection | WBD Databricks | Open |
-| Databricks service principal OAuth secret (model refresh) | not in Git – set on EventBridge connection `<prefix>-databricks` | `aws events update-connection` ([docs/05](05-secrets-and-config.md)) | WBD Databricks | Open |
-| Databricks refresh job ID (Lakeflow / jobs API) | `0` until job exists | tfvars `databricks_refresh_job_id` | WBD Data / EY | Open |
-| Databricks write-back job ID (predictions and lift to Gold after registration) | `0` until job exists | tfvars `databricks_writeback_job_id` | WBD Data / EY | Open |
+| Databricks export service principal (client ID + OAuth secret, "Can manage run" on the export jobs) | not in Git – Secrets Manager `mmm/<env>/databricks/export-sp` `{"client_id","client_secret"}` | export Lambda ([docs/05](05-secrets-and-config.md)) | WBD Databricks | Open |
+| Databricks export job ID per business unit (parameters `business_unit`, `output_uri`, `purpose`, `request_id`) | `0` until the job exists | tfvars `databricks_export_job_ids` → SSM `databricks/export_job_ids` | WBD Databricks | Open |
+| Workspace IP access list allows the NAT IPs (no PrivateLink) | `terraform output nat_public_ips` | Databricks workspace settings | WBD Databricks | Open |
+| Glue sizing per environment | `G.1X`, 2 / 5 / 10 workers (dev / staging / prod), 120 min timeout | tfvars `glue_worker_type`, `glue_number_of_workers`, `glue_job_timeout_minutes` | WBD Data / EY | Open |
+| Glue catalog encryption managed here? (account-wide setting) | `manage_glue_catalog_encryption = true` | tfvars | WBD Cloud | Open |
+| Silver Data Quality rules | `Rules = [ RowCount > 0 ]` until `data/glue/dq/silver.dqdl` is added | Glue ruleset `<prefix>-silver` | WBD Data / EY | Open |
 | Drift check: metric, threshold per BU, schedule, auto-refresh on drift | score 0–1, `0.2`; daily `cron(0 7 * * ? *)`, off (`enable_model_monitor_schedule = false`); `auto_refresh_on_drift = false` | tfvars, `data/model-thresholds.yaml` `drift.threshold` | WBD Data science | Open |
-| Databricks deploy SP client ID (Asset Bundle only) | WBD to provide | GitHub Environment `DATABRICKS_CLIENT_ID` via `setup-github.ps1 -DatabricksClientId` | WBD Databricks | Open |
 | Third-party vendors needing API keys | `adstra`, `inscape` | env tfvars `third_party_vendors` | WBD Data owners | Open |
 | Source feed delivery method (S3 / SFTP / API) | S3 drop to landing bucket | landing bucket policy | WBD Data owners | Open |
 | Model refresh schedule + timezone | `cron(0 6 ? * MON *)`, `America/New_York` | tfvars `model_refresh_schedule`, `model_refresh_timezone` | WBD Data | Open |
 | Enable scheduled refresh | `enable_model_refresh_schedule = false` | tfvars | WBD Data | Open |
-| SageMaker training / optimizer instance types | training `ml.m5.2xlarge`; optimizer `ml.m5.xlarge` | env tfvars | WBD / EY sizing | Open |
+| SageMaker training / evaluation instance types | training `ml.m5.2xlarge`; evaluation `ml.m5.xlarge` | env tfvars `training_instance_type`, `evaluation_instance_type` | WBD / EY sizing | Open |
+| Optimizer ECS task size | 4 vCPU / 16 GiB (prod 8 vCPU / 32 GiB), 50 GiB ephemeral storage | env tfvars `optimizer_cpu`, `optimizer_memory`, `optimizer_ephemeral_storage_gib` | WBD / EY sizing | Open |
+| Retention of user input files (uploads bucket) | `90` days | env tfvars `uploads_retention_days` | WBD Data owners | Open |
 | Enable the data platform per environment | `enable_data_platform = false` | env tfvars (Step 13) | User / WBD Data | Open |
 | Business unit names (S3 prefixes, keys, models) | `usnetworks`, `streaming`, `theatrical` | env tfvars `business_units` (default) | WBD Data owners | Open |
 | Unity Catalog storage-credential External ID | = `databricks_account_id` | Unity Catalog role trust (docs/10 §4) | WBD Databricks | Open |

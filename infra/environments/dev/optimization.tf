@@ -1,25 +1,31 @@
-# ================================================================== Step 7b - Full optimization (Step Functions + SageMaker)
-# API -> run queue -> dispatcher StartExecution {run_id, business_unit, input_s3_uri} (run-queue.tf)
-#   -> read the optimizer image from SSM -> SageMaker Processing job (.sync, private subnets)
+# ================================================================== Step 7b - Full optimization (Step Functions + ECS inference & optimization task)
+# API -> run queue -> dispatcher StartExecution {run_id, business_unit, input_s3_uri, run_type} (run-queue.tf)
+#   -> read the optimizer task definition from SSM -> ECS Fargate task (runTask.sync, private subnets):
+#      Model Summarizer + Optimizer + Simulation on the approved response curves and the user input files
 #   -> results-publisher Lambda (alias live) writes the summary to RDS; on failure it marks the run failed.
+# run_type: optimize (upload inventory + objective) or forecast (upload future titles).
 # Progress for the UI = execution status (DescribeExecution; name = run_id) + the run row in RDS.
 # deploy.yml adds dry_run = true after a release in dev/staging (scripts/dry-run-optimization.sh):
-# the job gets DRY_RUN=true and the publisher dry_run, so neither writes a real run.
+# the task gets DRY_RUN=true and the publisher dry_run, so neither writes a real run.
 locals {
   publisher_name = "results-publisher"
 
-  # Image URIs: written by deploy.yml (release = new value; rollback = previous value).
-  sagemaker_images = merge(
-    { optimizer = "mmm/sagemaker-optimizer" },
-    var.enable_data_platform ? { training = "mmm/sagemaker-training" } : {},
-  )
+  # SageMaker image URIs (training only): written by deploy.yml (release = new value; rollback = previous value).
+  sagemaker_images = var.enable_data_platform ? { training = "mmm/sagemaker-training" } : {}
 
   ecr_repo_arn_prefix = "arn:${local.partition}:ecr:${var.aws_region}:${local.account_id}:repository"
 
-  optimization_job_prefix = "${local.name_prefix}-opt"
+  optimizer_task_param = "/mmm/${local.env_short}/ecs/optimizer_task_definition"
+  cluster_arn          = "arn:${local.partition}:ecs:${var.aws_region}:${local.account_id}:cluster/${module.ecs_cluster.cluster_name}"
+  model_package_arns = [
+    "arn:${local.partition}:sagemaker:${var.aws_region}:${local.account_id}:model-package-group/${local.name_prefix}-*",
+    "arn:${local.partition}:sagemaker:${var.aws_region}:${local.account_id}:model-package/${local.name_prefix}-*/*",
+  ]
+
+  seed_optimizer_command = ["python", "-c", "raise SystemExit('seed optimizer task - replaced by deploy.yml')"]
 }
 
-# ------------------------------------------------------------------ Image pointers (SSM)
+# ------------------------------------------------------------------ Release pointers (SSM)
 resource "aws_ssm_parameter" "sagemaker_image" {
   #checkov:skip=CKV2_AWS_34:Non-secret image URI; nothing sensitive.
   for_each = local.sagemaker_images
@@ -30,7 +36,23 @@ resource "aws_ssm_parameter" "sagemaker_image" {
   value       = "${module.ecr.registry}/${each.value}:unset"
   tier        = "Standard"
 
-  tags = merge(local.tags, { Component = "optimization", Name = "/mmm/${local.env_short}/images/sagemaker-${each.key}" })
+  tags = merge(local.tags, { Component = "model-refresh", Name = "/mmm/${local.env_short}/images/sagemaker-${each.key}" })
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# Task definition revision every run uses (deploy.yml release = new revision; rollback = previous ARN).
+resource "aws_ssm_parameter" "optimizer_task" {
+  #checkov:skip=CKV2_AWS_34:Non-secret task definition ARN; nothing sensitive.
+  name        = local.optimizer_task_param
+  description = "Task definition ARN of the inference & optimization task (set by deploy.yml; Terraform only creates it)"
+  type        = "String"
+  value       = "${module.task_optimizer.task_definition_family}:unset"
+  tier        = "Standard"
+
+  tags = merge(local.tags, { Component = "optimization", Name = local.optimizer_task_param })
 
   lifecycle {
     ignore_changes = [value]
@@ -41,28 +63,94 @@ resource "aws_ssm_parameter" "sagemaker_image" {
 # SageMaker writes to these fixed names; created here so they are encrypted and expire.
 resource "aws_cloudwatch_log_group" "sagemaker" {
   #checkov:skip=CKV_AWS_338:Retention is set per environment (prod 365 days; dev/staging shorter to save cost).
-  for_each = toset(concat(["ProcessingJobs"], var.enable_data_platform ? ["TrainingJobs"] : []))
+  for_each = toset(var.enable_data_platform ? ["ProcessingJobs", "TrainingJobs"] : [])
 
   name              = "/aws/sagemaker/${each.key}"
   retention_in_days = var.log_retention_days
   kms_key_id        = module.kms.key_arns["logs"]
 
-  tags = merge(local.tags, { Component = "optimization" })
+  tags = merge(local.tags, { Component = "model-refresh" })
 }
 
-# ------------------------------------------------------------------ Optimizer execution role
-module "sagemaker_optimization" {
-  source = "../../modules/sagemaker"
+# ------------------------------------------------------------------ Inference & optimization task (ECS Fargate)
+data "aws_iam_policy_document" "task_optimizer" {
+  statement {
+    sid       = "ReadApprovedCurves"
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = [local.bucket_arns["models"], "${local.bucket_arns["models"]}/curves/*"]
+  }
 
-  name_prefix         = local.name_prefix
-  name                = "optimization"
-  read_bucket_arns    = [module.buckets["models"].bucket_arn, module.buckets["results"].bucket_arn]
-  write_bucket_arns   = [module.buckets["results"].bucket_arn]
-  data_kms_key_arns   = [module.kms.key_arns["s3"]]
-  volume_kms_key_arn  = module.kms.key_arns["sagemaker"]
-  ecr_repository_arns = ["${local.ecr_repo_arn_prefix}/mmm/sagemaker-optimizer"]
+  statement {
+    sid       = "ReadUserInputFiles"
+    actions   = ["s3:GetObject", "s3:ListBucket"]
+    resources = [local.bucket_arns["uploads"], "${local.bucket_arns["uploads"]}/*"]
+  }
 
+  statement {
+    sid       = "WriteRunEvidence"
+    actions   = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
+    resources = [local.bucket_arns["results"], "${local.bucket_arns["results"]}/runs/*"]
+  }
+
+  statement {
+    sid       = "BucketKey"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [module.kms.key_arns["s3"]]
+  }
+
+  # Approved model version per business unit (SageMaker Model Registry, data platform)
+  statement {
+    sid       = "ReadModelRegistry"
+    actions   = ["sagemaker:ListModelPackages", "sagemaker:DescribeModelPackage", "sagemaker:DescribeModelPackageGroup"]
+    resources = local.model_package_arns
+  }
+
+  statement {
+    sid       = "RunMetrics"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = ["MMM"]
+    }
+  }
+}
+
+module "task_optimizer" {
+  source = "../../modules/ecs-service"
+
+  name_prefix              = local.name_prefix
+  service_name             = "optimizer"
+  task_role_suffix         = "optimizer"
+  cluster_name             = module.ecs_cluster.cluster_name
+  execution_role_arn       = module.ecs_cluster.execution_role_arn
+  subnet_ids               = module.network.private_app_subnet_ids
+  security_group_ids       = [module.network.security_group_ids["optimizer"]]
   permissions_boundary_arn = module.permission_boundary.policy_arn
+  task_role_policy_json    = data.aws_iam_policy_document.task_optimizer.json
+
+  image                 = var.seed_image
+  command               = local.seed_optimizer_command
+  cpu                   = var.optimizer_cpu
+  memory                = var.optimizer_memory
+  ephemeral_storage_gib = var.optimizer_ephemeral_storage_gib
+  environment = {
+    APP_ENV                    = var.environment
+    AWS_REGION                 = var.aws_region
+    MODELS_BUCKET              = module.buckets["models"].bucket_name
+    RESULTS_BUCKET             = module.buckets["results"].bucket_name
+    UPLOADS_BUCKET             = module.buckets["uploads"].bucket_name
+    MODEL_PACKAGE_GROUP_PREFIX = local.name_prefix
+  }
+  log_retention_days = var.log_retention_days
+  logs_kms_key_arn   = module.kms.key_arns["logs"]
+
+  create_service           = false
+  enable_execute_command   = false
+  exec_audit_log_group_arn = module.ecs_cluster.exec_audit_log_group_arn
+  exec_kms_key_arn         = module.ecs_cluster.exec_kms_key_arn
 }
 
 # ------------------------------------------------------------------ Results publisher (Lambda)
@@ -79,6 +167,16 @@ data "aws_iam_policy_document" "publisher" {
     resources = [module.buckets["results"].bucket_arn, "${module.buckets["results"].bucket_arn}/runs/*"]
   }
 
+  # model_results events (model refresh): predictions, lift and evaluation of a refresh
+  dynamic "statement" {
+    for_each = var.enable_data_platform ? [1] : []
+    content {
+      sid       = "ReadEvaluationOutput"
+      actions   = ["s3:GetObject", "s3:ListBucket"]
+      resources = [module.buckets["models"].bucket_arn, "${module.buckets["models"].bucket_arn}/evaluation/*"]
+    }
+  }
+
   statement {
     sid       = "BucketKey"
     actions   = ["kms:Decrypt"]
@@ -91,7 +189,7 @@ module "publisher" {
 
   name_prefix = local.name_prefix
   name        = local.publisher_name
-  description = "Writes the summary of a finished optimization run from S3 to RDS (code shipped by deploy.yml)"
+  description = "Writes finished optimization runs and model results (predictions, lift, evaluation) from S3 to RDS (code shipped by deploy.yml)"
   timeout     = 120
   environment = {
     APP_ENV        = var.environment
@@ -100,6 +198,7 @@ module "publisher" {
     DB_NAME        = module.rds.db_name
     DB_USER        = "mmm_app"
     RESULTS_BUCKET = module.buckets["results"].bucket_name
+    MODELS_BUCKET  = module.buckets["models"].bucket_name
   }
   policy_json = data.aws_iam_policy_document.publisher.json
 
@@ -127,77 +226,65 @@ locals {
     }]
   }
 
+  run_output_uri = "States.Format('s3://${module.buckets["results"].bucket_name}/runs/{}/output/', $.run_id)"
+
   optimization_definition = {
     Comment = "MMM full optimization run (${var.environment})"
     StartAt = "ApplyDefaults"
     States = {
       ApplyDefaults = {
         Type       = "Pass"
-        Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"dry_run\":false}'), $, false)" }
+        Parameters = { "args.$" = "States.JsonMerge(States.StringToJson('{\"dry_run\":false,\"run_type\":\"optimize\"}'), $, false)" }
         OutputPath = "$.args"
-        Next       = "GetOptimizerImage"
+        Next       = "GetOptimizerTask"
       }
-      GetOptimizerImage = {
+      GetOptimizerTask = {
         Type           = "Task"
         Resource       = "arn:${local.partition}:states:::aws-sdk:ssm:getParameter"
-        Parameters     = { Name = aws_ssm_parameter.sagemaker_image["optimizer"].name }
-        ResultSelector = { "uri.$" = "$.Parameter.Value" }
-        ResultPath     = "$.image"
+        Parameters     = { Name = aws_ssm_parameter.optimizer_task.name }
+        ResultSelector = { "arn.$" = "$.Parameter.Value" }
+        ResultPath     = "$.task"
         Next           = "RunOptimizer"
       }
+      # Model Summarizer -> Optimizer -> Simulation in one task; a non-zero exit fails the state.
       RunOptimizer = {
-        Type     = "Task"
-        Resource = "arn:${local.partition}:states:::sagemaker:createProcessingJob.sync"
+        Type           = "Task"
+        Resource       = "arn:${local.partition}:states:::ecs:runTask.sync"
+        TimeoutSeconds = var.optimizer_max_runtime_seconds
         Parameters = {
-          "ProcessingJobName.$" = "States.Format('${local.optimization_job_prefix}-{}', $.run_id)"
-          RoleArn               = module.sagemaker_optimization.role_arn
-          AppSpecification      = { "ImageUri.$" = "$.image.uri" }
-          Environment = {
-            APP_ENV           = var.environment
-            "RUN_ID.$"        = "$.run_id"
-            "BUSINESS_UNIT.$" = "$.business_unit"
-            "DRY_RUN.$"       = "States.Format('{}', $.dry_run)"
-          }
-          ProcessingResources = {
-            ClusterConfig = {
-              InstanceCount  = 1
-              InstanceType   = var.optimizer_instance_type
-              VolumeSizeInGB = 30
-              VolumeKmsKeyId = module.kms.key_arns["sagemaker"]
+          Cluster            = local.cluster_arn
+          LaunchType         = "FARGATE"
+          "TaskDefinition.$" = "$.task.arn"
+          PropagateTags      = "TASK_DEFINITION"
+          NetworkConfiguration = {
+            AwsvpcConfiguration = {
+              Subnets        = module.network.private_app_subnet_ids
+              SecurityGroups = [module.network.security_group_ids["optimizer"]]
+              AssignPublicIp = "DISABLED"
             }
           }
-          ProcessingInputs = [
-            {
-              InputName = "input"
-              S3Input   = { "S3Uri.$" = "$.input_s3_uri", LocalPath = "/opt/ml/processing/input", S3DataType = "S3Prefix", S3InputMode = "File" }
-            },
-            {
-              InputName = "curves"
-              S3Input   = { "S3Uri.$" = "States.Format('s3://${module.buckets["models"].bucket_name}/curves/{}/', $.business_unit)", LocalPath = "/opt/ml/processing/curves", S3DataType = "S3Prefix", S3InputMode = "File" }
-            },
-          ]
-          ProcessingOutputConfig = {
-            KmsKeyId = module.kms.key_arns["s3"]
-            Outputs = [{
-              OutputName = "result"
-              S3Output   = { "S3Uri.$" = "States.Format('s3://${module.buckets["results"].bucket_name}/runs/{}/output/', $.run_id)", LocalPath = "/opt/ml/processing/output", S3UploadMode = "EndOfJob" }
+          Overrides = {
+            ContainerOverrides = [{
+              Name = "app"
+              Environment = [
+                { Name = "RUN_ID", "Value.$" = "$.run_id" },
+                { Name = "BUSINESS_UNIT", "Value.$" = "$.business_unit" },
+                { Name = "RUN_TYPE", "Value.$" = "$.run_type" },
+                { Name = "INPUT_S3_URI", "Value.$" = "$.input_s3_uri" },
+                { Name = "OUTPUT_S3_URI", "Value.$" = local.run_output_uri },
+                { Name = "CURVES_S3_URI", "Value.$" = "States.Format('s3://${module.buckets["models"].bucket_name}/curves/{}/', $.business_unit)" },
+                { Name = "DRY_RUN", "Value.$" = "States.Format('{}', $.dry_run)" },
+              ]
             }]
           }
-          StoppingCondition = { MaxRuntimeInSeconds = var.optimizer_max_runtime_seconds }
-          NetworkConfig = {
-            EnableInterContainerTrafficEncryption = true
-            VpcConfig = {
-              Subnets          = module.network.private_app_subnet_ids
-              SecurityGroupIds = [module.network.security_group_ids["sagemaker"]]
-            }
-          }
-          Tags = [{ Key = "run_id", "Value.$" = "$.run_id" }]
+          Tags = [{ Key = "run_id", "Value.$" = "$.run_id" }, { Key = "business_unit", "Value.$" = "$.business_unit" }]
         }
-        ResultSelector = { "name.$" = "$.ProcessingJobName", "status.$" = "$.ProcessingJobStatus" }
+        ResultSelector = { "task_arn.$" = "$.TaskArn" }
         ResultPath     = "$.job"
+        # No capacity / quota at the moment: wait and try again (the run stays "running" for the planner).
         Retry = [{
-          ErrorEquals     = ["SageMaker.ResourceLimitExceededException", "ThrottlingException"]
-          IntervalSeconds = 60
+          ErrorEquals     = ["ECS.AmazonECSException", "ECS.ServerException", "ECS.LimitExceededException", "ThrottlingException"]
+          IntervalSeconds = 30
           MaxAttempts     = 5
           BackoffRate     = 2
         }]
@@ -208,10 +295,12 @@ locals {
         Parameters = {
           FunctionName = module.publisher.alias_arn
           Payload = {
+            event             = "optimization_run"
             "run_id.$"        = "$.run_id"
             "business_unit.$" = "$.business_unit"
+            "run_type.$"      = "$.run_type"
             status            = "SUCCEEDED"
-            "output_s3_uri.$" = "States.Format('s3://${module.buckets["results"].bucket_name}/runs/{}/output/', $.run_id)"
+            "output_s3_uri.$" = local.run_output_uri
             "dry_run.$"       = "$.dry_run"
           }
         }
@@ -222,8 +311,10 @@ locals {
         Parameters = {
           FunctionName = module.publisher.alias_arn
           Payload = {
+            event             = "optimization_run"
             "run_id.$"        = "$.run_id"
             "business_unit.$" = "$.business_unit"
+            "run_type.$"      = "$.run_type"
             status            = "FAILED"
             "error.$"         = "$.error"
             "dry_run.$"       = "$.dry_run"
@@ -232,47 +323,65 @@ locals {
         ResultPath = null
         Next       = "RunFailed"
       })
-      RunFailed = { Type = "Fail", Error = "OptimizationFailed", Cause = "The SageMaker optimization job failed; see the execution history and /aws/sagemaker/ProcessingJobs." }
+      RunFailed = { Type = "Fail", Error = "OptimizationFailed", Cause = "The optimizer task failed; see the execution history and /ecs/${local.name_prefix}/optimizer." }
     }
   }
 }
 
 data "aws_iam_policy_document" "optimization_sfn" {
   statement {
-    sid       = "ReadImagePointer"
+    sid       = "ReadTaskPointer"
     actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.sagemaker_image["optimizer"].arn]
+    resources = [aws_ssm_parameter.optimizer_task.arn]
   }
 
   statement {
-    sid       = "RunProcessingJobs"
-    actions   = ["sagemaker:CreateProcessingJob", "sagemaker:DescribeProcessingJob", "sagemaker:StopProcessingJob", "sagemaker:AddTags", "sagemaker:ListTags"]
-    resources = ["arn:${local.partition}:sagemaker:${var.aws_region}:${local.account_id}:processing-job/${local.optimization_job_prefix}-*"]
-  }
-
-  # .sync integration: Step Functions watches the job through this managed EventBridge rule.
-  statement {
-    sid       = "SyncRule"
-    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
-    resources = ["arn:${local.partition}:events:${var.aws_region}:${local.account_id}:rule/StepFunctionsGetEventsForSageMakerProcessingJobsRule"]
-  }
-
-  statement {
-    sid       = "PassJobRole"
-    actions   = ["iam:PassRole"]
-    resources = [module.sagemaker_optimization.role_arn]
+    sid       = "RunOptimizerTask"
+    actions   = ["ecs:RunTask"]
+    resources = ["arn:${local.partition}:ecs:${var.aws_region}:${local.account_id}:task-definition/${module.task_optimizer.task_definition_family}:*"]
 
     condition {
-      test     = "StringEquals"
-      variable = "iam:PassedToService"
-      values   = ["sagemaker.amazonaws.com"]
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [local.cluster_arn]
     }
   }
 
   statement {
-    sid       = "JobKeys"
-    actions   = ["kms:CreateGrant", "kms:DescribeKey"]
-    resources = [module.kms.key_arns["sagemaker"], module.kms.key_arns["s3"]]
+    sid       = "WatchOptimizerTask"
+    actions   = ["ecs:StopTask", "ecs:DescribeTasks"]
+    resources = ["arn:${local.partition}:ecs:${var.aws_region}:${local.account_id}:task/${module.ecs_cluster.cluster_name}/*"]
+  }
+
+  statement {
+    sid       = "TagOnRun"
+    actions   = ["ecs:TagResource"]
+    resources = ["arn:${local.partition}:ecs:${var.aws_region}:${local.account_id}:task/${module.ecs_cluster.cluster_name}/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ecs:CreateAction"
+      values   = ["RunTask"]
+    }
+  }
+
+  # .sync integration: Step Functions watches the task through this managed EventBridge rule.
+  statement {
+    sid       = "SyncRule"
+    actions   = ["events:PutTargets", "events:PutRule", "events:DescribeRule"]
+    resources = ["arn:${local.partition}:events:${var.aws_region}:${local.account_id}:rule/StepFunctionsGetEventsForECSTaskRule"]
+  }
+
+  statement {
+    sid       = "PassTaskRoles"
+    actions   = ["iam:PassRole"]
+    resources = [module.task_optimizer.task_role_arn, module.ecs_cluster.execution_role_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 
   statement {

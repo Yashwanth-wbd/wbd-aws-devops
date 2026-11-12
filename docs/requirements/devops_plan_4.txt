@@ -1,0 +1,359 @@
+# PROMPT v4 — Build the WBD MMM AWS Platform (Infra + CI/CD) — AWS Glue lakehouse, Databricks source export, ECS inference & optimization
+
+> **Version 4** of the build prompt, rewritten for the client architecture in
+> `WBD_MMM_Architecture_4.pptx` (2 slides: "supports auto ML activities" and "supports optimization and
+> explainable planning"). v3 (`devops_plan_3.txt`, from `wbd_Presentation_3.pptx`) is **implemented in the
+> repo** (`59333f0`); this file lists what v4 changes on top of that build. Everything not changed by the v4
+> deck is carried over from v3 as built (including the simpler defaults recorded in `PROJECT_CONTEXT_3.md` §4a).
+>
+> **How to use this file:** give this entire document to an AI coding agent (or follow it yourself).
+> Section A lists what changed vs v3; the steps below are the full v4 build, with **(v4)** marking
+> every step that changes the existing code. Implement the steps **in order**; each step has a
+> **Validate** gate — do not proceed until it passes.
+>
+> **Scope:** DevOps only — **do NOT write application, model or data-pipeline code** (the developers
+> own `apps/api`, `apps/ui`, `apps/results-publisher`; the data scientists own the SageMaker training /
+> evaluation / drift code and the **inference & optimization container**; the data engineers own the
+> **AWS Glue job scripts** and, with WBD Databricks, the **Databricks export job**). This prompt builds
+> everything that **provisions, secures, runs and deploys** their work.
+>
+> Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
+>
+> **Status (12 Nov 2026):** **plan only — not implemented.** The repo still holds the v3 build. Implement
+> only after the user has verified this plan, `PROJECT_CONTEXT_4.md`, `aws_resource_list_4.xlsx`,
+> `wbd_mmm_ecs_final_4.docx` and `devops_4_client_question.xlsx`.
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+Execute exactly ONE numbered step at a time. Do NOT start the next step until the user explicitly
+confirms the current step is validated.
+
+After completing a step you MUST:
+1. Create only the files/resources for **that single step**.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands**, (c) any Git/AWS inputs to set.
+3. **WAIT** for the user to run the commands and confirm ("validated" / "passed").
+4. Only then begin the next step.
+
+Never batch steps. If a validation fails, fix only the current step. If anything is ambiguous, ask.
+
+---
+
+## A. What changed vs v3 (summary)
+
+Slide-by-slide comparison of `WBD_MMM_Architecture_4.pptx` with `wbd_Presentation_3.pptx`:
+
+| # | Area | v3 (built in the repo) | v4 (new client architecture) |
+|---|---|---|---|
+| 1 | Data engineering (slide 1) | **Databricks Lakeflow Jobs** own ingestion → Bronze → Silver → Gold → Feature Export; Delta Lake on S3; Unity Catalog | **AWS Glue** owns Bronze (ingested raw) → Silver (cleansed and validated) → Gold (per-BU modeling tables, adstock & saturation); Delta Lake storage still backed by S3. **Databricks on AWS shrinks to the "Databricks Source Catalog – responsible export via Jobs APIs"** |
+| 2 | Source data (slide 1) | "Raw data landing in catalog, coming from S3" (data dropped in S3, ingested by Databricks) | "**Raw data coming from Databricks coming to S3**": EventBridge → Step Functions → **Lambda** → *Databricks API connector* → export job in the Databricks source catalog → raw files in S3 (3+ years history). The slide labels this Lambda "Results publisher" – read as a new **Databricks export Lambda** [ASK] |
+| 3 | Glue exports (slide 1) | Feature Export (Databricks) → training data S3 | Three "**Glue Export**" arrows: Bronze / Silver → Delta Lake storage (S3); **Gold → training data** (immutable Parquet + metadata); **Gold → RDS PostgreSQL** (per-BU modeling data for the app) |
+| 4 | Model results (slide 1) | Databricks **write-back** job merges predictions, lift, evaluation into Gold | "**Model predictions, lift & evaluation results written in RDS for the corresponding dataset**": evaluation → **Lambda results publisher → RDS PostgreSQL**. No write-back to Databricks |
+| 5 | Optimization engine (slide 2) | Step Functions → **SageMaker Processing job** (Model Summarizer · Optimizer · Simulation) | Step Functions → **"ECS Inference and Optimization Fargate container"** (Model Summarizer · Optimizer · Simulation) inside the VPC, reading the SageMaker Registry + approved response curves → S3 outputs → Lambda results publisher → RDS |
+| 6 | User input files (slide 2) | Run input written by the API to `results/runs/<run_id>/input/` | New "**S3 – Store user input files**" bucket (inventory uploads and "**Upload future titles**") used by the API and the inference container |
+| 7 | Planner flow (slide 2) | Upload inventory + choose objective + run & compare | **OR upload future titles** (forecast / inference for titles not yet released) [ASM: new run type on the same queue] |
+| 8 | GenAI (slide 2) | Release 2 behind `enable_genai`; LangGraph tools + QA dashboard in the API | Subtitle "… **with GenAI capabilities**"; API "LangGraph tools (**invoke explanation tool by default for every run**)"; QA dashboard moves to the **UI** [ASK: GenAI in Release 1?] |
+| 9 | Wording | "Operations"; Okta "Enterprise Identity Provider" | "**Logging/Operations**"; Okta "used for **authentication and RBAC**" – no DevOps impact |
+
+**Unchanged from v3 (as built):** Terraform modules + per-env stacks, GitHub Actions via OIDC, ECR per
+environment with digest promotion, ECS Fargate `ui` + `api` (+ `migrate`), public ALB + regional WAF +
+ACM + Route 53/WBD DNS, Okta OIDC at the ALB, RDS PostgreSQL + RDS Proxy, SQS run queue + DLQ + dispatcher
+Lambda → Step Functions → results-publisher Lambda, EventBridge Scheduler / `mmm.refresh` → model-refresh
+state machine → SageMaker training → evaluation (baseline → channel lift → title adjustment) → Model
+Registry (`PendingManualApproval`) → `model-governance.yml` approval → curves + drift baseline, model drift
+monitoring (`model-monitor`), Release 2 GenAI gateway (private API Gateway + proxy Lambda + Bedrock
+Guardrails), KMS, Secrets Manager + SSM, VPC layout, CloudWatch + CloudTrail, AWS Backup, budgets,
+naming/tagging, branching and release tags.
+
+**Removed vs v3:** Databricks Lakeflow refresh / feature-export job and the Databricks **write-back** job;
+model-refresh states `StartDatabricksJob` / `GetDatabricksRun` and `StartDatabricksWriteback` /
+`GetWritebackRun`; variables `databricks_refresh_job_id`, `databricks_writeback_job_id`; the **EventBridge
+connection** (Databricks OAuth) used by the HTTP Tasks; Unity Catalog external locations on `lakehouse`,
+`training-data`, `models/evaluation/` and `lakehouse/monitoring/`; `databricks.yml` (Asset Bundle deploy),
+GitHub variable `DATABRICKS_CLIENT_ID` and `data/databricks/`; the **SageMaker Processing optimization job**,
+its run role, ECR repo `mmm/sagemaker-optimizer` and SSM pointer `/mmm/<env>/images/sagemaker-optimizer`;
+runbook `write-back-failed.md`.
+
+---
+
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Change the built v3 WBD MMM platform to the v4 architecture.
+The application (UI + API) **and the inference & optimization engine** run on **Amazon ECS on Fargate**;
+model training, evaluation and the registry stay on **Amazon SageMaker**; everything is orchestrated by
+**AWS Step Functions**; optimization requests are **buffered in Amazon SQS** and dispatched by a
+**Lambda**; data engineering runs on **AWS Glue** with **Delta Lake on S3**, fed by an **export from the WBD
+Databricks source catalog**; planners sign in with **WBD Okta**.
+
+**Golden rules (apply to every step):**
+1. **Everything is Terraform**, run from GitHub Actions via OIDC. Exceptions: the one-time state bootstrap and the first apply per account — run with SSO.
+2. **No secrets in Git, images or Terraform variables.** Runtime secrets live in Secrets Manager / SSM (v4 adds the Databricks export service-principal secret and the Glue DB user).
+3. **Modularize**: reusable modules in `infra/modules/`, thin stacks in `infra/environments/{dev,staging,prod}/`; edit dev, then `scripts/sync-environments.ps1`.
+4. **Build order: dev → prove it works → staging (same code) → prod (same code).**
+5. **Validate after every step.**
+6. **Naming:** `mmm-<env>-<component>` (env = `dev|stg|prd`). **Tags:** `Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component`.
+7. **ECS tasks, Glue jobs, SageMaker jobs and Lambda functions run inside the VPC** (private subnets, no public IP), with KMS on volumes, queues, job bookmarks, logs and outputs.
+8. **Remove what v4 drops** (Databricks Lakeflow + write-back, EventBridge connection, SageMaker optimization job, `databricks.yml`) – no leftover modules, variables, outputs, docs or runbooks.
+
+---
+
+## 1. Final target stack
+
+`Terraform · GitHub Actions (OIDC) · ECR · ECS on Fargate (UI + API + inference & optimization task) + ALB ·
+Route 53 · AWS WAF (regional) · ACM · WBD Okta (OIDC at the ALB) · RDS for PostgreSQL (+ RDS Proxy) ·
+Amazon SQS (+ DLQ) · AWS Lambda (message dispatcher, results publisher, Databricks export) · AWS Step
+Functions · AWS Glue (Spark jobs, Data Catalog, Data Quality, connections) · Amazon SageMaker (training,
+evaluation, Model Registry, drift checks) · S3 (raw landing, Delta Lake, training data, models/response
+curves/drift reports, user uploads, Glue assets, results, exports, approved WORM, logs) · KMS · Secrets
+Manager + Parameter Store · Amazon EventBridge (+ Scheduler) · Databricks on AWS (source catalog, export
+job – WBD) · Amazon API Gateway (LLM gateway) · Amazon Bedrock Guardrails · CloudWatch + CloudTrail
+(+ Splunk via Firehose) · AWS Backup.`
+
+**Prescribed stack (slide footer, unchanged):** React + TypeScript · Python / FastAPI · scikit-learn /
+XGBoost / LangGraph · SciPy · RDS PostgreSQL + Databricks / S3 · ECS · AWS recommended.
+
+**Two flows (from the v4 slides):**
+- **Auto ML activities (slide 1):** scheduled / manual / app-triggered refresh → EventBridge → Step Functions (wait / retry) → **(v4) Databricks export Lambda** → Databricks API connector → **Databricks source catalog export job** (Jobs API) → **raw data in S3** (3+ years historical inventory) → **(v4) AWS Glue**: Bronze (ingested raw) → Silver (cleansed and validated) → Gold (per-BU modeling tables, adstock & saturation), all as Delta tables on S3 → **(v4) Glue exports**: Gold → immutable Parquet + metadata in the training-data bucket, Gold → RDS PostgreSQL → SageMaker model training (multi-stage) → evaluation (baseline → channel lift → title adjustment) → **(v4) Lambda results publisher writes model predictions, lift and evaluation results to RDS** → model registration → SageMaker Registry + S3 (approved models, response curves, model drift monitoring).
+- **Optimization and explainable planning (slide 2):** planner (upload inventory + choose objective + run & compare, **or upload future titles**) → DNS/WAF → ALB (HTTPS) → Okta sign-in (authentication + RBAC) → ECS UI (web + **QA dashboard**) ↔ ECS API (FastAPI + LangGraph tools, **explanation tool on every run**) ↔ RDS PostgreSQL (plans, runs, allocations). API → **(v4) S3 user input files**. API → SQS → Lambda message dispatcher → Step Functions (async) → **(v4) ECS inference & optimization Fargate task** (Model Summarizer · Optimizer · Simulation) reading the SageMaker Registry + approved response curves (S3) + the user input files → S3 outputs (full run evidence) → Lambda results publisher → RDS PostgreSQL. API → Amazon API Gateway → OpenAI / Anthropic / Google models, with Bedrock Guardrails. Sized for **50–150 concurrent planners**.
+
+**Control plane (both slides, unchanged):** Data lineage & observability · Code repository · Security (RBAC, SSO/MFA) · Amazon Bedrock for GenAI capabilities · Privacy & GenAI guardrails.
+**Security + network:** IAM role assumption · IAM Identity Center · KMS · Secrets Manager · Security groups · VPC routes. **Logging / operations:** CloudWatch metrics · CloudTrail · Terraform · CI/CD.
+
+---
+
+## 2. Prerequisite tools (v4: small change)
+
+Terraform ≥ 1.10, AWS CLI v2, Git, GitHub CLI, jq, tflint, Checkov, Trivy, actionlint, Node 22 + uv /
+Python 3.12. Docker optional (CI builds images). **Databricks CLI no longer needed** (no bundle deploy);
+optional for testing the export job. Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE`.
+
+---
+
+## 3. Access & inputs to request (ASK the client)
+
+Everything in v3 §3 and `devops_3_client_question.xlsx` still applies, **except** the Databricks refresh /
+write-back job IDs, the bundle-deploy service principal and the Unity Catalog external locations for our
+lakehouse. **New or changed for v4** (all in `devops_4_client_question.xlsx`):
+- **Databricks source export:** workspace URL, source catalog / schema / tables per BU, export job ID(s) (owned by WBD Databricks or the data engineers [ASK]), output format (Parquet [ASM]) and size (3+ years history), schedule window, a **service principal** for the export Lambda (OAuth M2M; secret entered in `mmm/<env>/databricks/export-sp`), a Unity Catalog **storage credential + external location** on our landing bucket prefix `raw/databricks/` (we give the IAM role ARN), workspace IP access list allowing our NAT IPs or PrivateLink.
+- **AWS Glue:** data volumes per layer (sizing of worker type / number of workers), Glue version (5.0 [ASM]), Lake Formation required or IAM + bucket policies only [ASK], data-quality rules for the Silver layer and who owns them, which Gold tables go to RDS.
+- **Inference & optimization on ECS:** task size (vCPU / memory) of one run, Fargate vCPU quota (≥ `max_concurrent_runs` × task vCPU + the `ui` / `api` services), maximum run time.
+- **User input files:** accepted file types and maximum size, retention, malware scanning required yes/no, the format of the "future titles" upload.
+- **GenAI:** the explanation tool runs on every run – is GenAI now part of Release 1? WBD approval of data egress to the providers (or Bedrock-hosted models), token budget per run and per BU.
+
+---
+
+## 4. GitHub branching strategy (v4: small change)
+
+Trunk-based: `main` protected. Merge to `main` → dev (`sha-<7>`); tag `vX.Y.Z-rcN` → staging (EY lead
+approves); tag `vX.Y.Z` → prod (WBD approver + change ticket). **Glue scripts (v4):** `main` → dev, the same
+commit promoted to staging / prod with the release tags (replaces the Databricks bundle). Image tags
+immutable; release record keeps tag + task-def revisions (incl. the optimizer task) + digests + SSM pointers
++ Lambda versions + Glue script version.
+
+---
+
+## 5. Repository & folder structure (v4 changes)
+
+```
+infra/modules/
+├── glue/                 # NEW (v4) – Glue jobs (bronze, silver, gold, export-training, export-rds, export-monitor),
+│                         #   Data Catalog databases, security configuration, connection (VPC/JDBC), Data Quality ruleset, role
+├── databricks-access/    # CHANGE (v4) – Unity Catalog role only writes landing raw/databricks/* (export job); no lakehouse,
+│                         #   training-data, models/evaluation, monitoring locations; PrivateLink unchanged (optional)
+├── network/              # CHANGE (v4) – glue interface endpoint; glue SG (self-referencing); RDS Proxy SG allows glue;
+│                         #   sagemaker SG = training/evaluation/drift only
+├── ecr/                  # CHANGE (v4) – mmm/optimizer (ECS) replaces mmm/sagemaker-optimizer
+├── sagemaker/            # CHANGE (v4) – optimization run role removed (training / evaluation roles kept)
+├── step-functions/       # REUSE – optimization (ecs:runTask.sync) and model-refresh (Lambda + Glue .sync) definitions
+├── lambda-function/      # REUSE – also the Databricks export Lambda (code in modules/databricks-export or apps/ [ASK])
+├── s3-bucket/            # REUSE – new buckets uploads, glue-assets
+├── monitoring/           # CHANGE (v4) – Glue job / export Lambda / optimizer task alarms; data-pipeline dashboard
+├── backup/               # CHANGE (v4) – selection unchanged (+ uploads only if WBD asks)
+└── (all other modules unchanged)
+infra/environments/<env>/
+├── optimization.tf       # CHANGE – optimizer ECS task definition + task role + SSM pointer; state machine RunTask.sync
+├── data.tf               # CHANGE – Databricks export Lambda + secret; Glue module; model-refresh states; model-monitor export via Glue;
+│                         #   remove EventBridge connection, Databricks job ids, write-back states
+├── main.tf               # CHANGE – buckets uploads, glue-assets; secrets databricks/export-sp, rds/etl; KMS unchanged
+├── ecs.tf                # CHANGE – API task role + env (UPLOADS_BUCKET, presigned uploads); LLM gateway env when GenAI on
+├── monitoring.tf / backup.tf / outputs.tf / variables.tf / tfvars  # CHANGE accordingly
+ecs/<env>/api.json, optimizer.json (NEW)   # optimizer task definition template (deploy.yml registers revisions)
+.github/workflows/optimizer-ci.yml         # CHANGE – builds the ECS image mmm/optimizer
+.github/workflows/deploy.yml               # CHANGE – registers the optimizer task definition + SSM pointer; Glue scripts upload
+.github/workflows/glue.yml                 # NEW – tests and uploads data/glue/ scripts (replaces databricks.yml)
+.github/workflows/databricks.yml           # REMOVE
+data/glue/ (data engineers), data/README.md # CHANGE – Glue job contract (paths, arguments, Delta tables, DQ rules, RDS export)
+scripts/                                   # CHANGE – dry-run-optimization.sh (ECS task), trigger-model-refresh.sh, platform-check.sh (Glue, uploads)
+docs/ + docs/runbooks/                     # CHANGE – 10 (Glue, Databricks export), 09, 05, 06, 08, 11, 12; runbooks below
+```
+
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION
+
+### Step 0 — Prereqs & access (unchanged)
+- Tools (§2), AWS CLI SSO for dev. **Validate:** `aws sts get-caller-identity`; `terraform version` ≥ 1.10.
+
+### Step 1 — Bootstrap the Terraform state backend (unchanged)
+- `infra/bootstrap/`: state bucket (versioned, KMS, TLS-only), KMS key, S3 native lock file.
+
+### Step 2 — Module changes (v4)
+- Add `modules/glue` (with README). Adjust `databricks-access`, `network`, `ecr`, `sagemaker`, `monitoring`. Delete the SageMaker optimization role code and the Databricks write-back / HTTP-Task pieces.
+- **Validate:** `terraform fmt -recursive` clean; `scripts/validate-modules.ps1` passes; `git grep -n -i "writeback\|write-back\|sagemaker-optimizer\|event_connection"` only in history docs.
+
+### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets (v4: small change)
+- **KMS** purposes unchanged (`rds`, `s3`, `logs`, `secrets`, `ecr`, `sagemaker`, `sqs`, `genai`, per-BU `s3-<bu>`); the Glue security configuration uses `s3` (S3 + job bookmarks) and `logs` (CloudWatch) [ASM]; the key policies allow the Glue role and the optimizer task role.
+- **permission-boundary** also covers the Glue role, the Databricks export Lambda role and the optimizer task role.
+- **iam-oidc**: `gha-deploy` – `ecs:RegisterTaskDefinition` for the optimizer family + `iam:PassRole` (optimizer task + execution roles) + `ssm:PutParameter` on the optimizer task pointer; `s3:PutObject` on `glue-assets/scripts/*` and `glue:UpdateJob` on `mmm-<env>-*` jobs (script version); drop the `sagemaker-optimizer` image pointer.
+- **Validate:** plan shows no new keys; boundary attached to the new roles.
+
+### Step 4 — Networking (v4)
+- Subnets unchanged; private-app now also holds the **optimizer ECS tasks**, **Glue job ENIs** and the **Databricks export Lambda**.
+- **Interface endpoints:** add **`glue`** (Data Catalog API from Glue jobs and the optimizer, private). Keep ECR api/dkr, STS, Secrets Manager, SSM, SSM Messages, KMS, Logs, Monitoring, X-Ray, states, sagemaker.api (training + registry reads from the optimizer), sqs; R2 execute-api, bedrock-runtime.
+- **Security groups:** new **`glue`** SG (self-referencing all TCP – required by Glue; egress 443 to endpoints / S3 prefix list, 5432 to RDS Proxy); **RDS Proxy** SG allows 5432 from `glue`; **optimizer tasks** reuse the `tasks` SG (no inbound; egress 443) [ASM]; Databricks export Lambda reuses the `lambda` SG (egress 443 to endpoints and, via NAT or PrivateLink, to the Databricks workspace); `sagemaker` SG now only for training / evaluation / drift jobs.
+- **Validate:** a Glue test job in the VPC reaches the Data Catalog through the endpoint and RDS through the proxy; data subnets have no internet route.
+
+### Step 5 — Secrets, configuration and identity settings (v4)
+- **Secrets Manager:** add **`mmm/<env>/databricks/export-sp`** (`{"client_id": "...", "client_secret": "..."}`, OAuth M2M of the export service principal, filled by WBD Databricks / DevOps) and **`mmm/<env>/rds/etl`** (DB user `mmm_etl` for the Glue RDS export, registered with RDS Proxy; created by the DB bootstrap task). Keep `api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`.
+- **SSM:** replace `/mmm/<env>/images/sagemaker-optimizer` with **`/mmm/<env>/ecs/optimizer_task_definition`** (task-definition ARN with revision, written by `deploy.yml`, read by the optimization state machine); add **`/mmm/<env>/databricks/export_job_ids`** (JSON map BU → job id, non-secret) [ASM]; keep `databricks/host`, `okta/issuer`, `optimization/max_concurrent_runs`, `images/sagemaker-training`, `genai_enabled`, GenAI token quotas.
+- **Okta:** unchanged (authentication + RBAC by the `groups` claim).
+- **Validate:** secret scan clean; the export Lambda reads its secret through the Secrets Manager endpoint.
+
+### Step 6 — Data & storage (ECR, S3, RDS PostgreSQL) (v4)
+- **ecr:** `mmm/api`, `mmm/ui`, **`mmm/optimizer`** (ECS inference & optimization image, replaces `mmm/sagemaker-optimizer`), `mmm/sagemaker-training`.
+- **s3-bucket:** existing set + **`uploads`** (user input files: inventory, future titles; versioning, KMS `s3` + per-BU keys under `<bu>/`, TLS-only, CORS for the app domain with presigned PUT from the API, expiry 90 days [ASM], `noncurrent_version_days` 7) and **`glue-assets`** (Glue scripts under `scripts/<version>/`, `temp/`, Spark UI logs; 30-day expiry on `temp/`). **landing** gets the prefix `raw/databricks/<bu>/<export_date>/` (written by the Databricks export job) [ASM]. **lakehouse** holds the Glue Delta tables `bronze/`, `silver/`, `gold/` and `monitoring/`. **training-data** is written by the Glue `export-training` job. **results** keeps the run evidence (`runs/<run_id>/output`); the run input now lives in `uploads` [ASM].
+- **Optional [ASK]:** GuardDuty Malware Protection for S3 on `uploads` (scan before the optimizer reads a file).
+- **rds:** unchanged instance / Proxy; new DB user **`mmm_etl`** (writes the Gold reference tables) through the proxy; model-result tables (predictions, lift, evaluation) and Gold reference tables are part of the backend team's Alembic migrations.
+- **Validate:** a presigned upload from the app domain lands in `uploads/<bu>/`; `uploads` denies non-TLS and unencrypted uploads; `mmm_etl` connects through the proxy.
+
+### Step 7 — ECS compute (UI + API) and ALB (v4: small change)
+- Cluster, services, autoscaling unchanged.
+- **API task role:** add `s3:PutObject` / `GetObject` on `uploads/*` (presigned URLs) + per-BU KMS; keep `sqs:SendMessage` on the run queue; keep `states:DescribeExecution` / `StopExecution` (cancel stops the ECS task through the execution).
+- **API task env:** add `UPLOADS_BUCKET`; the message contract gains `run_type` (`optimize` | `forecast`) and `input_s3_uri` in `uploads` [ASM]; `LLM_GATEWAY_URL` once GenAI is on (explanation tool on every run).
+- **UI:** QA dashboard is in the UI (no infra change).
+- **Validate:** UI and API healthy; an upload + run request reaches the queue with the new contract.
+
+### Step 8 — Edge & login (Route 53, WAF, ACM, Okta) (unchanged)
+- WAF, ACM, Route 53 / WBD DNS, ALB `authenticate-oidc` with Okta unchanged. WAF: allow the upload size of the inventory / titles files (body-size rule exception for the upload path only if the API proxies uploads; default presigned direct-to-S3, so no change) [ASM].
+
+### Step 9 — Optimization engine (SQS + dispatcher + Step Functions + ECS inference & optimization + publisher) (v4)
+- **sqs**, **DLQ**, **dispatcher Lambda**, **event source mapping**: unchanged; `max_concurrent_runs` is now bounded by the **Fargate vCPU quota** (dev 5, stg 20, prd 50 [ASM]).
+- **ECS task definition `mmm-<env>-optimizer`** (family; Fargate, Linux/X86_64, **4 vCPU / 16 GB** default [ASM; max 16 vCPU / 120 GB], ephemeral storage 50 GB, read-only root file system, non-root user, logs to `/ecs/mmm-<env>-optimizer` (KMS, retention), no port mappings). Template `ecs/<env>/optimizer.json`; `deploy.yml` registers revisions and writes the ARN to SSM `ecs/optimizer_task_definition`.
+- **Task role `mmm-<env>-optimizer`:** read `uploads/<bu>/*`, `models/curves/*`, `models/artifacts/*`, `sagemaker:DescribeModelPackage` / `ListModelPackages` on `mmm-<env>-*` groups, write `results/runs/*`, per-BU KMS, `cloudwatch:PutMetricData` (namespace `MMM/Optimization`); **no DB access** (the publisher writes to RDS).
+- **step-functions `mmm-<env>-optimization`:** `ApplyDefaults` → `GetOptimizerTaskDefinition` (SSM) → **`RunOptimizer` = `arn:aws:states:::ecs:runTask.sync`** (cluster `mmm-<env>`, launch type FARGATE, private-app subnets, `tasks` SG, `assignPublicIp = DISABLED`, container overrides `RUN_ID`, `BUSINESS_UNIT`, `RUN_TYPE`, `INPUT_S3_URI`, `OUTPUT_S3_URI`, `DRY_RUN`; `TimeoutSeconds = optimizer_max_runtime_seconds`; retries on `ECS.AmazonECSException` / capacity errors) → `PublishResult` / `PublishFailure` (results publisher, `live` alias). Role: `ecs:RunTask` on the optimizer family, `ecs:StopTask` / `DescribeTasks`, `iam:PassRole` (task + execution roles), `events:PutTargets` / `PutRule` / `DescribeRule` on `StepFunctionsGetEventsForECSTaskRule` (required by `.sync`), `ssm:GetParameter`, `lambda:InvokeFunction`.
+- **Alternative [ASK]:** a long-running ECS **worker service** that polls SQS and scales on queue depth (no task start-up per run, ~30–60 s saved) instead of one `RunTask` per run. Default = `RunTask.sync` per run (the slide draws Step Functions → container; isolation per run, simple cancel).
+- **Remove:** SageMaker optimization run role, `createProcessingJob.sync` state, SSM `images/sagemaker-optimizer`, ECR `mmm/sagemaker-optimizer`, SageMaker Processing quota for optimization.
+- **results publisher:** unchanged for runs; also handles the new `model_results` event (Step 14).
+- **Validate:** 20 messages with `max_concurrent_runs = 5` → never more than 5 optimizer tasks RUNNING; a run starts within 60 s of being dispatched (target: a typical run < 2 min end-to-end); a failed task marks the run failed and alarms; cancel stops the task; a `forecast` run reads a future-titles file from `uploads`.
+
+### Step 10 — Monitoring & logging (v4)
+- **Alarms (new / changed):** Glue job **failed / timeout** per job (EventBridge "Glue Job State Change" → SNS, and `glue.driver.aggregate.numFailedTasks`), Glue job duration over the expected window, **Data Quality ruleset failed** (Silver), **Databricks export Lambda errors**, optimization state machine failed (now also ECS task stopped with a non-zero exit code), **ECS optimizer task capacity errors** (`RunTask` failures), Fargate vCPU usage > 80 % of quota. Removed: write-back failed. All v3 alarms otherwise unchanged (RDS, SQS / DLQ / dispatcher, drift, model monitor, API 5xx, availability, health, what-if p95, optimization runtime, publisher errors, cert expiry, refresh overdue, GenAI).
+- **Dashboards:** `optimization` shows optimizer task count / duration / failures instead of SageMaker jobs; **`data-pipeline` (new, replaces the Databricks part of `training`)**: Databricks export duration, Glue job runs / duration / DPU-hours per layer, DQ results, rows exported to training data and RDS.
+- **Logs:** optimizer task log group, Glue job logs (`/aws-glue/jobs/*`, KMS via the security configuration), export Lambda log group → Splunk subscription when enabled.
+- **Validate:** a failed Glue job and a failing DQ rule alarm; one `run_id` is traceable API → SQS → dispatcher → Step Functions → ECS task → publisher → RDS.
+
+### Step 11 — Backup & DR (v4: small change)
+- **backup:** selection unchanged (RDS instance, `results`, `approved-worm`, `models`, `training-data`, `lakehouse`); `uploads` is versioned but not in AWS Backup (inputs are kept with the run evidence by the optimizer) [ASM]; `glue-assets` is rebuilt from Git. Glue Data Catalog definitions are in Terraform (re-creatable).
+- **Validate:** restore drill unchanged; Delta tables in `lakehouse` restorable from the backup + versioning.
+
+### Step 12 — CI/CD pipelines + GitHub Environments/variables (v4)
+- `api-ci`, `ui-ci`, `training-ci`, `publisher-ci`, `terraform`, `model-governance`, `repo-checks`: unchanged.
+- **`optimizer-ci`:** builds the **ECS** image `mmm/optimizer` (same `_python-service-ci` flow, folder `apps/optimizer` [ASM, was `apps/sagemaker-optimizer`]).
+- **`deploy.yml`:** component `optimizer` = register a new revision of `mmm-<env>-optimizer` from `ecs/<env>/optimizer.json` with the promoted digest, write the ARN to SSM `ecs/optimizer_task_definition`, rollback = previous revision; the dev/staging dry run still goes through the queue (now an ECS task); component `glue` = upload `data/glue/` to `glue-assets/scripts/<version>/` and update the job script locations (staging / prod on release tags).
+- **New `glue.yml`** (replaces `databricks.yml`): on PRs touching `data/glue/` – lint + unit tests (pytest with a local Spark / `aws-glue-libs` image [ASM]); on merge to main – upload to dev.
+- **Remove:** `databricks.yml`, GitHub variable `DATABRICKS_CLIENT_ID`, `setup-github.ps1 -DatabricksClientId`.
+- **GitHub Environment variables:** add **`OPTIMIZER_TASK_FAMILY`**, **`OPTIMIZER_TASK_PARAM`**, **`GLUE_ASSETS_BUCKET`**, `UPLOADS_BUCKET` (dry run); remove `SAGEMAKER_IMAGE_PARAM_PREFIX` for the optimizer (training keeps it); keep the rest.
+- **Validate:** merge to main deploys the optimizer task revision and the Glue scripts to dev incl. the queued dry run; rollback of the optimizer revision tested in staging.
+
+### Step 13 — Promote the platform to staging then prod (unchanged)
+- Same modules; sizing (RDS class, `max_concurrent_runs`, optimizer task size, Fargate quota, Glue workers, SageMaker training instances, task counts), AZ count, approvals, vault lock, cross-region copy differ.
+
+### Step 14 — Data & ML platform (Databricks export + AWS Glue + SageMaker training + registry + RDS results + drift) (v4)
+> Everything here stays behind `enable_data_platform`. A **named WBD approver** authorizes model promotion.
+- **Databricks export Lambda `mmm-<env>-databricks-export`** (DevOps-owned generic code, like the dispatcher [ASM]; Python, in the VPC, `lambda` SG): action `start` → OAuth M2M token from `databricks/export-sp` → `POST /api/2.1/jobs/run-now` (job id per BU from SSM, parameters `business_unit`, `export_date`, `target_uri = s3://<landing>/raw/databricks/<bu>/<export_date>/`); action `status` → `GET /api/2.1/jobs/runs/get`; on success writes `_manifest.json` (tables, row counts, run id). The **export job itself runs in WBD Databricks** and writes Parquet to our landing prefix through a Unity Catalog external location backed by the `databricks-access` IAM role (write on `raw/databricks/*` only) [ASM].
+- **Alternative [ASK]:** the Lambda pulls the data itself (Databricks SQL Statement Execution API, `EXTERNAL_LINKS`) – no cross-account role, but limited by the Lambda 15-minute / memory limits for 3+ years of history.
+- **AWS Glue (`modules/glue`):** Glue 5.0 Spark jobs with `--datalake-formats delta`, job bookmarks on, continuous logging, security configuration (S3 + bookmarks KMS `s3`, CloudWatch KMS `logs`), `NETWORK` connection in private-app (`glue` SG) for every job, **JDBC connection to RDS Proxy** (`mmm_etl`, secret `rds/etl`) for `export-rds`; Data Catalog databases `mmm_<env>_bronze`, `_silver`, `_gold`; jobs `mmm-<env>-bronze`, `-silver` (+ **Glue Data Quality** ruleset evaluated in the job; failure stops the refresh), `-gold` (adstock & saturation, per-BU tables), `-export-training` (Parquet + `metadata.json` to `training-data/<bu>/<refresh_id>/`), `-export-rds` (Gold reference tables to RDS), `-export-monitor` (latest features to `lakehouse/monitoring/<bu>/<date>/`). Worker type `G.1X`, 2 / 5 / 10 workers dev / stg / prd [ASM], timeout 120 min. Scripts by the data engineers in `data/glue/`, contract in `data/README.md`. Per-BU partitions; per-BU KMS keys on `landing`, `lakehouse`, `training-data` unchanged.
+- **Lake Formation [ASK]:** not used by default (IAM role + bucket policies + per-BU KMS); turn on if WBD requires table-level grants.
+- **Model refresh `mmm-<env>-model-refresh` (v4 states):** `Init` → `GetTrainingImage` → **`StartDatabricksExport`** (Lambda `start`) → `WaitForExport` / **`GetExportStatus`** (Lambda `status`, 60 s loop, same retry pattern as v3) → `ExportDone` (Choice) → **`RunBronze` → `RunSilver` → `RunGold`** (`glue:startJobRun.sync`, arguments `--business_unit`, `--refresh_id`) → **`Parallel`: `ExportTrainingData` + `ExportToRds`** (Glue .sync) → `TrainModel` → `EvaluateModel` → **`PublishModelResults`** (results publisher, event `model_results`: predictions, lift, evaluation from `models/evaluation/<bu>/<refresh_id>/` → RDS; failure fails the execution and alarms) → `RegisterModel` → `RefreshComplete`. Remove `StartDatabricksJob`, `GetDatabricksRun`, write-back states and the EventBridge connection.
+- **Model monitor `mmm-<env>-model-monitor`:** export step = **Glue `export-monitor`** (.sync) instead of the Databricks job with `purpose = monitor`; `CheckDrift`, `ModelDrift` metric, alarm, optional `mmm.refresh` unchanged.
+- **databricks-access:** Unity Catalog IAM role trusted by the WBD Databricks account, **write only on `landing/raw/databricks/*`** + landing / per-BU KMS; remove lakehouse, training-data, `models/evaluation/*`, `lakehouse/monitoring/*` access; PrivateLink (optional) unchanged.
+- **Unchanged:** training / evaluation roles (drift reads `lakehouse/monitoring/*` written by Glue), model package groups `mmm-<env>-<bu>`, Scheduler per BU + `mmm.refresh` rule, `model-governance.yml` (thresholds, approval, curves + baseline + `approval.json`), `data/model-thresholds.yaml`.
+- **Validate:** a refresh exports from Databricks into `raw/databricks/<bu>/<date>/`, Glue builds Bronze → Silver (DQ pass) → Gold, training data and RDS reference tables are written, SageMaker trains / evaluates, predictions + lift + evaluation appear in RDS, the model is registered; a failing DQ rule stops the refresh; a drift check reads the Glue monitor export.
+
+---
+
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2
+
+Unchanged gate, with one open point: the slide puts the **explanation tool on every run** – if WBD wants
+it in Release 1, the GenAI gateway (Step 15) moves before the gate and needs the data-egress approval (or
+Bedrock-hosted models) first [ASK]. Default: Release 1 runs without GenAI (`enable_genai = false`); the
+API skips the explanation when GenAI is off.
+
+---
+
+### Step 15 — Release 2: GenAI (v4: small change)
+- Unchanged gateway: LangGraph tools inside `mmm-api`; private API Gateway + proxy Lambda (one for all providers) to OpenAI / Anthropic / Google; Bedrock Guardrail (`ApplyGuardrail`) on every prompt and answer; behind `enable_genai`.
+- **(v4)** The explanation tool is called after **every** completed run: token quotas sized for runs × tokens per explanation per BU [ASM: 5,000 tokens per run], gateway throttling / reserved concurrency sized for peak runs, GenAI token dashboard per run type; explanation failures must not fail the run (the API shows the result without the explanation).
+
+### Step 16 — Handover & ongoing operations (v4)
+- Runbooks changed: `model-refresh-failed` (+ Databricks export, Glue layers, DQ failure, RDS export), `optimization-run-failed` (ECS task stopped reasons, capacity, logs instead of SageMaker), `scale-planning-season` (+ Fargate vCPU quota, optimizer task size, Glue workers), `rotation` (+ Databricks export SP secret, `rds/etl`), `deploy` / `rollback` (optimizer task revision, Glue script version), `model-drift` (monitor export from Glue).
+- Removed: **`write-back-failed`**. New: **`glue-job-failed`** (re-run one layer with the same `refresh_id`, bookmarks, DQ results), **`databricks-export-failed`** (SP / IP access list / job errors).
+- Ongoing: monthly image patching (incl. `mmm/optimizer`), Glue version upgrades, weekly vulnerability fixes, nightly drift (Terraform), quarterly access + restore tests.
+
+---
+
+## 7. Environment variables — quick reference (v4)
+
+**GitHub (per Environment, non-secret):** see Step 12 (`OPTIMIZER_TASK_FAMILY`, `OPTIMIZER_TASK_PARAM`, `GLUE_ASSETS_BUCKET`, `UPLOADS_BUCKET` new; `DATABRICKS_CLIENT_ID` removed). **No AWS keys, no app secrets.**
+**Secrets Manager:** `mmm/<env>/api/db`, `rds/proxy`, `rds/migrate`, **`rds/etl`**, `okta/alb-client`, **`databricks/export-sp`**, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`.
+**SSM:** `/mmm/<env>/genai_enabled`, `databricks/host`, **`databricks/export_job_ids`**, `images/sagemaker-training`, **`ecs/optimizer_task_definition`**, `optimization/max_concurrent_runs`, `okta/issuer`, `genai/token_quota/<bu>`.
+**ECS API task env (IaC, non-secret):** `APP_ENV, AWS_REGION, DB_HOST, DB_PORT, DB_NAME, DB_USER, RESULTS_BUCKET, MODELS_BUCKET, EXPORTS_BUCKET, APPROVED_BUCKET, UPLOADS_BUCKET, SSM_PREFIX, OPTIMIZATION_QUEUE_URL, OPTIMIZATION_STATE_MACHINE_ARN, ALB_ARN, OKTA_ISSUER` (+ `LLM_GATEWAY_URL` with GenAI).
+**ECS optimizer task env (per run, from Step Functions):** `RUN_ID, BUSINESS_UNIT, RUN_TYPE, INPUT_S3_URI, OUTPUT_S3_URI, DRY_RUN` + static `MODELS_BUCKET, MODEL_PACKAGE_GROUP_PREFIX, AWS_REGION`.
+
+---
+
+## 8. Security, authorization & OIDC (v4)
+
+- Keyless CI/CD (GitHub OIDC → per-env roles bound to `repo:<org>/<repo>:environment:<env>`).
+- Engineers: IAM Identity Center + permission sets. **App users: WBD Okta (OIDC at the ALB, MFA in Okta) → `groups` claim → app RBAC → PostgreSQL RLS per BU** (unchanged).
+- Workloads: per-service ECS task roles (**+ optimizer**), dispatcher / publisher / **Databricks export** Lambda roles, **Glue role**, per-state-machine roles, SageMaker training roles — all with the permission boundary. Only the API can send to the run queue; only the dispatcher can start optimization executions; only the optimization state machine can run the optimizer task; only Glue (`mmm_etl`) and the publisher write to RDS besides the API.
+- Databricks: the WBD workspace reaches our account only through the Unity Catalog role (write on `raw/databricks/*`); our Lambda reaches Databricks with a dedicated service principal (secret in Secrets Manager, rotated).
+- Encryption: KMS everywhere (RDS, S3, SQS, logs, secrets, Glue bookmarks + logs, ECS ephemeral storage AWS-managed); TLS 1.2+. WORM for approved scenarios and training data. User uploads: TLS-only, per-BU key, optional malware scan.
+- Pipeline gates unchanged (secret scan, SAST, Trivy, Checkov, actionlint; gaps: SBOM, DAST, cosign).
+
+---
+
+## 9. Deployment strategy & rollback (v4)
+
+- ECS (UI, API): rolling update + circuit breaker. **Optimizer: new task-definition revision + SSM pointer; rollback = previous revision** (running tasks finish on their revision).
+- Training image: SSM pointer; publisher: Lambda alias; dispatcher + Databricks export Lambda: Terraform (revert PR + apply).
+- **Glue scripts:** versioned prefix `scripts/<version>/`; rollback = point the jobs back to the previous version.
+- DB: Alembic migrations as a one-off task; RDS DB snapshot before prod migrations (incl. the new model-result / Gold tables).
+- Models: approve / re-approve previous version. Infra: revert PR + apply. GenAI: flag off. **Practise every rollback in staging.**
+
+---
+
+## 10. Release tagging — unchanged (`sha-<7>` dev, `vX.Y.Z-rcN` staging, `vX.Y.Z` prod; Glue scripts follow the same tags).
+
+---
+
+## 11. Per-step validation checklist (v4 additions)
+
+Everything from v3 except write-back, plus: Databricks export into `raw/databricks/` per BU; Glue Bronze →
+Silver (DQ) → Gold → exports end-to-end in dev; Gold reference tables + model results in RDS; optimizer ECS
+task start time and a typical run < 2 min; queue load test (150 planners → at most `max_concurrent_runs`
+tasks, none lost, Fargate quota not exceeded); future-titles upload + forecast run; upload malware scan (if
+enabled); explanation on every run when GenAI is on (run still succeeds when the LLM call fails).
+
+---
+
+## 12. Order-of-operations summary
+
+**Add the glue module, change databricks-access / network / ecr / sagemaker → dev: network (glue endpoint +
+SG) → secrets (Databricks export SP, rds/etl) → buckets (uploads, glue-assets) → optimizer ECS task + state
+machine RunTask.sync (remove the SageMaker optimization job) → API role / env (uploads) → monitoring →
+deploy.yml / optimizer-ci / glue.yml (remove databricks.yml) → staging → prod → data platform: Databricks
+export Lambda, Glue jobs, model-refresh states (export → Glue → train → evaluate → publish to RDS →
+register), model-monitor export via Glue → 🚦 RELEASE 1 → Release 2 GenAI (explanation on every run) →
+handover (updated runbooks).** One step at a time; validate each; keep all three environments on identical code.

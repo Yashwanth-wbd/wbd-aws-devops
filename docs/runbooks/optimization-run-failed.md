@@ -3,9 +3,11 @@
 An optimization run is asynchronous: the API sends a request to the SQS queue
 `mmm-<env>-optimization-requests`; the dispatcher Lambda `mmm-<env>-run-dispatcher` starts Step
 Functions `mmm-<env>-optimization` (execution name = `run_id`) while fewer than
-`max_concurrent_runs` runs are active; the state machine runs a SageMaker Processing job and calls
-the results publisher Lambda (alias `live`) to write the summary into PostgreSQL. Use this runbook
-when a run stays queued or failed in the UI, or one of `mmm-<env>-optimization-failed`,
+`max_concurrent_runs` runs are active; the state machine runs the optimizer as a one-off ECS
+Fargate task (`ecs:runTask.sync`, revision from SSM `/mmm/<env_short>/ecs/optimizer_task_definition`;
+`run_type` `optimize` or `forecast`) and calls the results publisher Lambda (alias `live`) to write
+the summary into PostgreSQL. Use this runbook when a run stays queued or failed in the UI, or one
+of `mmm-<env>-optimization-failed`, `optimizer-task-not-started`,
 `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`,
 `runs-oldest-request`, `runs-expired-requests` fires.
 
@@ -59,23 +61,25 @@ gives the ARN.
 
 | Step (state machine) | Logs / resources |
 |---|---|
-| GetOptimizerImage | SSM `/mmm/<env_short>/images/sagemaker-optimizer` – must be `<registry>/<repo>@<digest>`, not `:unset` |
-| SageMaker Processing | CloudWatch `/aws/sagemaker/ProcessingJobs`, job name `mmm-<env_short>-opt-<run_id>`; console → SageMaker → Processing jobs |
+| GetOptimizerTask | SSM `/mmm/<env_short>/ecs/optimizer_task_definition` – must be a task definition ARN, not `mmm-<env_short>-optimizer:unset` (nothing released yet) |
+| RunOptimizer | ECS task in cluster `mmm-<env_short>-ecs` (tag / started-by = execution), log group `/ecs/mmm-<env_short>/optimizer`; `aws ecs describe-tasks` gives `stoppedReason` and the container exit code |
 | PublishResult / PublishFailure | Lambda `mmm-<env>-results-publisher`, log group `/aws/lambda/mmm-<env>-results-publisher` (alias `live`) |
-| Input missing | S3 `s3://<results>/runs/<run_id>/input/` – API must upload before it queues the request |
+| Input missing | S3 `s3://<uploads>/<bu>/runs/<run_id>/input/` – the browser upload (presigned PUT) must finish before the API queues the request |
 
 Splunk (when enabled): same `run_id` across `/ecs/mmm-<env>/api`, `sfn-optimization`, publisher and
-SageMaker job logs.
+optimizer task logs.
 
 ## 3. Common causes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `States.TaskFailed` on SageMaker | Bad image, OOM, bad input JSON, missing curves | Processing job log; fix input or redeploy optimizer image ([deploy.md](deploy.md)) |
+| `States.TaskFailed` on RunOptimizer, container exit code ≠ 0 | Bad image, bad input, missing curves | Optimizer task log; fix input or redeploy the optimizer ([deploy.md](deploy.md)) |
+| `stoppedReason` `OutOfMemoryError` / ephemeral storage full | Run larger than the task size | Raise `optimizer_memory` / `optimizer_ephemeral_storage_gib` (PR) |
+| `optimizer-task-not-started` (`TaskFailedToStart`: `CannotPullContainerError`, `ResourceInitializationError`) | Image missing in ECR, ECR / logs endpoint or secret unreachable | [ecs-task-stuck.md](ecs-task-stuck.md) |
 | Publisher Lambda error | DB/proxy unreachable, bad S3 output path, code bug | Publisher log; [ecs-task-stuck.md](ecs-task-stuck.md) if VPC-related |
 | `AccessDenied` on S3 curves | Model not promoted for that BU | [model-rollback.md](model-rollback.md) or promote the approved package |
-| Stuck `RUNNING` | SageMaker quota or capacity | Service quotas; retry after capacity returns |
-| Deploy step "Optimization dry run" red (execution `dryrun-<run>-<attempt>`) | The new optimizer image or publisher does not handle `DRY_RUN` / `dry_run`, or one of the causes above | The release was rolled back automatically; look at the dry-run execution like any other run, fix, release again |
+| Stuck `RUNNING` / RunTask retries | Fargate vCPU quota or capacity in the AZs | Service quotas (Fargate On-Demand vCPU); retry after capacity returns |
+| Deploy step "Optimization dry run" red (execution `dryrun-<run>-<attempt>`) | The new optimizer task or publisher does not handle `DRY_RUN` / `dry_run`, or one of the causes above | The release was rolled back automatically; look at the dry-run execution like any other run, fix, release again |
 | Dry run `not started after 600s` | All run slots busy, or the dispatcher fails | Section 0 |
 
 ## 4. Re-run
@@ -87,15 +91,15 @@ SageMaker job logs.
 
    ```bash
    aws sqs send-message --queue-url "$OPTIMIZATION_QUEUE_URL" \
-     --message-body '{"run_id":"manual-<yyyymmddhhmmss>","business_unit":"streaming","input_s3_uri":"s3://<results-bucket>/runs/<uuid>/input/request.json","requested_by":"<you>"}'
+     --message-body '{"run_id":"manual-<yyyymmddhhmmss>","business_unit":"streaming","run_type":"optimize","input_s3_uri":"s3://<uploads-bucket>/streaming/runs/manual-<yyyymmddhhmmss>/input/","requested_by":"<you>"}'
    ```
 
 3. Watch `DescribeExecution` until `SUCCEEDED` or investigate the next failure.
 
-Do not change a running execution's SageMaker job from the console; cancel with
-`aws stepfunctions stop-execution` if the run must be abandoned.
+Do not stop a running execution's optimizer task from the ECS console; cancel with
+`aws stepfunctions stop-execution` (it stops the task) if the run must be abandoned.
 
 ## 5. After
 
-If the failure was a bad release, roll back optimizer image and/or publisher ([rollback.md](rollback.md)).
+If the failure was a bad release, roll back the optimizer task pointer and/or publisher ([rollback.md](rollback.md)).
 Record the incident (run id, execution ARN, root cause) in the ticket.

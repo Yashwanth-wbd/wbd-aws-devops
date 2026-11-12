@@ -2,7 +2,7 @@
 
 Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in logs.
 
-**Status:** implemented in Step 9.
+**Status:** implemented in Step 9; v4 adds the optimizer task, Glue and Databricks export monitoring.
 
 ## What it creates
 
@@ -29,10 +29,10 @@ Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in 
 | `runs-*` | From the `run-queue` module: oldest request > 15 min, DLQ not empty, dispatcher errors / throttles, expired requests | `runbooks/optimization-run-failed.md` |
 | `model-drift-<bu>`, `model-monitor-failed` | Drift score above `model_drift_threshold` (stack `data.tf`); drift check failed (`step-functions` module) | `runbooks/model-drift.md` |
 | `whatif-p95` | What-if p95 > 10 s in 3 of 5 minutes | API logs and CPU (what-if runs in the API) |
-| `optimization-runtime-max` | An optimization execution took > 10 minutes (the large-run limit) | SageMaker job log; `optimizer_instance_type` |
-| `optimization-standard-p95` | Standard runs p95 > 2 minutes (app metric, below) | SageMaker job log; `optimizer_instance_type` |
+| `optimization-runtime-max` | An optimization execution took > 10 minutes (the large-run limit) | Optimizer task log (`/ecs/<prefix>/optimizer`); `optimizer_cpu` / `optimizer_memory` |
+| `optimization-standard-p95` | Standard runs p95 > 2 minutes (app metric, below) | Optimizer task log; `optimizer_cpu` / `optimizer_memory` |
 | `model-refresh-overdue` | No successful model refresh for 7 days (data platform with the scheduled refresh on) | `runbooks/model-refresh-failed.md` |
-| `<state machine>-failed`, `<state machine>-throttled` | From the `step-functions` module | Failed execution in the console, then the SageMaker job log; throttling: Step Functions quota |
+| `<state machine>-failed`, `<state machine>-throttled` | From the `step-functions` module | Failed execution in the console, then the failed step's log (optimizer task, Glue job, export Lambda, SageMaker job); throttling: Step Functions quota |
 | `<function>-errors` | From the `lambda-function` module | Function log |
 | `llm-gateway-5xx`, `-4xx`, `-latency-p95`; `genai-tokens-<bu>` | From the `llm-gateway` module; token quota alarms (80 % of `genai_token_quotas`) in the stack's `genai.tf` | `runbooks/genai.md` |
 | `cert-expiry-<name>` | ACM certificate expires in < 30 days | The ACM renewal status: usually a missing DNS validation record |
@@ -44,6 +44,9 @@ Event alerts:
 |---|---|
 | `ecs-deployment-failed` | A deployment failed and the circuit breaker rolled it back |
 | `ecs-service-error` | ECS cannot start or place tasks, for example the image pull or a secret failed |
+| `optimizer-task-not-started` | An optimizer task (`family:<optimizer_task_family>`) stopped with `TaskFailedToStart` (image pull, secret, capacity) - `runbooks/optimization-run-failed.md` |
+| `glue-job-failed` | A Glue job in `glue_job_names` ended `FAILED`, `TIMEOUT` or `ERROR` (data platform) - `runbooks/glue-job-failed.md` |
+| `glue-data-quality-failed` | A Glue Data Quality evaluation failed (Silver ruleset; data platform) - `runbooks/glue-job-failed.md` |
 | `guardduty-high` | A GuardDuty finding with severity ≥ 7 (`enable_guardduty_alerts`). GuardDuty itself is WBD's baseline. |
 | `breakglass-used` | Console sign-in or change by the `BreakGlass` permission set (`enable_breakglass_alert`, prod; API calls need the WBD CloudTrail trail). Step 15 |
 
@@ -52,7 +55,8 @@ failures come from the `backup` module (EventBridge `backup-job-failed`). Model 
 created, approved or rejected (failed `data/model-thresholds.yaml`, rollback) come from the
 `sagemaker` module (EventBridge `model-package-state`, data platform).
 
-Not separate alarms on purpose: SageMaker job failures fail the state machine (`-failed`), and the
+Not separate alarms on purpose: optimizer task, Glue job and SageMaker job failures fail the state
+machine (`-failed`; the Glue rules above only add the job name), and the
 results publisher is invoked synchronously by Step Functions (retries, then `PublishFailure`), so
 it has no dead-letter queue. Run requests that cannot be started end in the run queue's DLQ
 (`runs-dlq-not-empty`).
@@ -63,8 +67,9 @@ it has no dead-letter queue. Run requests that cannot be started end in the run 
 |---|---|
 | `<prefix>-platform` | The alarm list, requests and 5xx (UI + API), ECS tasks, RDS CPU / connections, Step Functions, Lambda, regional WAF |
 | `<prefix>-api-ui` | API requests / 4xx / 5xx and latency, UI requests / 5xx, ECS CPU and memory, what-if p95 |
-| `<prefix>-optimization` | Executions (started, succeeded, failed, timed out, throttled), execution time, run duration by size, results publisher, run queue (waiting, DLQ, oldest request, running runs, expired requests) |
+| `<prefix>-optimization` | Executions (started, succeeded, failed, timed out, throttled), execution time, run duration by size, optimizer task CPU / memory / running tasks (Container Insights), results publisher, run queue (waiting, DLQ, oldest request, running runs, expired requests) |
 | `<prefix>-training` | Model-refresh and model-monitor executions, drift score per business unit (data platform) |
+| `<prefix>-data-pipeline` | Glue job elapsed time, failed tasks and records read per job, Databricks export Lambda invocations / errors / duration, model-refresh executions (data platform) |
 | `<prefix>-rds` | CPU, connections, free storage, memory, read / write latency, IOPS, RDS Proxy connections |
 | `<prefix>-cost` | Estimated charges, total and by service (us-east-1 billing metrics; needs "Receive Billing Alerts" on in the account) |
 | `<prefix>-genai` | LLM gateway requests, 4xx / 5xx, latency, tokens per BU (`enable_genai`) |
@@ -126,6 +131,8 @@ aws application-signals start-discovery
 | `publisher_function_name`, `llm_gateway_api_name`, `genai_business_units` | `null` / `null` / `[]` | Optimization and GenAI dashboards |
 | `run_queue_name`, `run_dlq_name` | `null` | Run queue widgets on the optimization dashboard |
 | `drift_business_units` | `[]` | Drift score widget on the training dashboard |
+| `optimizer_task_family` | `null` | Optimizer widgets and the `optimizer-task-not-started` rule |
+| `glue_job_names`, `databricks_export_function_name` | `[]`, `null` | Glue rules and the data-pipeline dashboard |
 | `rds_max_connections`, `rds_free_storage_gib` | `null`, `10` | Connections alarm (max_connections of the class) and free-storage alarm |
 | `model_refresh_overdue_days` | `null` | Model refresh overdue alarm (data platform) |
 | `ecs_cluster_name`, `ecs_service_names` | – | |

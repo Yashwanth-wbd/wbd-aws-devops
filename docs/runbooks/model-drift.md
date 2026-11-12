@@ -1,8 +1,9 @@
 # Runbook: model drift
 
 The model-monitor state machine `mmm-<env>-model-monitor` runs per business unit (schedule
-`mmm-<env_short>-drift-<bu>` when `enable_model_monitor_schedule = true`, or by hand). It exports
-recent features from Databricks, runs the training image with argument `drift` against
+`mmm-<env_short>-drift-<bu>` when `enable_model_monitor_schedule = true`, or by hand). It runs the
+Databricks export (`purpose = monitor`) and the Glue Bronze → Silver → Gold → export-monitor jobs
+for fresh features, runs the training image with argument `drift` against
 `s3://<models>/baseline/<bu>/` (published on approval), and puts metric `MMM/Models` `ModelDrift`
 (dimensions `BusinessUnit`, `Check=overall`). Use this runbook when:
 
@@ -35,7 +36,8 @@ aws s3 cp s3://<models>/monitoring/<bu>/<yyyy-mm-dd>/drift.json -    # {"score":
 
 | Failing state | Likely cause | Fix |
 |---|---|---|
-| `StartDatabricksExport` / `ExportFailed` | Databricks job id, connection secret, or the job does not support `purpose = monitor` | As in [model-refresh-failed.md](model-refresh-failed.md); data team adds the monitor mode |
+| `MonitorStartExport` / `MonitorExportFailed` | Export job id, service principal secret, or the job does not support `purpose = monitor` | [databricks-export-failed.md](databricks-export-failed.md); WBD adds the monitor mode |
+| `MonitorBronze` / `MonitorSilver` / `MonitorGold` / `ExportMonitorFeatures` | Glue job or Silver Data Quality failed | [glue-job-failed.md](glue-job-failed.md) |
 | `CheckDrift` | `models/baseline/<bu>/` empty (no approved version with a baseline yet), image without the `drift` entrypoint, no features in `lakehouse/monitoring/<bu>/<date>/` | Approve a version that has `baseline/` ([model-rollback.md](model-rollback.md) shows the promote flow); training team adds the entrypoint; keep the schedule off meanwhile (`enable_model_monitor_schedule = false`) |
 | `ReadDrift` | `drift.json` missing or not JSON | Training team fixes the output (contract in [data/README.md](../../data/README.md)) |
 | `PublishDrift` | `score` missing or not a number | Same |

@@ -88,7 +88,7 @@ locals {
     },
     !local.has_optimization ? {} : {
       optimization-runtime-max = {
-        description = "An optimization execution took > ${var.optimization_max_minutes} minutes (large-run limit) - check the SageMaker job size and optimizer_instance_type"
+        description = "An optimization execution took > ${var.optimization_max_minutes} minutes (large-run limit) - check the optimizer task log and optimizer_cpu / optimizer_memory"
         namespace   = "AWS/States"
         metric      = "ExecutionTime"
         dimensions  = { StateMachineArn = local.optimization_sm }

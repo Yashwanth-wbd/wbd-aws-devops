@@ -3,8 +3,9 @@
 One Fargate service, or one run-on-demand task definition: task role, log group, task
 definition, optional ECS service, and optional autoscaling.
 
-**Status:** implemented in Step 7. Used for `api`, `ui`, `migrate` (task only) and
-`platform-check` (task only).
+**Status:** implemented in Step 7. Used for `api`, `ui`, `migrate` (task only),
+`platform-check` (task only) and, since v4, `optimizer` (task only; started per run by the
+optimization state machine with `ecs:runTask.sync`).
 
 ## What it creates
 
@@ -59,6 +60,7 @@ on (the CloudWatch agent default is `latest`; pin a version).
 | `task_role_policy_json` | – | Least-privilege policy for this service |
 | `image`, `command`, `entry_point`, `user` | –, `null`, `null`, `1000:1000` | Container |
 | `cpu`, `memory` | `512`, `1024` | Fargate size |
+| `ephemeral_storage_gib` | `null` | 21-200 GiB task storage (Fargate default 20 GiB when null); the optimizer task uses it |
 | `container_port` | `null` | Set for the API and UI (8080) |
 | `environment` | `{}` | Plain environment variables |
 | `secrets` | `{}` | Name → Secrets Manager or SSM ARN (injected by the execution role) |

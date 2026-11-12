@@ -1,0 +1,11 @@
+{
+  "//": "Merged over the Terraform task definition mmm-dev-optimizer by scripts/ecs-deploy.sh; deploy.yml writes the new revision ARN to /mmm/<env>/ecs/optimizer_task_definition. Only app-owned fields of the 'app' container go here. The state machine sets RUN_ID, BUSINESS_UNIT, RUN_TYPE, INPUT_S3_URI, OUTPUT_S3_URI, CURVES_S3_URI and DRY_RUN per run.",
+  "family": "mmm-dev-optimizer",
+  "repository": "mmm/optimizer",
+  "container": {
+    "//command": "add actual value - start command of apps/optimizer (Model Summarizer -> Optimizer -> Simulation; data science team)",
+    "command": ["python", "-m", "optimizer.main"],
+    "entryPoint": null,
+    "stopTimeout": 120
+  }
+}

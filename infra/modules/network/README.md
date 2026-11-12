@@ -53,7 +53,7 @@ If WBD sends all internet traffic through a central egress firewall, set
   layers are stored in S3, so image pulls do not go through NAT.
 - **Interface endpoints (`interface_endpoints`):** `ecr.api`, `ecr.dkr`, `sts`, `secretsmanager`,
   `ssm`, `ssmmessages` (ECS Exec), `kms`, `logs`, `monitoring`, `xray`, `states` (Step Functions),
-  `sagemaker.api`, `sqs` (optimization run queue). With GenAI (`additional_interface_endpoints`): `execute-api`, `bedrock-runtime`.
+  `sagemaker.api`, `sqs` (optimization run queue). Through `additional_interface_endpoints`: `glue` (data platform), `execute-api`, `bedrock-runtime` (GenAI).
   - They sit in the endpoint subnets with private DNS, so the AWS SDK uses them automatically.
   - Cost is about USD 7.3 per endpoint per AZ per month, so around USD 175 a month in dev (12 endpoints × 2 AZs).
 
@@ -73,6 +73,9 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `rds` | 5432 from `rds_proxy` | – | RDS PostgreSQL instance |
 | `sagemaker` | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | SageMaker jobs (no internet) |
 | `lambda` | none | 443 → `endpoints`, 443 → S3 prefix list | results-publisher and run-dispatcher Lambdas |
+| `optimizer` | none | 443 → `endpoints`, 443 → S3 prefix list | Optimizer ECS task (one per run; with `data_clients` only if the app needs the DB) |
+| `glue` (optional) | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | Glue job ENIs (Spark driver ↔ executors), with `data_clients` for export-rds |
+| `databricks_export` (optional) | none | 443 → anywhere (Databricks workspace via NAT, or PrivateLink) | Databricks export Lambda |
 | `genai` (optional) | none | 443 → anywhere (approved LLM providers) | LLM gateway proxy Lambda |
 | `resolver` (optional) | – | 53 TCP/UDP → each WBD DNS IP | this module |
 
@@ -117,7 +120,8 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `ui_port` | number | `8080` | UI container port |
 | `alb_ingress_cidrs` | list(string) | `["0.0.0.0/0"]` | Ranges allowed to reach the ALB |
 | `create_genai_security_group` | bool | `false` | Release 2: creates `genai` (no inbound, HTTPS out) |
-| `additional_interface_endpoints` | list(string) | `[]` | Extra endpoint suffixes (Release 2 adds `execute-api` and `bedrock-runtime`) |
+| `create_data_platform_security_groups` | bool | `false` | Step 13: creates `glue` and `databricks_export` |
+| `additional_interface_endpoints` | list(string) | `[]` | Extra endpoint suffixes (data platform adds `glue`; Release 2 adds `execute-api` and `bedrock-runtime`) |
 | `flow_logs_retention_days` | number | `365` | Flow log retention |
 | `logs_kms_key_arn` | string | – | `module.kms.key_arns["logs"]` |
 | `permissions_boundary_arn` | string | – | `module.permission_boundary.policy_arn` |

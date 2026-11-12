@@ -19,7 +19,7 @@ output "public_subnet_ids" {
 }
 
 output "private_app_subnet_ids" {
-  description = "Private-app subnets (ECS tasks, SageMaker jobs, Lambda)."
+  description = "Private-app subnets (ECS tasks incl. the optimizer, SageMaker jobs, Glue jobs, Lambda)."
   value       = [for az in local.azs : aws_subnet.app[az].id]
 }
 
@@ -49,7 +49,7 @@ output "nat_public_ips" {
 }
 
 output "security_group_ids" {
-  description = "Security group ID per role: endpoints, alb, api, ui, tasks, data_clients, rds_proxy, rds, sagemaker, lambda (+ resolver, genai when enabled)."
+  description = "Security group ID per role: endpoints, alb, api, ui, tasks, data_clients, rds_proxy, rds, sagemaker, lambda, optimizer (+ resolver, genai, glue, databricks_export when enabled)."
   value       = { for k, sg in aws_security_group.this : k => sg.id }
 }
 

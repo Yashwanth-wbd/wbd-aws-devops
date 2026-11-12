@@ -1,9 +1,11 @@
 """One-time database setup, run as the migrate task when enable_db_bootstrap = true.
 
 Connects to RDS Proxy as the admin user with an IAM token and creates the migration and app
-users. Their passwords are generated here and written only to their Secrets Manager secrets
-(RDS Proxy logs in to the database with them; clients keep using IAM tokens).
+users, and with the data platform (ETL_SECRET_ID set) the Glue export-rds user mmm_etl. Their
+passwords are generated here and written only to their Secrets Manager secrets (RDS Proxy logs
+in to the database with them; clients keep using IAM tokens).
 Safe to run again: existing users are kept and their password is re-synced from the secret.
+Table grants for mmm_etl (reference tables only) belong to the app migrations.
 """
 import json
 import os
@@ -29,6 +31,8 @@ users = {
     "mmm_migrator": os.environ["MIGRATE_SECRET_ID"],
     "mmm_app": os.environ["APP_SECRET_ID"],
 }
+if os.environ.get("ETL_SECRET_ID"):
+    users["mmm_etl"] = os.environ["ETL_SECRET_ID"]
 
 sm = boto3.client("secretsmanager", region_name=region)
 
@@ -67,6 +71,7 @@ with psycopg.connect(host=host, port=5432, dbname=db_name, user=admin_user, pass
     # PostgreSQL 16: the admin must be able to SET ROLE to the new owner.
     cur.execute(sql.SQL("GRANT {} TO CURRENT_USER WITH SET TRUE").format(sql.Identifier("mmm_migrator")))
     cur.execute(sql.SQL("ALTER DATABASE {} OWNER TO {}").format(sql.Identifier(db_name), sql.Identifier("mmm_migrator")))
-    cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(db_name), sql.Identifier("mmm_app")))
+    for user in [u for u in users if u != "mmm_migrator"]:
+        cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(db_name), sql.Identifier(user)))
 
 print("DB BOOTSTRAP DONE")

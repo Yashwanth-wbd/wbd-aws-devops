@@ -12,9 +12,12 @@ App-owned task-definition settings, one folder per environment, one file per ser
 | `<env>/api.json` | `mmm-<env>-api` (ALB `/api/*`) | `mmm/api` |
 | `<env>/ui.json` | `mmm-<env>-ui` (ALB default route) | `mmm/ui` |
 | `<env>/migrate.json` | `mmm-<env>-migrate` (one-off task) | `mmm/api` |
+| `<env>/optimizer.json` | `mmm-<env>-optimizer` (one-off task per run, started by the optimization state machine) | `mmm/optimizer` |
 
-The optimizer and training images (`mmm/sagemaker-optimizer`, `mmm/sagemaker-training`) are SageMaker
-jobs, not ECS services; `deploy.yml` points the SSM parameters `/mmm/<env_short>/images/*` at them.
+For the optimizer, `deploy.yml` only registers the new revision and writes its ARN to SSM
+`/mmm/<env_short>/ecs/optimizer_task_definition`; the next run uses it. The training image
+(`mmm/sagemaker-training`) is a SageMaker job, not ECS; `deploy.yml` points
+`/mmm/<env_short>/images/sagemaker-training` at it.
 `sync-environments.ps1` deletes `ecs/<env>/*.json` files that no longer exist in `ecs/dev/`.
 
 ## Format

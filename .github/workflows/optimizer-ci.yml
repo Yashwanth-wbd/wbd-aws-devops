@@ -1,16 +1,17 @@
-# SageMaker Processing image of the full optimization (state machine "optimization").
+# Optimizer image (Model Summarizer -> Optimizer -> Simulation), run as a one-off ECS Fargate task
+# by the state machine "optimization" (ecs:runTask.sync).
 name: optimizer-ci
 
 on:
   pull_request:
     paths:
-      - apps/sagemaker-optimizer/**
+      - apps/optimizer/**
       - .github/workflows/optimizer-ci.yml
       - .github/workflows/_python-service-ci.yml
   push:
     branches: [main]
     paths:
-      - apps/sagemaker-optimizer/**
+      - apps/optimizer/**
       - .github/workflows/optimizer-ci.yml
       - .github/workflows/_python-service-ci.yml
   workflow_dispatch:
@@ -27,5 +28,5 @@ jobs:
   ci:
     uses: ./.github/workflows/_python-service-ci.yml
     with:
-      app_dir: apps/sagemaker-optimizer
-      repository: mmm/sagemaker-optimizer
+      app_dir: apps/optimizer
+      repository: mmm/optimizer
