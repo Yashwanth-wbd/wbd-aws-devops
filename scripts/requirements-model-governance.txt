@@ -1,3 +1,3 @@
 # scripts/model_governance.py (model-governance.yml). AWS SDK only; no training libraries.
-boto3>=1.35,<2
-PyYAML>=6,<7
+boto3>=1.43.126,<2
+PyYAML>=6.0.3,<7
