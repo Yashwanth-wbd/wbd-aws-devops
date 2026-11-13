@@ -10,7 +10,7 @@ services that use the value.
 |---|---|---|
 | RDS admin password | automatic (RDS-managed secret) | nothing to do; `terraform output rds.master_user_secret_arn` |
 | Okta ALB client secret (`mmm/<env>/okta/alb-client`) | when WBD Identity rotates it (at least yearly) | below – needs a `terraform apply` |
-| App / migration / ETL DB users (`mmm/<env>/rds/proxy`, `rds/migrate`, `rds/etl`) | every 90 days | below |
+| App / migration DB users (`mmm/<env>/rds/proxy`, `rds/migrate`) | every 90 days | below |
 | LLM provider keys (`mmm/<env>/llm/<provider>`) | when the issuer rotates (at least yearly) | below |
 | Databricks export service principal (`mmm/<env>/databricks/export-sp`) | when WBD rotates the service principal secret | below |
 | Splunk HEC token, third-party keys | when the issuer rotates them | below |
@@ -39,8 +39,7 @@ The ALB listener holds the secret, so it changes only when Terraform applies.
 1. Generate a password in the DB (DBA / migrate task): `ALTER ROLE mmm_app PASSWORD '<new>'`.
 2. `aws secretsmanager put-secret-value --secret-id mmm/<env>/rds/proxy --secret-string '{"username":"mmm_app","password":"<new>"}'`
    (RDS Proxy reads the secret; apps use IAM auth to the proxy and are not affected).
-3. Test a connection through the proxy; repeat for `rds/migrate` / `mmm_migrator` and
-   `rds/etl` / `mmm_etl` (data platform).
+3. Test a connection through the proxy; repeat for `rds/migrate` / `mmm_migrator`.
 
 ## External tokens (Splunk, third-party, LLM)
 

@@ -321,6 +321,28 @@ variable "max_queue_wait_minutes" {
   }
 }
 
+variable "publisher_timeout_seconds" {
+  description = "Timeout of the results/data publisher Lambda (optimization runs, Gold reference data, model results -> RDS). Raise it, up to 900, if reference-data loads grow."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.publisher_timeout_seconds >= 30 && var.publisher_timeout_seconds <= 900
+    error_message = "publisher_timeout_seconds must be 30-900 (Lambda maximum)."
+  }
+}
+
+variable "publisher_memory_mb" {
+  description = "Memory of the results/data publisher Lambda (MiB; CPU scales with it)."
+  type        = number
+  default     = 512
+
+  validation {
+    condition     = var.publisher_memory_mb >= 128 && var.publisher_memory_mb <= 10240
+    error_message = "publisher_memory_mb must be 128-10240."
+  }
+}
+
 # ------------------------------------------------------------------ Step 8 - Front door and sign-in
 variable "app_domain_name" {
   description = "App host name (e.g. mmm-dev.<wbd-domain>); on alb_certificate_arn, CNAME / alias to the ALB."
@@ -419,6 +441,18 @@ variable "ship_vpc_flow_logs" {
   default     = false
 }
 
+variable "enable_cloudtrail_data_events" {
+  description = "Own CloudTrail trail with S3 data events on the MMM data buckets (into the log bucket, cloudtrail/). false = the WBD organization trail already records them."
+  type        = bool
+  default     = false
+}
+
+variable "cloudtrail_data_events_include_reads" {
+  description = "Also record S3 reads (GetObject) in the data-events trail; false = writes and deletes only (much lower cost)."
+  type        = bool
+  default     = false
+}
+
 # ------------------------------------------------------------------ Step 10 - Backup and DR
 variable "dr_region" {
   description = "DR region for AWS Backup copies (must be in allowed_regions)."
@@ -513,6 +547,12 @@ variable "manage_glue_catalog_encryption" {
   description = "Set the account's Glue Data Catalog encryption (one setting per account and region; false if WBD already manages it)."
   type        = bool
   default     = true
+}
+
+variable "rds_export_retention_days" {
+  description = "Days the Gold reference-data exports (lakehouse rds-export/<bu>/<refresh_id>/) are kept after the publisher has loaded them into RDS."
+  type        = number
+  default     = 30
 }
 
 variable "evaluation_instance_type" {

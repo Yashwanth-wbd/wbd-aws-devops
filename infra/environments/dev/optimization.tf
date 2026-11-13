@@ -177,10 +177,50 @@ data "aws_iam_policy_document" "publisher" {
     }
   }
 
+  # reference_data events (model refresh): Gold reference tables exported by Glue export-rds
+  dynamic "statement" {
+    for_each = var.enable_data_platform ? [1] : []
+    content {
+      sid       = "ReadReferenceDataExport"
+      actions   = ["s3:GetObject"]
+      resources = ["${module.buckets["lakehouse"].bucket_arn}/${local.rds_export_prefix}*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_data_platform ? [1] : []
+    content {
+      sid       = "ListReferenceDataExport"
+      actions   = ["s3:ListBucket"]
+      resources = [module.buckets["lakehouse"].bucket_arn]
+
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["${local.rds_export_prefix}*"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_data_platform ? [1] : []
+    content {
+      sid       = "ReferenceDataMetrics"
+      actions   = ["cloudwatch:PutMetricData"]
+      resources = ["*"]
+
+      condition {
+        test     = "StringEquals"
+        variable = "cloudwatch:namespace"
+        values   = ["MMM/Data"]
+      }
+    }
+  }
+
   statement {
     sid       = "BucketKey"
     actions   = ["kms:Decrypt"]
-    resources = [module.kms.key_arns["s3"]]
+    resources = concat([module.kms.key_arns["s3"]], values(local.bu_key_arns))
   }
 }
 
@@ -189,9 +229,10 @@ module "publisher" {
 
   name_prefix = local.name_prefix
   name        = local.publisher_name
-  description = "Writes finished optimization runs and model results (predictions, lift, evaluation) from S3 to RDS (code shipped by deploy.yml)"
-  timeout     = 120
-  environment = {
+  description = "Results/data publisher: writes optimization runs, Gold reference data and model results (predictions, lift, evaluation) from S3 to RDS (code shipped by deploy.yml)"
+  timeout     = var.publisher_timeout_seconds
+  memory_size = var.publisher_memory_mb
+  environment = merge({
     APP_ENV        = var.environment
     DB_HOST        = module.rds.proxy_endpoint
     DB_PORT        = "5432"
@@ -199,7 +240,7 @@ module "publisher" {
     DB_USER        = "mmm_app"
     RESULTS_BUCKET = module.buckets["results"].bucket_name
     MODELS_BUCKET  = module.buckets["models"].bucket_name
-  }
+  }, var.enable_data_platform ? { LAKEHOUSE_BUCKET = module.buckets["lakehouse"].bucket_name } : {})
   policy_json = data.aws_iam_policy_document.publisher.json
 
   subnet_ids         = module.network.private_app_subnet_ids

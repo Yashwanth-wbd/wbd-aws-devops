@@ -29,8 +29,6 @@ All paths use prefix **`mmm/<env_short>/`** (for example `mmm/dev/api/db` in the
 | `mmm/<env>/thirdparty/<vendor>` | Vendor-specific JSON (e.g. API keys) | DevOps from WBD data owners | API / batch jobs as wired by the app |
 | `mmm/<env>/llm/<provider>` | `{"api_key":"..."}` (only when `enable_genai`) | DevOps from WBD / vendor | LLM gateway proxy Lambda |
 | `mmm/<env>/databricks/export-sp` | `{"client_id","client_secret"}` of the WBD export service principal (only with `enable_data_platform`) | DevOps from WBD Databricks admins | Databricks export Lambda |
-| `mmm/<env>/rds/etl` | ETL DB user `mmm_etl` `{username, password}` (only with `enable_data_platform`) | `scripts/db-bootstrap.py` (`ETL_SECRET_ID`) | RDS Proxy; the Glue `export-rds` job connects with an IAM token |
-
 There is **no** `redis/token`, **no** `edge/origin-verify`, **no** EventBridge connection secret,
 and **no** MWAA connection secrets.
 

@@ -19,14 +19,16 @@ locals {
   connection = "${var.name_prefix}-glue-vpc"
 
   # Medallion jobs, run per business unit by the model-refresh / model-monitor state machines
-  # (glue:startJobRun.sync). Runtime arguments (--business_unit, --refresh_id, --raw_uri,
-  # --snapshot_uri, --monitor_uri) come from the state machine; data/README.md has the contract.
+  # (glue:startJobRun.sync). Runtime arguments (--business_unit, --run_id, --raw_uri,
+  # --snapshot_uri, --output_uri, --monitor_uri) come from the state machine; data/README.md has the
+  # contract, including the lineage table properties every job writes to the Data Catalog.
+  # Glue has no database access: export-rds only writes Parquet, the results/data publisher loads RDS.
   jobs = {
     bronze          = { description = "Raw Databricks export (Parquet in landing raw/databricks/<bu>/) -> Bronze Delta tables (ingested raw)", bookmarks = true }
     silver          = { description = "Bronze -> Silver Delta tables (cleansed, validated with Glue Data Quality ruleset ${local.ruleset})", bookmarks = false }
     gold            = { description = "Silver -> Gold per-BU modeling tables (adstock and saturation features)", bookmarks = false }
     export-training = { description = "Gold -> immutable Parquet training snapshot + metadata in the training-data bucket", bookmarks = false }
-    export-rds      = { description = "Gold reference tables -> RDS PostgreSQL (JDBC through RDS Proxy as ${var.db_user}, IAM token)", bookmarks = false }
+    export-rds      = { description = "Gold reference tables -> Parquet + _manifest.json in lakehouse ${var.rds_export_prefix}<bu>/<refresh_id>/ (loaded into RDS by the results/data publisher)", bookmarks = false }
     export-monitor  = { description = "Gold latest features -> lakehouse monitoring/<bu>/<date>/ for the drift check", bookmarks = false }
   }
 
@@ -50,7 +52,7 @@ locals {
 
   job_arguments = {
     silver     = { "--DQ_RULESET" = local.ruleset }
-    export-rds = { "--DB_HOST" = var.db_host, "--DB_PORT" = "5432", "--DB_NAME" = var.db_name, "--DB_USER" = var.db_user }
+    export-rds = { "--RDS_EXPORT_PREFIX" = var.rds_export_prefix }
   }
 
   seed_script = <<-EOT
@@ -120,7 +122,7 @@ resource "aws_cloudwatch_log_group" "this" {
 # ------------------------------------------------------------------ VPC placement (no internet: S3 gateway + interface endpoints)
 resource "aws_glue_connection" "vpc" {
   name            = local.connection
-  description     = "Places the ${var.name_prefix} Glue jobs in the private-app subnet (RDS Proxy, S3 gateway, VPC endpoints)"
+  description     = "Places the ${var.name_prefix} Glue jobs in the private-app subnet (S3 gateway and VPC endpoints only, no database path)"
   connection_type = "NETWORK"
 
   physical_connection_requirements {
@@ -227,6 +229,7 @@ data "aws_iam_policy_document" "this" {
     resources = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/aws-glue/*"]
   }
 
+  # UpdateTable also writes the lineage table properties of each refresh (data/README.md).
   statement {
     sid = "Catalog"
     actions = [
@@ -284,13 +287,6 @@ data "aws_iam_policy_document" "this" {
       variable = "aws:TagKeys"
       values   = ["aws-glue-service-resource"]
     }
-  }
-
-  # export-rds: IAM token for the ETL database user, through RDS Proxy (no password)
-  statement {
-    sid       = "DbConnectAsEtlUser"
-    actions   = ["rds-db:connect"]
-    resources = [var.db_user_arn]
   }
 }
 

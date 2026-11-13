@@ -10,8 +10,9 @@ locals {
 
   # Prefixes used by the log producers
   prefixes = {
-    alb       = "alb"
-    s3_access = "s3-access"
+    alb        = "alb"
+    s3_access  = "s3-access"
+    cloudtrail = "cloudtrail"
   }
 }
 
@@ -165,6 +166,46 @@ data "aws_iam_policy_document" "this" {
       test     = "ArnLike"
       variable = "aws:SourceArn"
       values   = ["arn:${local.partition}:s3:::*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.cloudtrail_trail_arn == null ? [] : [1]
+    content {
+      sid       = "CloudTrailAclCheck"
+      actions   = ["s3:GetBucketAcl"]
+      resources = [aws_s3_bucket.this.arn]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudtrail.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceArn"
+        values   = [var.cloudtrail_trail_arn]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.cloudtrail_trail_arn == null ? [] : [1]
+    content {
+      sid       = "CloudTrailDelivery"
+      actions   = ["s3:PutObject"]
+      resources = ["${aws_s3_bucket.this.arn}/${local.prefixes.cloudtrail}/AWSLogs/${local.account_id}/*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["cloudtrail.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:SourceArn"
+        values   = [var.cloudtrail_trail_arn]
+      }
     }
   }
 }

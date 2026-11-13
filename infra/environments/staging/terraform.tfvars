@@ -118,6 +118,10 @@ uploads_retention_days = 90
 # add actual value
 max_concurrent_runs    = 20
 max_queue_wait_minutes = 30
+# Results/data publisher Lambda (v5: also loads the Gold reference data into RDS; timeout up to 900 s)
+# add actual value
+publisher_timeout_seconds = 120
+publisher_memory_mb       = 512
 
 # ------------------------------------------------------------------ Front door and sign-in (Step 8)
 # add actual value
@@ -148,6 +152,10 @@ enable_splunk_shipping = false
 # add actual value
 splunk_hec_endpoint = "https://http-inputs-wbd.splunkcloud.com:443"
 ship_vpc_flow_logs  = false
+# v5: own S3 data-events trail on the data buckets, only if the WBD organization trail does not record them
+# add actual value
+enable_cloudtrail_data_events        = false
+cloudtrail_data_events_include_reads = false
 
 # ------------------------------------------------------------------ Backup and DR (Step 10)
 # add actual value
@@ -178,6 +186,8 @@ glue_worker_type               = "G.1X"
 glue_number_of_workers         = 5
 glue_job_timeout_minutes       = 120
 manage_glue_catalog_encryption = true
+# Gold reference-data exports (lakehouse rds-export/) are kept this long after the publisher loaded them
+rds_export_retention_days = 30
 # add actual value
 training_instance_type       = "ml.m5.2xlarge"
 training_max_runtime_seconds = 14400

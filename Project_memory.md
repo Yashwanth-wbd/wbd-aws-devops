@@ -4,9 +4,10 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 12 Nov 2026 – requirement 4 (v4 architecture: `WBD_MMM_Architecture_4.pptx`,
-`devops_plan_4.txt`, `PROJECT_CONTEXT_4.md`) **implemented and validated offline, not pushed yet**
-(waiting for the user's go). Last pushed commit `252646f`; v3 was `59333f0`.
+Last updated: 13 Nov 2026 – requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
+`devops_plan_5.txt`, `PROJECT_CONTEXT_5.md`) **implemented, validated offline and pushed to `main`**
+(v5 code commit "Implement requirement 5"; v5 docs `e722304` / `828733a`; v4 code `e2cac7b`).
+Check the latest with `git log --oneline -5`.
 
 ---
 
@@ -34,13 +35,38 @@ At the end of every session ask the agent to **update this file** (sections 1, 6
 |---|---|
 | What | DevOps for the WBD Media-Mix-Modeling (MMM) platform: Terraform, ECS task definitions, GitHub Actions CI/CD, scripts, runbooks. App, data-engineering and model code belong to the WBD / EY teams – nothing app-side is in this repo. |
 | Project folder (source of truth) | Since 12 Nov 2026: `C:\Users\yn\Desktop\wbd_devops\wbd_mmm_devops\wbd-aws-devops` (local disk, git clone of `main`). Earlier: `\\USE_EIS_NTPCFS1.tw.tweis.net\WMAD_Profiles\yn\Desktop\wbd_devops\wbd_devops_implmenetation_1` (note the spelling *implmenetation*) |
-| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files, `63ba74c` client questions v2, **`59333f0` v3 implementation**, `1cfc547` v3 records, `d9ea5c7` / `252646f` v4 deck added then removed. **v4 implementation is local, not committed yet.** Check the latest with `git log --oneline -5`. |
+| GitHub repo | https://github.com/Yashwanth-wbd/wbd-aws-devops – branch `main`. Key commits: `89382f2` v2 implementation, `bf4a051` CI guards + shellcheck fix, `d52c7cf` review fixes (alarms, dashboards, backup, dry run, SHA pinning), `87f3b2f` docs (plan differences, slide service map, app team contract), `29ee523` access without admin, `35b8a47` ignore Office lock files, `63ba74c` client questions v2, **`59333f0` v3 implementation**, `1cfc547` v3 records, `d9ea5c7` / `252646f` v4 deck added then removed, **`e2cac7b` v4 implementation**, `987fe5e` / `8fe8f25` v4 from-scratch resource list + client questions (`_4_new`), `e722304` v5 requirement set, `828733a` v5 client questions, **v5 implementation** ("Implement requirement 5 (WBD_MMM_Architecture_5) …", 13 Nov 2026). Check the latest with `git log --oneline -5`. |
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset: `gh auth login --web --scopes repo,workflow` |
-| Requirement documents (`docs/requirements/`) | **v4 (implemented):** `WBD_MMM_Architecture_4.pptx` (target architecture), `devops_plan_4.txt` (v3 → v4 delta, steps), `PROJECT_CONTEXT_4.md` (planning context + implementation status), `aws_resource_list_4.xlsx`, `wbd_mmm_ecs_final_4.docx`, `devops_4_client_question.xlsx` (generator `tools/build_v4.py`). **v3 (history):** `wbd_Presentation_3.pptx` (v3 target architecture), `devops_plan_3.txt` (v3 plan + implementation status + where the build differs), `aws_resource_list_3.xlsx` (v3 resources per env + column H "v3 implementation" + `removed_vs_v2` and `decisions` sheets), `wbd_mmm_ecs_final_3.docx` (v3 design doc + implemented defaults), `PROJECT_CONTEXT_3.md` (v3 planning context, section 4a = where the build differs from the plan), **`devops_3_client_question.xlsx`** (what WBD must provide – section 7). v2 kept for history: `wbd_Presentation.pptx`, `devops_plan_2.txt`, `aws_resource_list_2.xlsx`, `wbd_mmm_ecs_final_2.docx`, `PROJECT_CONTEXT_2.md`, `devops_2_client_question.xlsx`. v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
+| Requirement documents (`docs/requirements/`) | **v5 (implemented, current):** `WBD_MMM_Architecture_5.pptx` (target architecture), `devops_plan_5.txt` (v4 → v5 delta, steps), `PROJECT_CONTEXT_5.md` (planning context + implementation status + where the build differs), `aws_resource_list_5.xlsx`, `wbd_mmm_ecs_final_5.docx`, `devops_5_client_question.xlsx` (100 inputs, 28 decisions; generator `tools/build_v5.py`, `--questions-only`). **v4 (history):** `WBD_MMM_Architecture_4.pptx` (target architecture), `devops_plan_4.txt` (v3 → v4 delta, steps), `PROJECT_CONTEXT_4.md` (planning context + implementation status), `aws_resource_list_4.xlsx`, `wbd_mmm_ecs_final_4.docx`, `devops_4_client_question.xlsx` (generator `tools/build_v4.py`). **v3 (history):** `wbd_Presentation_3.pptx` (v3 target architecture), `devops_plan_3.txt` (v3 plan + implementation status + where the build differs), `aws_resource_list_3.xlsx` (v3 resources per env + column H "v3 implementation" + `removed_vs_v2` and `decisions` sheets), `wbd_mmm_ecs_final_3.docx` (v3 design doc + implemented defaults), `PROJECT_CONTEXT_3.md` (v3 planning context, section 4a = where the build differs from the plan), **`devops_3_client_question.xlsx`** (what WBD must provide – section 7). v2 kept for history: `wbd_Presentation.pptx`, `devops_plan_2.txt`, `aws_resource_list_2.xlsx`, `wbd_mmm_ecs_final_2.docx`, `PROJECT_CONTEXT_2.md`, `devops_2_client_question.xlsx`. v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
-| Status | **v4 implemented with placeholder values and validated offline (12 Nov 2026), not pushed yet.** v3 is on `main` (`59333f0`). Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
+| Status | **v5 implemented with placeholder values, validated offline and pushed to `main` (13 Nov 2026).** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
 
-### 1.0 v4 architecture in one paragraph (current)
+### 1.0v5 What v5 changed (vs v4, current)
+
+Everything in 1.0 / 1.0a stays except the database path of the data platform and the additions below.
+
+* **Gold → RDS through the results/data publisher.** Glue `export-rds` has no database access any
+  more: it writes Parquet + `_manifest.json` to `lakehouse/rds-export/<bu>/<refresh_id>/`
+  (`--output_uri`, `--RDS_EXPORT_PREFIX`; lifecycle `rds_export_retention_days` = 30). The publisher
+  gets the event `reference_data` (state **PublishReferenceData** after GlueExports; a failure fails
+  the refresh before training) and loads RDS as `mmm_app`. Removed: secret `rds/etl`, DB user
+  `mmm_etl` (`db-bootstrap.py`, `ETL_SECRET_ID`), Glue `rds-db:connect`, `data_clients` SG on Glue,
+  glue module variables `db_host` / `db_name` / `db_user` / `db_user_arn`.
+* **SageMaker ML Lineage**: RegisterModel → **RecordLineage** (createContext
+  `mmm-<env_short>-refresh-<refresh_id>`) → **RecordLineageArtifacts** (4 parallel createArtifact +
+  addAssociation: raw export, reference data, training snapshot `ContributedTo`; model package
+  `Produced`) → PublishModelResults. Errors → **LineageNotRecorded** (metric `MMM/Models`
+  `LineageRecordFailed`, alarm `lineage-record-failed-<bu>`), refresh continues. Glue jobs write
+  lineage table properties (`glue:UpdateTable`, contract in `data/README.md`).
+* **Publisher sizing as variables**: `publisher_timeout_seconds` (120, max 900), `publisher_memory_mb` (512).
+* **Optional CloudTrail S3 data-events trail** `mmm-<env_short>-data-events`
+  (`enable_cloudtrail_data_events`, default false – the WBD org trail covers it;
+  `cloudtrail_data_events_include_reads`): single-region, log bucket `cloudtrail/`, KMS purpose
+  `cloudtrail`, log file validation; log-bucket module input `cloudtrail_trail_arn`.
+* **Dashboard** `data-pipeline`: reference rows published (app metric `ReferenceRowsPublished`) and
+  lineage not recorded (monitoring input `data_business_units`).
+
+### 1.0 v4 architecture in one paragraph
 
 Front door, sign-in, API / UI, run queue and dispatcher are as in v3 (below). **Optimization**: the
 browser uploads the user's input files with a presigned PUT (from the API) to the new **`uploads`**
@@ -55,7 +81,7 @@ model-refresh state machine calls the **Databricks export Lambda** (Jobs API 2.2
 `databricks/export_job_ids`); the WBD export job writes raw Parquet to
 `landing/raw/databricks/<bu>/<refresh_id>/` through the **write-only** Unity Catalog role. Then
 **Glue 5.0 Delta jobs** (`modules/glue`): bronze → silver (Glue Data Quality ruleset) → gold → in
-parallel export-training (snapshot) and export-rds (RDS via the proxy as `mmm_etl`) → SageMaker
+parallel export-training (snapshot) and export-rds (v4: RDS via the proxy as `mmm_etl`; v5: Parquet for the publisher, 1.0v5) → SageMaker
 training → evaluation → **RegisterModel** → **PublishModelResults** (publisher event
 `model_results`: predictions, lift, evaluation to RDS). The model monitor runs the same export +
 medallion with `purpose = monitor` and Glue export-monitor before the drift check. Governance and
@@ -70,7 +96,7 @@ states, `databricks_sp_client_id`, `databricks_refresh_job_id`, `databricks_writ
 `databricks.yml`, `data/databricks/`, `DATABRICKS_CLIENT_ID` / `setup-github.ps1 -DatabricksClientId`,
 runbook `write-back-failed.md`. Added: modules **`glue`** and **`databricks-export`** (26 modules
 now), ECS optimizer task + SSM task pointer + `ecs/<env>/optimizer.json`, buckets `uploads` and
-`glue-assets`, secrets `databricks/export-sp` and `rds/etl` (DB user `mmm_etl`), SSM
+`glue-assets`, secrets `databricks/export-sp` and `rds/etl` (DB user `mmm_etl`; both removed in v5), SSM
 `databricks/export_job_ids`, Glue interface endpoint + `glue` / `databricks_export` / `optimizer`
 security groups, alarms / events `optimizer-task-not-started`, `glue-job-failed`,
 `glue-data-quality-failed`, `databricks-export-errors`, dashboard `data-pipeline`, workflow
@@ -88,7 +114,7 @@ security groups, alarms / events `optimizer-task-not-started`, `glue-job-failed`
 |---|---|---|
 | Optimizer task in the shared `tasks` security group | Dedicated `optimizer` security group (443 to endpoints + S3 only; `data_clients` only if the app needs the DB) | Least privilege; the optimizer does not talk to RDS |
 | … → PublishModelResults → RegisterModel | RegisterModel → PublishModelResults | The RDS rows carry the `model_package_arn` |
-| Glue export-rds through the IAM-only proxy (user not specified) | New secret `rds/etl` + DB user `mmm_etl` (created by `db-bootstrap.py` when `ETL_SECRET_ID` is set); Glue uses an IAM token | The proxy needs a secret per DB user; separate from the app user |
+| Glue export-rds through the IAM-only proxy (user not specified) | v4: new secret `rds/etl` + DB user `mmm_etl`. **Superseded in v5**: Glue writes Parquet, the publisher loads RDS as `mmm_app` | v5 slide: Gold → RDS via the results/data publisher |
 | `enable_uploads_malware_scan` | **Not implemented** (dropped) | Open question for WBD (GuardDuty Malware Protection for S3) |
 
 **Deferred doc fixes (from the 12 Nov review of the `_4` docs – the user said "we will do it at
@@ -189,7 +215,7 @@ Databricks or model code.
 | Release pointers | Optimizer: SSM `/mmm/<env_short>/ecs/optimizer_task_definition` = task-definition ARN with revision (seed `family:unset`); training: SSM `/mmm/<env_short>/images/sagemaker-training` = `<registry>/<repo>@<digest>`. Both written by `deploy.yml` (rollback = previous value); Terraform ignores the value | `optimization.tf`, `deploy.yml` |
 | Sizes | Optimizer task 4 vCPU / 16 GiB (prod 8 / 32), 50 GiB ephemeral; `ml.m5.xlarge` evaluation / drift, `ml.m5.2xlarge` training; Glue `G.1X` × 2 / 5 / 10; no warm pools | `terraform.tfvars` |
 | Autoscaling | CPU target tracking 60 % for api and ui (dev 1–2 / 1–2, stg 2–4 / 2–3, prd 3–10 / 2–6) | `ecs.tf` |
-| Data orchestration (v4) | **No MWAA.** EventBridge Scheduler (per BU) + on-demand `mmm.refresh` event → Step Functions → **export Lambda** (Databricks Jobs API 2.2, OAuth M2M secret `databricks/export-sp`) → raw Parquet in `landing/raw/databricks/<bu>/<refresh_id>/` (write-only UC role) → **Glue** bronze → silver (Data Quality) → gold → export-training + export-rds | `data.tf`, `modules/glue`, `modules/databricks-export` |
+| Data orchestration (v4) | **No MWAA.** EventBridge Scheduler (per BU) + on-demand `mmm.refresh` event → Step Functions → **export Lambda** (Databricks Jobs API 2.2, OAuth M2M secret `databricks/export-sp`) → raw Parquet in `landing/raw/databricks/<bu>/<refresh_id>/` (write-only UC role) → **Glue** bronze → silver (Data Quality) → gold → export-training + export-rds (v5: Parquet to `lakehouse/rds-export/` → publisher `reference_data` → RDS) → train → evaluate → register → SageMaker ML Lineage | `data.tf`, `modules/glue`, `modules/databricks-export` |
 | Model registry | **SageMaker Model Registry** per BU (`<prefix>-<bu>`); eval role can only reject; approve role (GitHub Environment `<env>-model-promotion`) approves, publishes curves to `models/curves/<bu>/` and the drift baseline to `models/baseline/<bu>/`, and writes `approval.json` next to `evaluation.json`; rollback re-approves the previous version (curves + baseline) | `docs/10` §7 |
 | Model results (v4, replaces write-back) | After `RegisterModel`, `PublishModelResults` invokes the publisher with `model_results` (business_unit, refresh_id, model_package_arn, evaluation_uri) → predictions, lift, evaluation into RDS | `data.tf`, `data/README.md` |
 | Drift monitor | `mmm-<env>-model-monitor`: export (`purpose=monitor`) → Glue medallion → Glue export-monitor → `CheckDrift` (training image, writes `drift.json` `{"score":0-1,"checks":{}}`) → metric `MMM/Models ModelDrift` → alarm `<prefix>-model-drift-<bu>`; threshold `drift.threshold` (0.2) in `data/model-thresholds.yaml`; daily schedule `mmm-<env_short>-drift-<bu>`, off until the first baseline; `auto_refresh_on_drift = false` (alert only) | `data.tf`, `docs/10` §3b |
@@ -275,15 +301,22 @@ uvx --from shellcheck-py shellcheck scripts/*.sh        # on an LF copy, see sec
 .\scripts\secret-scan.ps1
 ```
 
-Mock-plan results on 12 Nov 2026, v4 (resources to add; v3 was 311 / 459, 326 / 476, 326 / 478):
+Mock-plan results on 13 Nov 2026, v5 (resources to add; v4 was 326 / 528, 341 / 545, 341 / 547;
+"all features" now also turns on the CloudTrail data-events trail):
 
 | Env | Default | All optional features on |
 |---|---|---|
-| dev | 326 | 528 |
-| staging | 341 | 545 |
-| prod | 341 | 547 |
+| dev | 326 | 533 |
+| staging | 341 | 550 |
+| prod | 341 | 552 |
 
-Last run (12 Nov 2026, v4): fmt + validate clean, 26 modules validate (`validate-modules.ps1`,
+Last run (13 Nov 2026, v5): fmt + validate clean, `sync-environments.ps1 -Check` clean, 26 modules
+validate, tflint 0, Checkov 1459 passed / 0 failed, actionlint 0, secret scan clean. The model-refresh
+state graph was checked by rendering `local.refresh_definition` from a plan in a temp copy (module
+outputs replaced by literals). `python` / `uv` were not on PATH this session, so `db-bootstrap.py`
+was not `py_compile`d (only lines removed).
+
+Earlier run (12 Nov 2026, v4): fmt + validate clean, 26 modules validate (`validate-modules.ps1`,
 ~10 min), tflint 0 (`tflint --config .tflint.hcl --chdir infra`), Checkov 1432 passed / 0 failed
 (accepted findings have a `#checkov:skip=<ID>:<reason>` comment), actionlint 0 (pass the files:
 `actionlint (Get-ChildItem .github/workflows/*.yml).FullName`), `bash -n` on the scripts clean,
@@ -302,10 +335,10 @@ the whole folder).
 | Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets incl. `uploads` + `glue-assets`, RDS), `frontdoor.tf` (Okta OIDC on the ALB, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (optimizer ECS task + role, SSM release pointers, publisher Lambda, optimization state machine), `run-queue.tf` (run queue, dispatcher, SSM run limit), `data.tf` (Databricks access + export Lambda, Glue, training side, model-refresh and model-monitor state machines, refresh + drift schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
 | ECS templates | `ecs/<env>/api.json`, `ui.json`, `migrate.json`, `optimizer.json` |
 | Workflows | `api-ci`, `ui-ci`, `optimizer-ci` (`apps/optimizer` → `mmm/optimizer`), `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer task revision + SSM pointer, training, publisher; promotion, prod RDS snapshot (`DB_INSTANCE_ID`), migration, smoke (Okta redirect when `SMOKE_CHECK_LOGIN`), optimization dry run through the run queue in dev/staging (input in `uploads`), rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role; also on `data/model-thresholds.yaml`), `glue` (Glue scripts to `glue-assets/scripts/`), `model-governance` (curves + baseline + `approval.json`), `repo-checks`. **All actions pinned to commit SHAs** (`@<sha> # vX.Y.Z`; Dependabot updates them) |
-| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, RDS CPU / free storage / connections / read + write latency, run queue (`runs-oldest-request`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, `runs-expired-requests`), `model-drift-<bu>`, `model-monitor-failed`, what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors (incl. `databricks-export-errors`), cert expiry, model refresh overdue (7 days), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization (+ run queue, optimizer tasks), rds, cost (+ training with drift, data-pipeline, genai). Events: ECS deploy failed / service error, `optimizer-task-not-started`, `glue-job-failed`, `glue-data-quality-failed`, GuardDuty High, break-glass, backup job failed, model package state |
+| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, RDS CPU / free storage / connections / read + write latency, run queue (`runs-oldest-request`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, `runs-expired-requests`), `model-drift-<bu>`, `model-monitor-failed`, what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors (incl. `databricks-export-errors`), cert expiry, model refresh overdue (7 days), `lineage-record-failed-<bu>` (v5), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization (+ run queue, optimizer tasks), rds, cost (+ training with drift, data-pipeline incl. reference rows published + lineage not recorded (v5), genai). Optional (v5) CloudTrail S3 data-events trail `mmm-<env_short>-data-events` (`enable_cloudtrail_data_events`). Events: ECS deploy failed / service error, `optimizer-task-not-started`, `glue-job-failed`, `glue-data-quality-failed`, GuardDuty High, break-glass, backup job failed, model package state |
 | Backup | RDS instance (native PITR + AWS Backup) + `results`, `approved-worm`, `models`, and with the data platform `training-data`, `lakehouse` (lakehouse cost to confirm); `uploads` and `glue-assets` are not backed up (user input kept `uploads_retention_days`, Glue scripts are in Git) |
-| Scripts | `smoke.sh` (health + Okta redirect when `SMOKE_CHECK_LOGIN`), `dry-run-optimization.sh` (input to `uploads`, request to the run queue; skipped while the optimizer pointer is `:unset`), `deploy-components.sh` (kind `task` for the optimizer), `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh` (queue, RDS Proxy, release pointers), `model_governance.py` (SageMaker registry, thresholds incl. `drift`, baseline, `approval.json`), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py` (+ `mmm_etl` with `ETL_SECRET_ID`), `setup-github.ps1`, `sync-environments.ps1` (also `ecs/dev/*.json`), `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1 -Path infra`, `secret-scan.ps1` |
-| Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed incl. DLQ redrive and ECS task, model refresh failed, **glue job failed**, **databricks export failed**, model drift, Okta outage, DB restore (RDS), ECS task stuck, rotation incl. Okta secret and export SP, pipeline failure, model rollback, GenAI, security incident, break-glass); `data/README.md` = export, Glue, evaluation, model results and monitor contracts (v4) |
+| Scripts | `smoke.sh` (health + Okta redirect when `SMOKE_CHECK_LOGIN`), `dry-run-optimization.sh` (input to `uploads`, request to the run queue; skipped while the optimizer pointer is `:unset`), `deploy-components.sh` (kind `task` for the optimizer), `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh` (queue, RDS Proxy, release pointers), `model_governance.py` (SageMaker registry, thresholds incl. `drift`, baseline, `approval.json`), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py` (`mmm_migrator`, `mmm_app`), `setup-github.ps1`, `sync-environments.ps1` (also `ecs/dev/*.json`), `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1 -Path infra`, `secret-scan.ps1` |
+| Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed incl. DLQ redrive and ECS task, model refresh failed, **glue job failed**, **databricks export failed**, model drift, Okta outage, DB restore (RDS), ECS task stuck, rotation incl. Okta secret and export SP, pipeline failure, model rollback, GenAI, security incident, break-glass); `data/README.md` = export, Glue (incl. `export-rds` Parquet + `_manifest.json`, lineage table properties), publisher `reference_data` / `model_results`, SageMaker lineage, evaluation and monitor contracts (v5) |
 | Requirement doc tools | `docs/requirements/tools/` – `extract_pptx.py` (slide text + images), `extract.py` (v1 docx/xlsx dump), `build_v4.py` (generates `aws_resource_list_4.xlsx` – full v4 list per environment, 168 rows: 31 new, 36 changed, 101 kept from v1–v3, plus summary, v4-only detail of 45 new + 17 changed, 13 removed vs v3 – and `wbd_mmm_ecs_final_4.docx`; `build_v3.py`, `build_v2.py` / `check_v2.py` for history), `build_client_questions.py` (generates `devops_4_client_question.xlsx` – full v4 list: 65 inputs (20 new, 11 changed, 34 from v3), 21 decisions, 8 obsolete v3 questions on `removed_vs_v3`); README explains use |
 
 v1 defects D1–D4 are fixed: Trivy `version:` on every trivy-action, drift job skips without role,
@@ -370,7 +403,7 @@ export-monitor) and the Silver DQ rules; WBD's export job accepts `business_unit
 | Data science – optimizer | `apps/optimizer` | `optimizer-ci.yml` | ECS task image (command in `ecs/<env>/optimizer.json`): reads `INPUT_S3_URI` (uploads) + `CURVES_S3_URI`, writes `OUTPUT_S3_URI` (`results/runs/<run_id>/output/`), `RUN_TYPE` optimize / forecast, honours `DRY_RUN` |
 | Data science – training / evaluation | `apps/sagemaker-training` | `training-ci.yml` | Training image + `evaluate` argument writing `evaluation.json`, `curves/`, `baseline/`, `predictions/`, `lift/`; `drift` entrypoint writing `drift.json`; real limits in `data/model-thresholds.yaml` |
 | Results publisher | `apps/results-publisher` | `publisher-ci.yml` | Lambda writing to RDS PostgreSQL (via RDS Proxy): events `optimization_run` and `model_results`, honours `dry_run`, `OptimizeDurationMs` with `RunSize` |
-| Data engineering | `data/glue/jobs/`, `data/glue/dq/` | `glue.yml` (scripts), `terraform.yml` (DQ ruleset) | Glue 5.0 Delta jobs bronze → silver (DQ) → gold → export-training (`training-data/<bu>/<refresh_id>/`), export-rds (`mmm_etl`), export-monitor (`lakehouse/monitoring/<bu>/<date>/`) |
+| Data engineering | `data/glue/jobs/`, `data/glue/dq/` | `glue.yml` (scripts), `terraform.yml` (DQ ruleset) | Glue 5.0 Delta jobs bronze → silver (DQ) → gold → export-training (`training-data/<bu>/<refresh_id>/`), export-rds (Parquet + `_manifest.json` to `lakehouse/rds-export/<bu>/<refresh_id>/`), export-monitor (`lakehouse/monitoring/<bu>/<date>/`) |
 | WBD Databricks | WBD workspace | WBD | Export job per BU writing Parquet to `landing/raw/databricks/<bu>/<id>/`; service principal for `databricks/export-sp`; UC storage credential + external location |
 
 DevOps owns `infra/`, `ecs/`, `.github/`, `scripts/`, `docs/` (protect with CODEOWNERS once team names
@@ -444,7 +477,6 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 | `mmm/<env>/okta/alb-client` (`{"client_secret": "..."}`) | WBD Identity or DevOps (never by email) | before `okta_sign_in_enabled = true`; rotation in `docs/runbooks/rotation.md` |
 | `mmm/<env>/rds/migrate`, `rds/proxy`, `api/db` | DB bootstrap task (`enable_db_bootstrap = true`, apply, run `terraform output -raw db_bootstrap_run_command`, set back to `false`) | before the first migration |
 | `mmm/<env>/databricks/export-sp` (`{"client_id","client_secret"}`) | DevOps from the WBD Databricks admins (`put-secret-value`, docs/05) | data platform |
-| `mmm/<env>/rds/etl` (`mmm_etl`) | DB bootstrap task again after `enable_data_platform = true` (`ETL_SECRET_ID`) | data platform, before the first refresh |
 | `mmm/<env>/splunk/hec` | WBD Splunk team | before `enable_splunk_shipping = true` |
 | `mmm/<env>/thirdparty/<vendor>` | WBD data owners | when the feed is used |
 | `mmm/<env>/llm/<provider>` (`{"api_key": "..."}`) | DevOps with WBD-approved keys | before `enable_genai = true` |
@@ -510,19 +542,22 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 ## 11. Next steps
 
-### 11.0 Right now (after session 29)
+### 11.0 Right now (after session 34)
 
-1. **Push v4 when the user says so** (commit message e.g. "v4: ECS optimizer task, uploads bucket,
-   Databricks export Lambda + Glue lakehouse, model results to RDS"), then check `repo-checks` and
-   `terraform` on GitHub and fix anything red.
-2. **Deferred doc fixes** (section 1.0a) – the user wants them "at last": data lineage, slide-1
-   Lambda label, IAM Identity Center + SageMaker ENI in the docx, GenAI timing. Then regenerate the
-   `_4` xlsx/docx with `tools/build_v4.py` / `build_client_questions.py` so they show "implemented".
-3. `gh` CLI: if the login expired, run `gh auth login --web --scopes repo,workflow` before using
-   `gh` / `setup-github.ps1`.
-4. Send `devops_4_client_question.xlsx` to WBD; fill values as they arrive (section 11.2).
+1. v5 is pushed. Check `repo-checks` and `terraform` on GitHub (`gh run list --limit 5`) and fix
+   anything red.
+2. Open doc points (not done – the user did not ask): `devops_plan_5.txt` Step 9 still says
+   publisher default 900 s / 2048 MB (built and client questions: 120 s / 512 MB); the `_5` xlsx /
+   docx could show "implemented" (regenerate with `tools/build_v5.py`). Ask before changing.
+3. Data / backend teams: `export-rds` writes Parquet + `_manifest.json` and lineage table
+   properties, publisher `reference_data` handler + `MMM/Data` `ReferenceRowsPublished` metric
+   (contract in `data/README.md`).
+4. First real refresh: confirm the training-job trial component `<job>-aws-training-job` exists
+   (lineage association); otherwise alarm `lineage-record-failed-<bu>` fires.
+5. `gh` CLI: if the login expired, run `gh auth login --web --scopes repo,workflow`.
+6. Send `devops_5_client_question.xlsx` to WBD; fill values as they arrive (section 11.2).
 
-### 11.1 Process for the next requirement (requirement 5; same as used for 4)
+### 11.1 Process for the next requirement (requirement 6; same as used for 4 and 5)
 
 1. **Read the new document** (`docs/requirements/tools/extract_pptx.py` for slides, read the images).
 2. **Compare with what is built** (sections 1–5 of this file, `infra/modules/README.md`): replacement
@@ -551,8 +586,8 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 9. When the app teams merge `apps/*`: CI builds `sha-<7>` → `deploy.yml` deploys to dev.
 10. Run the "Validate" sections in `infra/environments/dev/README.md`.
 11. Staging (tag `vX.Y.Z-rcN`), then prod (tag `vX.Y.Z` with change ticket).
-12. Data platform values → `enable_data_platform = true` → fill `databricks/export-sp`, re-run the
-    DB bootstrap (`mmm_etl`), WBD sets up the UC external location and export jobs, `glue.yml` uploads
+12. Data platform values → `enable_data_platform = true` → fill `databricks/export-sp` (no extra
+    DB user in v5), WBD sets up the UC external location and export jobs, `glue.yml` uploads
     the scripts → validate (`docs/10`); after the first approved model per BU (baseline published) →
     `enable_model_monitor_schedule = true`.
 13. Release 1 gate (`docs/11`); Release 2 GenAI only after WBD approval (`docs/12`); handover (`docs/13`).
@@ -588,4 +623,6 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 24 | 12 Nov 2026 | Go through the whole project again (follow-up requirement coming) | Re-read; ready |
 | 25 | 12 Nov 2026 | Architecture changed – create the `_4` files like the `_3` ones, no code | `WBD_MMM_Architecture_4.pptx`, `devops_plan_4.txt`, `PROJECT_CONTEXT_4.md`, `aws_resource_list_4.xlsx`, `wbd_mmm_ecs_final_4.docx`, `devops_4_client_question.xlsx`, `tools/build_v4.py` |
 | 26 | 12 Nov 2026 | Review all `_4` docs for gaps | Gaps found (data lineage, slide-1 Lambda label, IAM Identity Center + SageMaker ENI in the docx, GenAI timing) – **deferred by the user** |
-| 27–29 | 12 Nov 2026 | Implement v4 (no doc fixes yet); update `Project_memory.md`; say when ready to push | v4 implemented (sections 1.0, 1.0a, 2, 5): modules `glue` + `databricks-export`, ECS optimizer task + SSM pointer, `uploads` / `glue-assets` buckets, export + Glue + `PublishModelResults` in the state machines, monitoring, `glue.yml`, deploy / dry run / scripts, docs 01, 03, 05, 06, 07, 09, 10, 11, 13, runbooks (2 new, 1 removed), module + env READMEs, `data/README.md`; all offline checks clean (section 4.3). **Not pushed** – waiting for the user |
+| 27–29 | 12 Nov 2026 | Implement v4 (no doc fixes yet); update `Project_memory.md`; say when ready to push | v4 implemented (sections 1.0, 1.0a, 2, 5): modules `glue` + `databricks-export`, ECS optimizer task + SSM pointer, `uploads` / `glue-assets` buckets, export + Glue + `PublishModelResults` in the state machines, monitoring, `glue.yml`, deploy / dry run / scripts, docs 01, 03, 05, 06, 07, 09, 10, 11, 13, runbooks (2 new, 1 removed), module + env READMEs, `data/README.md`; all offline checks clean (section 4.3). Pushed as `e2cac7b` |
+| 30–33 | 13 Nov 2026 | v5 architecture `WBD_MMM_Architecture_5.pptx`: `_5` docs, complete v5 client questions, then implement the code | `_5` docs pushed (`e722304`, `828733a`); v5 implemented (section 1.0v5): Gold → RDS via the publisher (`rds-export/`, no `mmm_etl` / `rds/etl`), PublishReferenceData + SageMaker ML Lineage states, publisher sizing variables, optional CloudTrail data-events trail, dashboard rows; docs, runbooks, READMEs, `data/README.md`; offline checks clean |
+| 34 | 13 Nov 2026 | Update `Project_memory.md` and push | This file updated (sections 1, 4.3, 5, 11, 12); v5 implementation pushed to `main` |

@@ -15,6 +15,12 @@ variable "noncurrent_version_days" {
   default     = 30
 }
 
+variable "cloudtrail_trail_arn" {
+  description = "ARN of a CloudTrail trail allowed to deliver to cloudtrail/ (the optional S3 data-events trail). null = no CloudTrail delivery."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Extra tags."
   type        = map(string)

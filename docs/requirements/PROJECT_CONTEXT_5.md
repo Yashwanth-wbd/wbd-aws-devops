@@ -4,9 +4,17 @@ Companion to `PROJECT_CONTEXT_4.md`. v4 (from `WBD_MMM_Architecture_4.pptx`) is 
 (`e2cac7b`). This file describes the **v5 target** from the updated client deck
 `WBD_MMM_Architecture_5.pptx` and what has to change in the code to get there.
 
-Status (13 Nov 2026): **plan only – not implemented.** The v5 documents are in `docs/requirements/`;
-the code is changed only after the user has reviewed them. v5 keeps the v4 layout and services – the
-change is moderate (one data path, lineage, audit and labelling), not a redesign.
+Status (13 Nov 2026): **implemented and validated offline (not applied to AWS).** v5 keeps the v4
+layout and services – the change is moderate (one data path, lineage, audit and labelling), not a
+redesign.
+
+**Where the build differs from this plan:**
+
+| Plan | Built | Why |
+|---|---|---|
+| Publisher timeout / memory default 900 s / 2048 MB [ASM] | Variables `publisher_timeout_seconds` = 120, `publisher_memory_mb` = 512 (validated up to 900 / 10240) | Agreed decision default; raise per environment when the largest BU load needs it |
+| `RecordLineage` (one state) | `RecordLineage` (createContext) → `RecordLineageArtifacts` (parallel createArtifact + addAssociation; training job via its trial component) → on error `LineageNotRecorded` (metric + alarm, refresh continues) | The model is already registered; a lineage error should alert, not discard the refresh |
+| Own CloudTrail trail if asked | `enable_cloudtrail_data_events` (false): single-region trail, writes only unless `cloudtrail_data_events_include_reads`, KMS key `cloudtrail`, log file validation, log bucket `cloudtrail/` | The WBD org trail covers all regions |
 
 ---
 

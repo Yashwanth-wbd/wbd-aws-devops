@@ -1,11 +1,13 @@
-# 10 – Data platform and model governance (Step 13, v4)
+# 10 – Data platform and model governance (Step 13, v5)
 
 How a business unit moves from the WBD Databricks catalog to a trained model in the SageMaker Model
 Registry, how predictions, lift and evaluation results reach RDS, how an approved model's response
 curves reach the optimizer, and how drift is watched afterwards.
 
-In v4 **Databricks is only the source catalog**: a WBD-owned export job writes raw Parquet into
-this account, and everything after that runs in AWS (Glue lakehouse, SageMaker, RDS). DevOps owns
+**Databricks is only the source catalog**: a WBD-owned export job writes raw Parquet into
+this account, and everything after that runs in AWS (Glue lakehouse, SageMaker, RDS). In v5 Glue
+has no database access: `export-rds` writes the Gold reference data as Parquet to the lakehouse and
+the results/data publisher Lambda loads it into RDS; SageMaker ML Lineage records every refresh. DevOps owns
 the AWS plumbing, Step Functions, schedules and governance pipelines. The data engineers own the
 Glue job scripts (`data/glue/jobs/`) and the Data Quality rules (`data/glue/dq/`); WBD owns the
 Databricks export job.
@@ -26,11 +28,13 @@ flowchart LR
   raw --> bronze
   gold --> lake[(S3 lakehouse<br/>Delta bronze/silver/gold)]
   gold --> et[Glue export-training] --> train[(S3 training-data<br/>&lt;bu&gt;/&lt;refresh_id&gt;/)]
-  gold --> er[Glue export-rds] --> rds[(RDS PostgreSQL)]
+  gold --> er[Glue export-rds] --> rx[(S3 lakehouse<br/>rds-export/&lt;bu&gt;/&lt;refresh_id&gt;/)]
+  rx --> pubref[Lambda results/data publisher<br/>reference_data] --> rds[(RDS PostgreSQL)]
   sfn --> sm_train[SageMaker training] --> sm_eval[SageMaker evaluate]
   sm_eval -->|evaluation.json, curves/, predictions/, lift/| models[(S3 models<br/>evaluation/...)]
   sm_eval --> reg[(SageMaker Model Registry<br/>PendingManualApproval)]
-  reg --> pub[Lambda results-publisher<br/>model_results] --> rds
+  reg --> lin[SageMaker ML Lineage<br/>context per refresh]
+  reg --> pub[Lambda results/data publisher<br/>model_results] --> rds
   gov[model-governance.yml] -->|thresholds + WBD approval| reg
   gov -->|copy curves| curves[(S3 models/curves/&lt;bu&gt;/)]
   gov -->|copy baseline| base[(S3 models/baseline/&lt;bu&gt;/)]
@@ -74,8 +78,13 @@ flowchart LR
   `/aws/lambda/mmm-<env_short>-databricks-export`, Glue `/aws-glue/jobs/mmm-<env_short>`,
   SageMaker training / processing logs; Splunk groups `sfn-model-refresh`, `databricks-export`,
   `glue-jobs`, `sagemaker-train`, `sagemaker-jobs` when shipping is enabled. Alarms:
-  `mmm-<env>-model-refresh-failed`, `databricks-export-errors`; events `glue-job-failed`,
-  `glue-data-quality-failed`. Dashboard `mmm-<env_short>-data-pipeline`.
+  `mmm-<env>-model-refresh-failed`, `databricks-export-errors`, `lineage-record-failed-<bu>`; events
+  `glue-job-failed`, `glue-data-quality-failed`. Dashboard `mmm-<env_short>-data-pipeline` (incl.
+  reference-data rows published and lineage not recorded).
+* **Audit**: S3 data events come from the WBD organization trail; with
+  `enable_cloudtrail_data_events = true` the stack adds its own trail `mmm-<env_short>-data-events`
+  (writes only, or reads too with `cloudtrail_data_events_include_reads`) into the log bucket
+  `cloudtrail/`, KMS key `alias/mmm-<env_short>-cloudtrail`, log file validation on.
 
 ## 3. Model-refresh state machine
 
@@ -90,11 +99,13 @@ State machine `mmm-<env>-model-refresh` (8 h timeout). Definition: `infra/enviro
 | **Bronze** | Glue `mmm-<env_short>-glue-bronze` (`--raw_uri` = the export folder): raw → Bronze Delta tables (job bookmarks on). |
 | **Silver** | Glue `-silver`: cleanse and conform; evaluates the Data Quality ruleset `mmm-<env_short>-silver` and fails on a failed rule. |
 | **Gold** | Glue `-gold`: per-BU modeling tables (adstock, saturation). |
-| **GlueExports** | In parallel: `-export-training` writes the immutable Parquet snapshot `s3://<training-data>/<bu>/<refresh_id>/` (Object Lock); `-export-rds` writes the reference tables to RDS through RDS Proxy as `mmm_etl` (IAM token). Any Glue failure: [runbooks/glue-job-failed.md](runbooks/glue-job-failed.md). |
+| **GlueExports** | In parallel: **ExportTraining** (`-export-training`) writes the immutable Parquet snapshot `s3://<training-data>/<bu>/<refresh_id>/` (Object Lock); **ExportReferenceData** (`-export-rds`, `--output_uri`) writes the Gold reference tables as Parquet + `_manifest.json` to `s3://<lakehouse>/rds-export/<bu>/<refresh_id>/` (expires after `rds_export_retention_days`, 30). Any Glue failure: [runbooks/glue-job-failed.md](runbooks/glue-job-failed.md). |
+| **PublishReferenceData** | Results/data publisher (alias `live`) with `{"event": "reference_data", business_unit, refresh_id, input_uri}`: loads the tables of the manifest into RDS as `mmm_app` (RDS Proxy, IAM token). A failure fails the execution before training. |
 | **TrainModel** | SageMaker training job `mmm-<env_short>-train-<refresh_id>` on the snapshot; artifacts under `s3://<models>/artifacts/<bu>/`. |
 | **EvaluateModel** | Processing job `mmm-<env_short>-eval-<refresh_id>` (same image, argument `evaluate`: baseline → channel lift → title adjustment); writes `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json`, `curves/`, `baseline/`, `predictions/`, `lift/`. |
 | **RegisterModel** | `CreateModelPackage` in group `mmm-<env_short>-<bu>` with status `PendingManualApproval`, `ModelMetrics` pointing at `evaluation.json` and the Databricks run id / refresh id as metadata. |
-| **PublishModelResults** | Results publisher (alias `live`) with `{"event": "model_results", business_unit, refresh_id, model_package_arn, evaluation_uri}`: writes predictions, lift and evaluation results to RDS for that dataset, tagged with the package ARN (the approval status stays in the registry). |
+| **RecordLineage / RecordLineageArtifacts** | SageMaker ML Lineage: context `mmm-<env_short>-refresh-<refresh_id>` (type `MMMModelRefresh`, source = the execution, properties BU, refresh ID, Databricks run ID, training job, model package); artifacts for the raw export, reference data and training snapshot plus the training job's trial component (`ContributedTo` the context) and the model package (`Produced` by it). On error → **LineageNotRecorded** (metric `MMM/Models` `LineageRecordFailed`, alarm `mmm-<env_short>-lineage-record-failed-<bu>`) and the refresh continues. |
+| **PublishModelResults** | Results/data publisher (alias `live`) with `{"event": "model_results", business_unit, refresh_id, model_package_arn, evaluation_uri}`: writes predictions, lift and evaluation results to RDS for that dataset, tagged with the package ARN (the approval status stays in the registry). |
 
 Registration runs before publishing so the RDS rows carry the `model_package_arn`. Training uses
 `training_instance_type` / `training_max_runtime_seconds`; evaluation and the drift check use
@@ -152,7 +163,7 @@ Apply AWS with `enable_data_platform = true` first.
 |---|---|---|
 | Databricks export service principal | Secrets Manager `mmm/<env>/databricks/export-sp` = `{"client_id","client_secret"}` | DevOps out of band from the WBD values ([docs/05](05-secrets-and-config.md)) |
 | Export job IDs | SSM `/mmm/<env_short>/databricks/export_job_ids` (from `databricks_export_job_ids`) | Terraform |
-| Glue export-rds DB user | Secrets Manager `mmm/<env>/rds/etl` (`mmm_etl`, on RDS Proxy; the job itself uses an IAM token) | `scripts/db-bootstrap.py` with the data platform on |
+| Reference data into RDS | No extra secret: Glue has no DB access; the results/data publisher connects as `mmm_app` (IAM token, RDS Proxy). Sizing `publisher_timeout_seconds` (120, up to 900), `publisher_memory_mb` (512) | Terraform |
 | GitHub → Glue script upload | Environment var `GLUE_ASSETS_BUCKET`, role `AWS_DEPLOY_ROLE_ARN` | Terraform `github_environment_variables` + `setup-github.ps1` |
 | GitHub → AWS governance | Repository vars `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` | Terraform `github_repository_variables` output |
 
@@ -275,8 +286,8 @@ tag policies for app releases (`v*` tags only).
    `enable_model_monitor_schedule` (after the first approval),
    `databricks_self_assume_enabled`, `enable_databricks_privatelink`,
    `databricks_privatelink_service_name`. PR → plan → apply (`terraform.yml`).
-2. Fill `mmm/<env>/databricks/export-sp` (§5); run the DB bootstrap once more so `mmm_etl` and
-   `rds/etl` exist (`enable_db_bootstrap = true`, run, back to false).
+2. Fill `mmm/<env>/databricks/export-sp` (§5). No extra DB bootstrap: the app migrations create
+   the reference tables `mmm_app` loads.
 3. Complete Databricks §4 (UC phase 2, external location, export jobs).
 4. Run `scripts/setup-github.ps1` for the environment (model promotion reviewers, `GLUE_ASSETS_BUCKET`),
    then `glue.yml` once the data engineers added `data/glue/jobs/`.
@@ -314,7 +325,9 @@ Governance: `gh workflow run model-governance.yml -f environment=dev -f action=e
 |---|---|
 | Refresh never starts | Scheduler `state` DISABLED; on-demand detail `business_unit` must match a configured BU; rule `mmm-<env>-model-refresh-on-demand` enabled |
 | `StartExport` / `GetExportStatus` errors | [runbooks/databricks-export-failed.md](runbooks/databricks-export-failed.md) (secret, job id, network, UC location) |
-| A Glue state fails | [runbooks/glue-job-failed.md](runbooks/glue-job-failed.md) (seed script, DQ rule, sizing, ENI, `mmm_etl`) |
+| A Glue state fails | [runbooks/glue-job-failed.md](runbooks/glue-job-failed.md) (seed script, DQ rule, sizing, ENI, missing `_manifest.json`) |
+| `PublishReferenceData` fails | Publisher log (`reference_data`): manifest under `rds-export/<bu>/<refresh_id>/`, table missing in RDS (app migration), timeout (raise `publisher_timeout_seconds`); [runbooks/model-refresh-failed.md](runbooks/model-refresh-failed.md) |
+| `lineage-record-failed-<bu>` in ALARM | Execution history of `RecordLineage*` (SageMaker throttling or IAM); the model is registered – lineage can be added by hand with `aws sagemaker create-context` / `add-association` |
 | Training or evaluate fails | SageMaker log groups under `/aws/sagemaker/`; image pointer SSM; snapshot prefix exists in training-data |
 | No `evaluation.json` | Processing job output path; training image `evaluate` entrypoint |
 | `PublishModelResults` fails | Publisher log; the package is registered already – re-invoke the publisher with the payload from the execution history |

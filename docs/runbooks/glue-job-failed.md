@@ -7,7 +7,8 @@ The model-refresh and model-monitor state machines run the Glue jobs
 `glue-job-failed` (`FAILED`, `TIMEOUT`, `ERROR`) and `glue-data-quality-failed` (Silver ruleset).
 
 Planners are not affected: no new model is trained, the last approved model stays in use. A
-failed export-rds means the RDS reference tables keep the previous refresh's data.
+failed export-rds means the RDS reference tables keep the previous refresh's data (Glue has no
+database access; the results/data publisher loads `rds-export/` into RDS in the next state).
 
 ## 1. Find the job run
 
@@ -34,8 +35,8 @@ the Silver table → Data quality, or `aws glue list-data-quality-results`.
 | `Exceeded maximum concurrent compute capacity` / `ConcurrentRunsExceededException` | Account DPU quota or several BUs at once | Service Quotas (Glue DPUs); stagger the refresh schedules |
 | ENI / `Insufficient free addresses` | The connection subnet is out of IPs | Free IPs or move the connection to another private-app subnet |
 | `AccessDenied` on S3 / KMS | Wrong path (outside the role's prefixes) or a new BU key | Check the job arguments; new BU = Terraform apply first |
-| export-rds `password authentication failed` / `PAM` | `mmm_etl` missing or the `rds/etl` secret not on the proxy | Run the DB bootstrap with the data platform on ([db-bootstrap](../../scripts/README.md)); proxy secret list in `main.tf` |
-| export-rds `permission denied for table` | The app migrations did not grant the reference tables to `mmm_etl` | App team adds the grant in a migration |
+| export-rds succeeds but PublishReferenceData fails with "manifest not found" | The job did not write `_manifest.json` last under `--output_uri` | Data engineers fix the job to the contract in [data/README.md](../../data/README.md) |
+| export-rds `AccessDenied` writing `rds-export/` | Output outside the lakehouse bucket or wrong key | Use `--output_uri` as passed (`s3://<lakehouse>/rds-export/<bu>/<refresh_id>/`) |
 
 ## 3. Re-run
 

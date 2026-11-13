@@ -49,15 +49,16 @@ flowchart LR
   sfn -->|runTask.sync| opt[ECS Fargate optimizer task]
   up --> opt
   opt --> s3res[(S3 results / models curves)]
-  sfn --> pub[Lambda results-publisher]
+  sfn --> pub[Lambda results/data publisher]
   pub --> proxy
   refresh[Step Functions model-refresh] -->|enable_data_platform| exp[Lambda databricks-export]
   exp -->|Jobs API| dbx[Databricks export job]
   dbx --> land[(S3 landing raw/)]
   land --> glue[Glue Bronze / Silver / Gold]
   glue --> td[(S3 training-data)]
-  glue -->|export-rds| proxy
-  refresh --> train[SageMaker Training + Registry]
+  glue -->|export-rds Parquet| rx[(S3 lakehouse rds-export/)]
+  rx -->|reference_data| pub
+  refresh --> train[SageMaker Training + Registry + ML Lineage]
   refresh -->|model_results| pub
   monitor[Step Functions model-monitor] -->|drift| cw
   vpc[VPC] --> cw[CloudWatch] --> fh[Firehose] --> splunk[Splunk]

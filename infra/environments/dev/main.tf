@@ -39,9 +39,16 @@ module "kms" {
 
   name_prefix = local.name_prefix
 
-  # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (guardrail, LLM secrets)
-  purposes              = concat(["rds", "s3", "logs", "secrets", "ecr", "sagemaker", "sqs"], local.data_platform_kms_purposes, var.enable_genai ? ["genai"] : [])
-  logs_service_purposes = ["logs"]
+  # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (guardrail, LLM secrets);
+  # v5: cloudtrail key only with the optional S3 data-events trail (monitoring.tf)
+  purposes = concat(
+    ["rds", "s3", "logs", "secrets", "ecr", "sagemaker", "sqs"],
+    local.data_platform_kms_purposes,
+    var.enable_genai ? ["genai"] : [],
+    var.enable_cloudtrail_data_events ? ["cloudtrail"] : [],
+  )
+  logs_service_purposes       = ["logs"]
+  additional_policy_documents = var.enable_cloudtrail_data_events ? { cloudtrail = data.aws_iam_policy_document.cloudtrail_key.json } : {}
 }
 
 module "permission_boundary" {
@@ -145,10 +152,10 @@ locals {
       "okta/alb-client" = { description = "Okta OIDC app client secret {\"client_secret\": \"...\"} from the WBD Identity team - read by Terraform for the ALB sign-in" }
     },
     { for v in var.third_party_vendors : "thirdparty/${v}" => { description = "${v} API credentials from WBD data owners" } },
-    # Step 13: Databricks export service principal (OAuth M2M) and the Glue export-rds DB user
+    # Step 13: Databricks export service principal (OAuth M2M). Glue has no DB user: the results/data
+    # publisher loads the Gold reference data into RDS as mmm_app.
     var.enable_data_platform ? {
       "databricks/export-sp" = { description = "Databricks service principal {\"client_id\": \"...\", \"client_secret\": \"...\"} from the WBD Databricks team - may only run the export job" }
-      "rds/etl"              = { description = "ETL DB user {username: mmm_etl, password} for RDS Proxy (Glue export-rds; reference tables only)" }
     } : {},
     # Step 14: one API key per approved external LLM provider, read only by the LLM gateway proxy
     var.enable_genai ? { for p in keys(var.llm_providers) : "llm/${p}" => { description = "${p} API key {\"api_key\": \"...\"} - only the LLM gateway proxy can read it" } } : {},
@@ -195,6 +202,8 @@ module "log_bucket" {
 
   bucket_name    = "wbd-mmm-${local.env_short}-logs-${local.region_code}"
   retention_days = var.log_bucket_retention_days
+
+  cloudtrail_trail_arn = var.enable_cloudtrail_data_events ? local.data_events_trail_arn : null
 }
 
 locals {
@@ -252,14 +261,14 @@ locals {
       prefix_expiration_days  = {}
     }
     # Step 13: Delta tables (bronze/silver/gold) written by the Glue jobs, catalogued in the Glue Data Catalog;
-    # monitoring/ = drift-check feature exports
+    # monitoring/ = drift-check feature exports; rds-export/ = Gold reference data (Parquet) for the publisher
     lakehouse = {
       glacier_transition_days = null
       expiration_days         = null
       object_lock             = null
       enable_eventbridge      = false
       enabled                 = var.enable_data_platform
-      prefix_expiration_days  = { "monitoring/" = 90 }
+      prefix_expiration_days  = { "monitoring/" = 90, (local.rds_export_prefix) = var.rds_export_retention_days }
     }
     # User files: <bu>/runs/<run_id>/input/* through presigned PUT from the browser (CORS: app URL only)
     uploads = {
@@ -334,10 +343,7 @@ module "rds" {
   log_retention_days       = var.log_retention_days
   permissions_boundary_arn = module.permission_boundary.policy_arn
 
-  proxy_user_secret_arns = concat(
-    [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]],
-    var.enable_data_platform ? [module.secrets.secret_arns["rds/etl"]] : [],
-  )
+  proxy_user_secret_arns = [module.secrets.secret_arns["rds/proxy"], module.secrets.secret_arns["rds/migrate"]]
 
   # Step 10: selected by the AWS Backup plan
   instance_tags = { backup = "true" }

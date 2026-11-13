@@ -25,7 +25,7 @@ variable "landing_bucket_name" {
 }
 
 variable "lakehouse_bucket_name" {
-  description = "Lakehouse bucket: Delta tables bronze/, silver/, gold/ and monitoring/ exports."
+  description = "Lakehouse bucket: Delta tables bronze/, silver/, gold/, monitoring/ exports and rds-export/ (Gold reference data for RDS)."
   type        = string
 }
 
@@ -91,7 +91,7 @@ variable "extra_job_arguments" {
   default     = {}
 }
 
-# ------------------------------------------------------------------ Network and database
+# ------------------------------------------------------------------ Network and exports
 variable "subnet_id" {
   description = "Private-app subnet of the Glue NETWORK connection (Glue places the job ENIs in one subnet)."
   type        = string
@@ -103,29 +103,19 @@ variable "availability_zone" {
 }
 
 variable "security_group_ids" {
-  description = "Security groups of the job ENIs: glue (self-referencing) + data_clients (PostgreSQL to RDS Proxy)."
+  description = "Security groups of the job ENIs: glue (self-referencing, HTTPS to S3 and the VPC endpoints). Glue has no database path."
   type        = list(string)
 }
 
-variable "db_host" {
-  description = "RDS Proxy endpoint (export-rds job)."
+variable "rds_export_prefix" {
+  description = "Lakehouse prefix export-rds writes to: <prefix><bu>/<refresh_id>/ Parquet + _manifest.json, loaded into RDS by the results/data publisher."
   type        = string
-}
+  default     = "rds-export/"
 
-variable "db_name" {
-  description = "Database name."
-  type        = string
-}
-
-variable "db_user" {
-  description = "Database user of the export-rds job (IAM token through RDS Proxy)."
-  type        = string
-  default     = "mmm_etl"
-}
-
-variable "db_user_arn" {
-  description = "rds-db:connect ARN of db_user on the proxy."
-  type        = string
+  validation {
+    condition     = endswith(var.rds_export_prefix, "/") && !startswith(var.rds_export_prefix, "/")
+    error_message = "rds_export_prefix must end with / and not start with /."
+  }
 }
 
 # ------------------------------------------------------------------ Data quality

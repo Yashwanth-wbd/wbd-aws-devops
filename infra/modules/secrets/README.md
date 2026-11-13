@@ -21,7 +21,7 @@ not in this module.
 | Kind | Example | Where the value comes from |
 |---|---|---|
 | Generated (`generate = true`) | none in v2 (supported for future use) | `random_password`, alphanumeric. The value exists only in Secrets Manager and the KMS-encrypted Terraform state. |
-| Container (`generate = false`) | `api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `splunk/hec`, `thirdparty/<vendor>`, `llm/<provider>` (GenAI), `databricks/export-sp` and `rds/etl` (data platform) | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never overwrites it. Only `okta/alb-client` is read by the stack (`okta_sign_in_enabled = true`), because the ALB listener needs the client secret; it is then also in the KMS-encrypted state. |
+| Container (`generate = false`) | `api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `splunk/hec`, `thirdparty/<vendor>`, `llm/<provider>` (GenAI), `databricks/export-sp` (data platform) | Created empty. A DevOps engineer fills it later with `aws secretsmanager put-secret-value` (see `docs/05-secrets-and-config.md`). Terraform never overwrites it. Only `okta/alb-client` is read by the stack (`okta_sign_in_enabled = true`), because the ALB listener needs the client secret; it is then also in the KMS-encrypted state. |
 | RDS admin password | – | **Not here.** RDS creates and rotates it itself (`manage_master_user_password`). |
 | Databricks export service principal | `databricks/export-sp` | A normal container (`{"client_id","client_secret"}`), read only by the Databricks export Lambda; DevOps fills it out of band (docs/05). |
 

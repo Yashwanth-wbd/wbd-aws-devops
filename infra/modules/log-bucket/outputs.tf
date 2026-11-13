@@ -14,6 +14,6 @@ output "bucket_domain_name" {
 }
 
 output "prefixes" {
-  description = "Prefix per log producer: alb, s3_access."
+  description = "Prefix per log producer: alb, s3_access, cloudtrail."
   value       = local.prefixes
 }

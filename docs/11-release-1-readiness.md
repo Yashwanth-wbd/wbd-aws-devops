@@ -74,7 +74,8 @@ When the data engineers ship the Glue scripts, confirm `glue.yml` uploaded them 
 |---|---|---|---|
 | `glue.yml` uploaded the job scripts to `glue-assets/scripts/` (no seed script left) | ☐ | ☐ | ☐ |
 | `databricks/export-sp` filled and `databricks_export_job_ids` set; `StartExport` reaches Databricks and the export lands in `raw/databricks/<bu>/` | ☐ | ☐ | ☐ |
-| Bronze → Silver (Data Quality passes) → Gold → export-training / export-rds succeed; `mmm_etl` rows visible in RDS | ☐ | ☐ | ☐ |
+| Bronze → Silver (Data Quality passes) → Gold → export-training / export-rds succeed; `rds-export/<bu>/<refresh_id>/_manifest.json` written; PublishReferenceData loads the rows into RDS (`mmm_app`) | ☐ | ☐ | ☐ |
+| SageMaker lineage context `mmm-<env_short>-refresh-<refresh_id>` exists: 4 inputs (raw export, reference data, training snapshot, training job) `ContributedTo` it (`aws sagemaker list-associations --destination-arn <context>`), it `Produced` the model package (`--source-arn <context>`) | ☐ | ☐ | ☐ |
 | Scheduled or on-demand refresh starts `mmm-<env>-model-refresh` | ☐ | ☐ | ☐ |
 | Upload without the business-unit KMS key to landing is denied | ☐ | ☐ | ☐ |
 | On-demand trigger (`scripts/trigger-model-refresh.sh`) starts one execution per BU | ☐ | ☐ | ☐ |

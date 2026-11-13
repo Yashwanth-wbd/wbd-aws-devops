@@ -3,9 +3,10 @@
 A model refresh is one Step Functions execution of `mmm-<env>-model-refresh` per business unit,
 started by EventBridge Scheduler (`mmm-<env_short>-refresh-<bu>`) or an `mmm.refresh` event
 (`scripts/trigger-model-refresh.sh`). It runs the Databricks export (raw Parquet to landing), the
-Glue jobs Bronze → Silver (Data Quality) → Gold → export-training + export-rds, SageMaker
-training, evaluation, registration (`PendingManualApproval`) and the results publisher
-(`model_results` → RDS). Use this runbook when the
+Glue jobs Bronze → Silver (Data Quality) → Gold → export-training + export-rds (Parquet to
+`lakehouse/rds-export/`), the results/data publisher (`reference_data` → RDS), SageMaker
+training, evaluation, registration (`PendingManualApproval`), SageMaker ML Lineage and the
+results/data publisher (`model_results` → RDS). Use this runbook when the
 `mmm-<env>-model-refresh-failed` alarm fires or a scheduled refresh produced no new model package.
 
 A failed refresh does **not** affect planners: the optimizer keeps using the last approved model
@@ -34,10 +35,12 @@ gives the ARN. Logs: `/aws/states/mmm-<env>-model-refresh`.
 | GetTrainingImage | SSM `/mmm/<env_short>/images/sagemaker-training` – must be `<registry>/<repo>@<digest>`, not `:unset` |
 | StartExport / GetExportStatus / ExportFailed | Export Lambda `mmm-<env_short>-databricks-export` log; Databricks workspace → Jobs → run id (`$.export.run_id`) – [databricks-export-failed.md](databricks-export-failed.md) |
 | Bronze / Silver / Gold | Glue job `mmm-<env_short>-glue-<job>` run, log group `/aws-glue/jobs/mmm-<env_short>`; Silver Data Quality result – [glue-job-failed.md](glue-job-failed.md) |
-| GlueExports (ExportTraining, ExportRds) | Same Glue logs; snapshot `s3://<training-data>/<bu>/<refresh_id>/`; export-rds connects as `mmm_etl` through RDS Proxy |
+| GlueExports (ExportTraining, ExportReferenceData) | Same Glue logs; snapshot `s3://<training-data>/<bu>/<refresh_id>/`; reference data `s3://<lakehouse>/rds-export/<bu>/<refresh_id>/` (+ `_manifest.json`) |
+| PublishReferenceData | Publisher log `/aws/lambda/mmm-<env_short>-results-publisher` (event `reference_data`): missing manifest, RDS table missing (app migration), `Task timed out` (raise `publisher_timeout_seconds`, max 900, or `publisher_memory_mb`). Nothing is trained yet – re-run the refresh after the fix |
 | TrainModel | CloudWatch `/aws/sagemaker/TrainingJobs`; console → SageMaker → Training jobs |
 | EvaluateModel | CloudWatch `/aws/sagemaker/ProcessingJobs`; report `s3://<models>/evaluation/<bu>/<refresh_id>/evaluation.json` |
 | RegisterModel | Model package group `mmm-<env_short>-<bu>` must exist (created by Terraform per BU) |
+| RecordLineage / RecordLineageArtifacts / LineageNotRecorded | Does not fail the execution; alarm `mmm-<env_short>-lineage-record-failed-<bu>`. `$.lineage_error` in the execution output (SageMaker throttling or `AccessDenied` on `context/` / `artifact/`) |
 | PublishModelResults | The model is already registered; only the RDS write failed – publisher log `/aws/lambda/mmm-<env_short>-results-publisher`; re-invoke it with the same payload (execution history) once fixed |
 
 ## 3. Common causes

@@ -1,7 +1,8 @@
 # Runbook: Databricks export failed
 
 The first step of a model refresh (and of the drift check) starts the WBD Databricks export job of
-the business unit through the export Lambda `mmm-<env_short>-databricks-export` and polls it every
+the business unit through the export Lambda `mmm-<env_short>-databricks-export` ("Lambda Functions –
+Export Trigger", the Databricks API connector, in the v5 architecture) and polls it every
 minute. The job writes raw Parquet to `s3://<landing>/raw/databricks/<bu>/<refresh_id>/` (drift
 check: `monitor-<monitor_id>/`) through the write-only Unity Catalog role. When it fails, the
 execution ends in **ExportFailed** (or a `DatabricksExportError` on StartExport / GetExportStatus),

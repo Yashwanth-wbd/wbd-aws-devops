@@ -59,6 +59,9 @@ run "plan_all_features" {
     route53_zone_id            = "Z0000000000000000000"
     okta_sign_in_enabled       = true
 
+    enable_cloudtrail_data_events        = true
+    cloudtrail_data_events_include_reads = true
+
     enable_data_platform           = true
     databricks_self_assume_enabled = true
     enable_databricks_privatelink  = true

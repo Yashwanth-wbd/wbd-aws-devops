@@ -101,6 +101,12 @@ variable "databricks_export_function_name" {
   default     = null
 }
 
+variable "data_business_units" {
+  description = "Business units of the data platform: data-pipeline rows for reference data published to RDS (publisher metric MMM/Data ReferenceRowsPublished) and lineage not recorded (MMM/Models LineageRecordFailed). Empty = not shown."
+  type        = list(string)
+  default     = []
+}
+
 variable "llm_gateway_api_name" {
   description = "LLM gateway REST API name (GenAI dashboard). null = no GenAI dashboard."
   type        = string

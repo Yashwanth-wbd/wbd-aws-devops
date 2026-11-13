@@ -196,6 +196,17 @@ locals {
             [".", "Duration", ".", ".", { stat = "p95", yAxis = "right" }],
           ] },
         ],
+        # v5: Gold reference data loaded into RDS by the results/data publisher, and SageMaker lineage
+        length(var.data_business_units) == 0 ? [] : [
+          { title = "Reference data rows published to RDS (publisher metric)", period = 3600, metrics = [
+            for bu in var.data_business_units : ["MMM/Data", "ReferenceRowsPublished", "BusinessUnit", bu, { stat = "Sum", label = bu }]
+          ] },
+        ],
+        length(var.data_business_units) == 0 ? [] : [
+          { title = "Lineage not recorded (refreshes)", period = 3600, metrics = [
+            for bu in var.data_business_units : ["MMM/Models", "LineageRecordFailed", "BusinessUnit", bu, { stat = "Sum", label = bu }]
+          ] },
+        ],
         try(local.sfn_widgets["model-refresh"], []),
       )
     },

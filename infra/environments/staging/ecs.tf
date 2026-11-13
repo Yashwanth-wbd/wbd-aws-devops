@@ -181,12 +181,9 @@ data "aws_iam_policy_document" "task_migrate" {
   dynamic "statement" {
     for_each = var.enable_db_bootstrap ? [1] : []
     content {
-      sid     = "BootstrapDbUserSecrets"
-      actions = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
-      resources = concat(
-        [module.secrets.secret_arns["rds/migrate"], module.secrets.secret_arns["rds/proxy"]],
-        var.enable_data_platform ? [module.secrets.secret_arns["rds/etl"]] : [],
-      )
+      sid       = "BootstrapDbUserSecrets"
+      actions   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
+      resources = [module.secrets.secret_arns["rds/migrate"], module.secrets.secret_arns["rds/proxy"]]
     }
   }
 
@@ -335,7 +332,7 @@ module "task_migrate" {
     MIGRATE_SECRET_ID = module.secrets.secret_arns["rds/migrate"]
     APP_SECRET_ID     = module.secrets.secret_arns["rds/proxy"]
     HOME              = "/tmp"
-  } : {}, var.enable_db_bootstrap && var.enable_data_platform ? { ETL_SECRET_ID = module.secrets.secret_arns["rds/etl"] } : {})
+  } : {})
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]
 

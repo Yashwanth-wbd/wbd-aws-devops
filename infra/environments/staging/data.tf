@@ -1,13 +1,17 @@
 # ================================================================== Step 13 - Data platform (Glue lakehouse) and model refresh
-# v4: Databricks is only the source catalog. Per business unit the model-refresh state machine
+# v5: Databricks is only the source catalog. Per business unit the model-refresh state machine
 #   1. starts the WBD Databricks export job through the export Lambda (Jobs API) - raw Parquet lands
 #      in landing raw/databricks/<bu>/<refresh_id>/ (Unity Catalog role: write there only),
 #   2. runs the Glue medallion: Bronze (ingested raw) -> Silver (cleansed, Data Quality) -> Gold
 #      (per-BU modeling tables, adstock and saturation), Delta Lake on the lakehouse bucket,
-#   3. Glue exports: Gold -> immutable Parquet training snapshot, Gold -> RDS PostgreSQL (in parallel),
-#   4. SageMaker trains and evaluates (baseline -> channel lift -> title adjustment inside the image),
+#   3. Glue exports in parallel: Gold -> immutable Parquet training snapshot, Gold reference tables ->
+#      Parquet + _manifest.json in lakehouse rds-export/<bu>/<refresh_id>/ (Glue has no database access),
+#   4. the results/data publisher Lambda loads that reference data into RDS (event reference_data),
+#   5. SageMaker trains and evaluates (baseline -> channel lift -> title adjustment inside the image),
 #      registers the model package as PendingManualApproval (approved by WBD in model-governance.yml),
-#   5. the results-publisher Lambda writes predictions, lift and evaluation results to RDS.
+#   6. SageMaker ML Lineage records the refresh: a context per refresh linking the raw export, the
+#      reference data, the training snapshot and the model package,
+#   7. the results/data publisher writes predictions, lift and evaluation results to RDS.
 # Orchestration: EventBridge Scheduler / "mmm.refresh" event -> model-refresh state machine.
 # Drift: a daily model-monitor state machine per BU runs the same export + medallion, Glue
 # export-monitor writes the latest features and SageMaker compares them with the approved baseline.
@@ -23,6 +27,8 @@ locals {
   landing_bucket_name = "wbd-mmm-${local.env_short}-landing-${local.region_code}"
   landing_bucket_arn  = "arn:${local.partition}:s3:::${local.landing_bucket_name}"
   raw_export_prefix   = "raw/databricks/"
+  lakehouse_bucket    = "wbd-mmm-${local.env_short}-lakehouse-${local.region_code}"
+  rds_export_prefix   = "rds-export/"
 
   data_key_arns = concat([module.kms.key_arns["s3"]], values(local.bu_key_arns))
 
@@ -143,12 +149,8 @@ module "glue" {
 
   subnet_id          = module.network.private_app_subnet_ids[0]
   availability_zone  = data.aws_subnet.glue[0].availability_zone
-  security_group_ids = [module.network.security_group_ids["glue"], module.network.security_group_ids["data_clients"]]
-
-  db_host     = module.rds.proxy_endpoint
-  db_name     = module.rds.db_name
-  db_user     = "mmm_etl"
-  db_user_arn = "${local.proxy_dbuser_arn}/mmm_etl"
+  security_group_ids = [module.network.security_group_ids["glue"]]
+  rds_export_prefix  = local.rds_export_prefix
 
   permissions_boundary_arn = module.permission_boundary.policy_arn
 }
@@ -178,6 +180,7 @@ locals {
   snapshot_uri   = "States.Format('s3://wbd-mmm-${local.env_short}-training-data-${local.region_code}/{}/{}/', $.business_unit, $.refresh_id)"
   evaluation_uri = "States.Format('s3://wbd-mmm-${local.env_short}-models-${local.region_code}/evaluation/{}/{}/', $.business_unit, $.refresh_id)"
   raw_uri        = "States.Format('s3://${local.landing_bucket_name}/${local.raw_export_prefix}{}/{}/', $.business_unit, $.refresh_id)"
+  rds_export_uri = "States.Format('s3://${local.lakehouse_bucket}/${local.rds_export_prefix}{}/{}/', $.business_unit, $.refresh_id)"
 
   sagemaker_vpc = {
     Subnets          = module.network.private_app_subnet_ids
@@ -261,7 +264,7 @@ locals {
     Silver                = { job = "silver", next = "Gold", monitor = false, args = {} }
     Gold                  = { job = "gold", next = "GlueExports", monitor = false, args = {} }
     ExportTraining        = { job = "export-training", next = null, monitor = false, args = { "--snapshot_uri.$" = local.snapshot_uri } }
-    ExportRds             = { job = "export-rds", next = null, monitor = false, args = {} }
+    ExportReferenceData   = { job = "export-rds", next = null, monitor = false, args = { "--output_uri.$" = local.rds_export_uri } }
     MonitorBronze         = { job = "bronze", next = "MonitorSilver", monitor = true, args = { "--raw_uri.$" = local.monitor_raw_uri } }
     MonitorSilver         = { job = "silver", next = "MonitorGold", monitor = true, args = {} }
     MonitorGold           = { job = "gold", next = "ExportMonitorFeatures", monitor = true, args = {} }
@@ -273,9 +276,10 @@ locals {
         Parameters = {
           JobName = lookup(local.glue_jobs, cfg.job, "")
           Arguments = merge({
-            "--business_unit.$" = "$.business_unit"
-            "--run_id.$"        = cfg.monitor ? "$.monitor_id" : "$.refresh_id"
-            "--purpose"         = cfg.monitor ? "monitor" : "refresh"
+            "--business_unit.$"        = "$.business_unit"
+            "--run_id.$"               = cfg.monitor ? "$.monitor_id" : "$.refresh_id"
+            "--purpose"                = cfg.monitor ? "monitor" : "refresh"
+            "--source_export_run_id.$" = "States.Format('{}', $.export.run_id)"
           }, cfg.args)
         }
         ResultSelector = { "run_id.$" = "$.Id", "state.$" = "$.JobRunState" }
@@ -284,6 +288,48 @@ locals {
       },
       jsondecode(cfg.next == null ? jsonencode({ End = true }) : jsonencode({ Next = cfg.next })),
   )) }
+
+  # SageMaker ML Lineage of a refresh: context <prefix>-refresh-<refresh_id> plus one artifact per
+  # input / output. produced = the context Produced the artifact, else the artifact ContributedTo it.
+  lineage_context_prefix = "${local.name_prefix}-refresh-"
+  lineage_retry          = [{ ErrorEquals = ["SageMaker.ThrottlingException", "SageMaker.SageMakerException"], IntervalSeconds = 5, MaxAttempts = 3, BackoffRate = 2 }]
+  lineage_artifacts = {
+    RawExport        = { type = "DataSet", uri = local.raw_uri, produced = false }
+    ReferenceData    = { type = "DataSet", uri = local.rds_export_uri, produced = false }
+    TrainingSnapshot = { type = "DataSet", uri = local.snapshot_uri, produced = false }
+    ModelPackage     = { type = "Model", uri = "$.registered.model_package_arn", produced = true }
+  }
+  lineage_branch = { for name, a in local.lineage_artifacts : name => jsonencode({
+    "Create${name}Artifact" = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:createArtifact"
+      Parameters = {
+        Source       = { "SourceUri.$" = a.uri }
+        ArtifactType = a.type
+        Properties = merge(
+          { kind = name, "business_unit.$" = "$.business_unit", "refresh_id.$" = "$.refresh_id" },
+          a.produced ? { "model_data_url.$" = "$.training.artifact" } : {},
+        )
+        Tags = [{ Key = "business_unit", "Value.$" = "$.business_unit" }, { Key = "refresh_id", "Value.$" = "$.refresh_id" }]
+      }
+      ResultSelector = { "arn.$" = "$.ArtifactArn" }
+      ResultPath     = "$.artifact"
+      Retry          = local.lineage_retry
+      Next           = "Associate${name}"
+    }
+    "Associate${name}" = {
+      Type     = "Task"
+      Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:addAssociation"
+      Parameters = {
+        "SourceArn.$"      = a.produced ? "$.lineage.context_arn" : "$.artifact.arn"
+        "DestinationArn.$" = a.produced ? "$.artifact.arn" : "$.lineage.context_arn"
+        AssociationType    = a.produced ? "Produced" : "ContributedTo"
+      }
+      ResultPath = null
+      Retry      = local.lineage_retry
+      End        = true
+    }
+  }) }
 }
 
 # ------------------------------------------------------------------ Model-refresh state machine
@@ -314,14 +360,32 @@ locals {
         Bronze = jsondecode(local.glue_step["Bronze"])
         Silver = jsondecode(local.glue_step["Silver"])
         Gold   = jsondecode(local.glue_step["Gold"])
-        # Glue exports: training snapshot and RDS reference tables at the same time
+        # Glue exports: training snapshot and Gold reference data (Parquet for RDS) at the same time
         GlueExports = {
           Type = "Parallel"
           Branches = [
             { StartAt = "ExportTraining", States = { ExportTraining = jsondecode(local.glue_step["ExportTraining"]) } },
-            { StartAt = "ExportRds", States = { ExportRds = jsondecode(local.glue_step["ExportRds"]) } },
+            { StartAt = "ExportReferenceData", States = { ExportReferenceData = jsondecode(local.glue_step["ExportReferenceData"]) } },
           ]
           ResultPath = null
+          Next       = "PublishReferenceData"
+        }
+        # Results/data publisher: loads rds-export/<bu>/<refresh_id>/ (listed in _manifest.json) into
+        # RDS as mmm_app. A failed load fails the refresh: no model is trained on unpublished data.
+        PublishReferenceData = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::lambda:invoke"
+          Parameters = {
+            FunctionName = module.publisher.alias_arn
+            Payload = {
+              event             = "reference_data"
+              "business_unit.$" = "$.business_unit"
+              "refresh_id.$"    = "$.refresh_id"
+              "input_uri.$"     = local.rds_export_uri
+            }
+          }
+          ResultPath = null
+          Retry      = slice(local.lambda_retry, 1, 2)
           Next       = "TrainModel"
         }
         TrainModel = {
@@ -412,7 +476,70 @@ locals {
           }
           ResultSelector = { "model_package_arn.$" = "$.ModelPackageArn" }
           ResultPath     = "$.registered"
-          Next           = "PublishModelResults"
+          Next           = "RecordLineage"
+        }
+        # SageMaker ML Lineage: one context per refresh (named after it); each input artifact
+        # ContributedTo it and it Produced the model package. A lineage failure does not undo a
+        # registered model: it is counted (metric LineageRecordFailed, alarm) and the refresh goes on.
+        RecordLineage = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:createContext"
+          Parameters = {
+            "ContextName.$" = "States.Format('${local.lineage_context_prefix}{}', $.refresh_id)"
+            ContextType     = "MMMModelRefresh"
+            Description     = "MMM model refresh (${var.environment})"
+            Source          = { "SourceUri.$" = "$$.Execution.Id", SourceType = "StepFunctionsExecution" }
+            Properties = {
+              environment           = var.environment
+              "business_unit.$"     = "$.business_unit"
+              "refresh_id.$"        = "$.refresh_id"
+              "databricks_run_id.$" = "States.Format('{}', $.export.run_id)"
+              "training_job.$"      = "$.training.name"
+              "model_package_arn.$" = "$.registered.model_package_arn"
+            }
+            Tags = [{ Key = "business_unit", "Value.$" = "$.business_unit" }]
+          }
+          ResultSelector = { "context_arn.$" = "$.ContextArn" }
+          ResultPath     = "$.lineage"
+          Retry          = local.lineage_retry
+          Catch          = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.lineage_error", Next = "LineageNotRecorded" }]
+          Next           = "RecordLineageArtifacts"
+        }
+        RecordLineageArtifacts = {
+          Type = "Parallel"
+          Branches = concat(
+            [for name, a in local.lineage_artifacts : { StartAt = "Create${name}Artifact", States = jsondecode(local.lineage_branch[name]) }],
+            # SageMaker creates a trial component for every training job: <job name>-aws-training-job
+            [{ StartAt = "AssociateTrainingJob", States = { AssociateTrainingJob = {
+              Type     = "Task"
+              Resource = "arn:${local.partition}:states:::aws-sdk:sagemaker:addAssociation"
+              Parameters = {
+                "SourceArn.$"      = "States.Format('${local.sagemaker_arn_prefix}:experiment-trial-component/{}-aws-training-job', $.training.name)"
+                "DestinationArn.$" = "$.lineage.context_arn"
+                AssociationType    = "ContributedTo"
+              }
+              ResultPath = null
+              Retry      = local.lineage_retry
+              End        = true
+            } } }],
+          )
+          ResultPath = null
+          Catch      = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.lineage_error", Next = "LineageNotRecorded" }]
+          Next       = "PublishModelResults"
+        }
+        LineageNotRecorded = {
+          Type     = "Task"
+          Resource = "arn:${local.partition}:states:::aws-sdk:cloudwatch:putMetricData"
+          Parameters = {
+            Namespace = "MMM/Models"
+            MetricData = [{
+              MetricName = "LineageRecordFailed"
+              Dimensions = [{ Name = "BusinessUnit", "Value.$" = "$.business_unit" }]
+              Value      = 1
+            }]
+          }
+          ResultPath = null
+          Next       = "PublishModelResults"
         }
         # Results publisher: model predictions, lift and evaluation results -> RDS for this dataset
         # (tagged with model_package_arn; the approval status lives in the registry).
@@ -473,6 +600,29 @@ data "aws_iam_policy_document" "refresh_sfn" {
     sid       = "RegisterModel"
     actions   = ["sagemaker:CreateModelPackage", "sagemaker:AddTags"]
     resources = ["${local.sagemaker_arn_prefix}:model-package-group/${local.name_prefix}-*", "${local.sagemaker_arn_prefix}:model-package/${local.name_prefix}-*/*"]
+  }
+
+  # Artifact ARNs are generated (artifact/<hash>), so artifacts cannot be scoped by name.
+  statement {
+    sid     = "RecordLineage"
+    actions = ["sagemaker:CreateContext", "sagemaker:CreateArtifact", "sagemaker:AddAssociation", "sagemaker:AddTags", "sagemaker:DescribeContext", "sagemaker:ListAssociations"]
+    resources = [
+      "${local.sagemaker_arn_prefix}:context/${local.lineage_context_prefix}*",
+      "${local.sagemaker_arn_prefix}:artifact/*",
+      "${local.sagemaker_arn_prefix}:experiment-trial-component/${local.training_job_prefix}-*",
+    ]
+  }
+
+  statement {
+    sid       = "LineageFailureMetric"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = ["MMM/Models"]
+    }
   }
 
   statement {
@@ -907,6 +1057,25 @@ resource "aws_scheduler_schedule" "monitor" {
       maximum_retry_attempts = 3
     }
   }
+}
+
+resource "aws_cloudwatch_metric_alarm" "lineage_record_failed" {
+  for_each = var.enable_data_platform ? toset(var.business_units) : toset([])
+
+  alarm_name          = "${local.name_prefix}-lineage-record-failed-${each.key}"
+  alarm_description   = "A model refresh for ${each.key} registered its model but could not record SageMaker lineage (runbooks/model-refresh-failed.md)"
+  namespace           = "MMM/Models"
+  metric_name         = "LineageRecordFailed"
+  dimensions          = { BusinessUnit = each.key }
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [module.monitoring.alert_topic_arn]
+
+  tags = merge(local.tags, { Component = "model-refresh" })
 }
 
 resource "aws_cloudwatch_metric_alarm" "model_drift" {

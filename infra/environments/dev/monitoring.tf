@@ -87,6 +87,7 @@ module "monitoring" {
   optimizer_task_family           = module.task_optimizer.task_definition_family
   glue_job_names                  = var.enable_data_platform ? values(module.glue[0].job_names) : []
   databricks_export_function_name = local.databricks_export_function
+  data_business_units             = var.enable_data_platform ? var.business_units : []
 
   # Weekly schedule: alarm after 7 days without a successful refresh
   model_refresh_overdue_days = var.enable_data_platform && var.enable_model_refresh_schedule ? 7 : null
@@ -98,6 +99,105 @@ module "monitoring" {
 
   # Step 15: the BreakGlass permission set exists only in prod (docs/02 §6)
   enable_breakglass_alert = local.is_prod
+}
+
+# ------------------------------------------------------------------ Optional: S3 data events on the MMM data buckets
+# Off by default: the WBD organization trail records them. On = own single-region trail into the
+# log bucket (cloudtrail/), log files encrypted with the cloudtrail key and integrity-validated.
+locals {
+  data_events_trail_name = "${local.name_prefix}-data-events"
+  data_events_trail_arn  = "arn:${local.partition}:cloudtrail:${var.aws_region}:${local.account_id}:trail/${local.data_events_trail_name}"
+}
+
+data "aws_iam_policy_document" "cloudtrail_key" {
+  #checkov:skip=CKV_AWS_109:Key policy; "*" means this key only and the trail ARN condition limits the use.
+  #checkov:skip=CKV_AWS_111:Key policy; "*" means this key only and the trail ARN condition limits the use.
+  #checkov:skip=CKV_AWS_356:Key policy; "*" means this key only and the trail ARN condition limits the use.
+  statement {
+    sid       = "AllowCloudTrailEncrypt"
+    actions   = ["kms:GenerateDataKey*"]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.data_events_trail_arn]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:aws:cloudtrail:arn"
+      values   = ["arn:${local.partition}:cloudtrail:*:${local.account_id}:trail/*"]
+    }
+  }
+
+  statement {
+    sid       = "AllowCloudTrailDescribe"
+    actions   = ["kms:DescribeKey"]
+    resources = ["*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [local.data_events_trail_arn]
+    }
+  }
+}
+
+resource "aws_cloudtrail" "data_events" {
+  #checkov:skip=CKV_AWS_67:Data events of this region's buckets only; the WBD organization trail covers all regions.
+  #checkov:skip=CKV_AWS_252:No SNS per log file; the files are read from S3 (Splunk / Athena).
+  #checkov:skip=CKV2_AWS_10:No CloudWatch Logs copy; the WBD organization trail and Splunk do the alerting.
+  count = var.enable_cloudtrail_data_events ? 1 : 0
+
+  name                          = local.data_events_trail_name
+  s3_bucket_name                = module.log_bucket.bucket_name
+  s3_key_prefix                 = module.log_bucket.prefixes["cloudtrail"]
+  kms_key_id                    = module.kms.key_arns["cloudtrail"]
+  enable_log_file_validation    = true
+  include_global_service_events = false
+  is_multi_region_trail         = false
+
+  advanced_event_selector {
+    name = "S3 object events on the MMM data buckets"
+
+    field_selector {
+      field  = "eventCategory"
+      equals = ["Data"]
+    }
+
+    field_selector {
+      field  = "resources.type"
+      equals = ["AWS::S3::Object"]
+    }
+
+    field_selector {
+      field       = "resources.ARN"
+      starts_with = [for b in module.buckets : "${b.bucket_arn}/"]
+    }
+
+    dynamic "field_selector" {
+      for_each = var.cloudtrail_data_events_include_reads ? [] : [1]
+      content {
+        field  = "readOnly"
+        equals = ["false"]
+      }
+    }
+  }
+
+  tags = merge(local.tags, { Component = "audit" })
+
+  depends_on = [module.log_bucket]
 }
 
 module "log_shipping" {

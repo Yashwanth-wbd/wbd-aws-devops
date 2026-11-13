@@ -74,7 +74,7 @@ Names are `mmm-<env>-<role>-sg`. The default VPC security group has all its rule
 | `sagemaker` | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | SageMaker jobs (no internet) |
 | `lambda` | none | 443 → `endpoints`, 443 → S3 prefix list | results-publisher and run-dispatcher Lambdas |
 | `optimizer` | none | 443 → `endpoints`, 443 → S3 prefix list | Optimizer ECS task (one per run; with `data_clients` only if the app needs the DB) |
-| `glue` (optional) | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | Glue job ENIs (Spark driver ↔ executors), with `data_clients` for export-rds |
+| `glue` (optional) | all from itself | all to itself, 443 → `endpoints`, 443 → S3 prefix list | Glue job ENIs (Spark driver ↔ executors); no database path (v5: the publisher loads RDS) |
 | `databricks_export` (optional) | none | 443 → anywhere (Databricks workspace via NAT, or PrivateLink) | Databricks export Lambda |
 | `genai` (optional) | none | 443 → anywhere (approved LLM providers) | LLM gateway proxy Lambda |
 | `resolver` (optional) | – | 53 TCP/UDP → each WBD DNS IP | this module |
