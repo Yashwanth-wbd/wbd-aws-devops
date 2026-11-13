@@ -34,9 +34,9 @@ uv run --no-project --with openpyxl python .\build_v4_new.py $req
 
 # Regenerate the v5 set from WBD_MMM_Architecture_5.pptx (based on build_v4_new.py; every R row carries
 # 'Change vs v4' + note): aws_resource_list_5.xlsx (+ v5_changes, removed_vs_v4 from REMOVED),
-# devops_5_client_question.xlsx (INPUTS / DECISIONS tagged New in v5 / Changed by v5 / From v4, Q_REMOVED)
-# and wbd_mmm_ecs_final_5.docx
-uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req
+# devops_5_client_question.xlsx (complete v5 INPUTS by resource-list layer + DECISIONS, _4_new layout)
+# and wbd_mmm_ecs_final_5.docx; --questions-only rebuilds just the question workbook
+uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req [--questions-only]
 ```
 
 Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx` or `devops_5_client_question.xlsx` overwrites the

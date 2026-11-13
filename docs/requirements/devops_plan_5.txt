@@ -125,8 +125,8 @@ Python 3.12. Docker optional. Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQU
 
 ## 3. Access & inputs to request (ASK the client)
 
-Everything in v4 §3 still applies (full list in `devops_5_client_question.xlsx`, tagged New in v5 /
-Changed by v5 / From v4), **except** the two v4 questions the v5 slides answer (separate export Lambda;
+Everything in v4 §3 still applies (complete v5 list in `devops_5_client_question.xlsx`: 100 inputs by
+layer of `aws_resource_list_5.xlsx` + 28 decisions to confirm), **except** the two v4 questions the v5 slides answer (separate export Lambda;
 GenAI in Release 1) and the `mmm_etl` path. **New or changed for v5:**
 - **Gold → RDS through the publisher:** confirm the route; list and size of the Gold reference tables per BU (decides the publisher's timeout / batching; fallback = direct Glue write as in v4).
 - **Lineage:** what must be traceable (export run → Glue tables → training snapshot → training job → model package) and whether a lineage UI (Amazon DataZone / SageMaker Catalog) is required.

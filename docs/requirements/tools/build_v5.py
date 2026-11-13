@@ -3,7 +3,8 @@
 - aws_resource_list_5.xlsx: complete AWS resource list for the WBD infrastructure team (same layout as
   aws_resource_list_4_new.xlsx) - name per environment, what it does in the v5 flow, settings per environment, Release,
   owner - plus 'Change vs v4' (the v4 build is in the repo) and the sheets v5_changes / removed_vs_v4.
-- devops_5_client_question.xlsx: all inputs and decisions WBD has to provide, tagged New in v5 / Changed by v5 / From v4.
+- devops_5_client_question.xlsx: all inputs and decisions WBD has to provide for v5, by layer of aws_resource_list_5.xlsx
+  (--questions-only rebuilds just this workbook).
 - wbd_mmm_ecs_final_5.docx: v5 design document.
 
 Usage: uv run --no-project --with openpyxl --with python-docx python build_v5.py <docs/requirements>
@@ -813,113 +814,163 @@ def objects(rows):
 
 
 # ------------------------------------------------------------------ client questions
-Q_NEW, Q_CHANGED, Q_KEPT = "New in v5", "Changed by v5", "From v4"
-
-# (v5 status, section, what WBD provides, example / default, used for (aws_resource_list_5.xlsx), WBD owner)
+# (section, what WBD provides, example / proposed default, used for (aws_resource_list_5.xlsx), WBD owner)
 INPUTS = [
-    (Q_KEPT, "1. Provisioning model", "Who creates the AWS resources: WBD Infra with their own tooling (CloudFormation / Terraform / console) or WBD runs our Terraform", "WBD Infra creates them from aws_resource_list_5.xlsx", "All layers", "Cloud Platform / Infra"),
-    (Q_KEPT, "1. Provisioning model", "How we receive the created resource ARNs / IDs back (needed for app config and GitHub variables)", "Filled 'ARN / ID' column of the env sheets, or SSM / Terraform outputs", "All layers", "Infra"),
-    (Q_KEPT, "1. Provisioning model", "Naming and tagging standard: accept mmm-<env>-* / wbd-mmm-<env>-*-use1 and the tags in the README, or give the WBD standard", "Project, Environment, Owner, CostCenter, ManagedBy", "All resources", "Cloud Platform"),
-    (Q_CHANGED, "1. Provisioning model", "IAM roles: v5 shows a dedicated IAM role on every integration - does WBD create the application roles with our policies, and is a WBD permission boundary mandatory", "WBD creates them with mmm-<env>-permission-boundary", "Layer 04 + every IAM role", "Security / Infra"),
-    (Q_KEPT, "1. Provisioning model", "May the deploy pipeline (GitHub OIDC roles) update ECS services, task definitions, Lambda code and Glue scripts after the first creation", "Yes - roles gha-deploy / gha-ecr-push", "Layer 04, 11, 13-15", "Security / Cloud Platform"),
-    (Q_KEPT, "1. Provisioning model", "Timeline and change process for creating the resources per environment (dev first)", "Change ticket per environment", "-", "Infra / CAB"),
-    (Q_KEPT, "2. AWS accounts and access", "AWS account IDs (dev, staging, prod)", "12 digits", "Layer 01", "Cloud Platform"),
-    (Q_KEPT, "2. AWS accounts and access", "Approved primary and DR region (Glue, SageMaker, Bedrock must be available)", "us-east-1, us-west-2", "Layer 01, 20", "Cloud Platform"),
-    (Q_KEPT, "2. AWS accounts and access", "SCPs allow the services of the list (ECS, Lambda, Step Functions, Glue, SageMaker, Bedrock, API Gateway, Firehose, Backup)", "Confirmation", "Layer 01", "Cloud Platform"),
-    (Q_CHANGED, "2. AWS accounts and access", "IAM Identity Center: is Okta the identity source (slide 2 shows IAM Identity Center under Okta)? Start URL, permission sets and Okta groups for DevOps", "Okta -> Identity Center (SAML + SCIM); DevOps (dev, staging), ReadOnly (all), prod time-limited elevation", "Layer 01", "Identity / Cloud Platform"),
-    (Q_KEPT, "2. AWS accounts and access", "Confirm the account baseline is on: CloudTrail org trail (events to EventBridge), GuardDuty, Security Hub, Config, Inspector, Access Analyzer, S3 Block Public Access, EBS encryption", "Confirmation", "Layer 01", "Security"),
-    (Q_NEW, "2. AWS accounts and access", "CloudTrail 'enabled across all components': add S3 data events for the MMM buckets to the org trail, or may we create a trail", "WBD org trail with advanced selectors on the 7 data buckets", "Layer 01", "Security / Audit"),
-    (Q_KEPT, "2. AWS accounts and access", "Service quota increases: Fargate On-Demand vCPU, Glue concurrent runs / DPUs, SageMaker training and processing instances", "Fargate 40 / 120 / 450 vCPU; Glue >= 20 runs; SageMaker >= 3 each", "Layer 01", "Cloud Platform"),
-    (Q_KEPT, "3. Network", "VPC CIDR per environment (no overlap with WBD)", "10.40.0.0/19, 10.40.32.0/19, 10.40.64.0/19", "Layer 05", "Network"),
-    (Q_KEPT, "3. Network", "Availability Zones", "2 in dev, 3 in staging / prod (use1-az1, az2, az4)", "Layer 05", "Network"),
-    (Q_KEPT, "3. Network", "NAT gateways allowed for egress, or a central firewall / proxy (Databricks API, Okta; LLM providers in Release 2)", "NAT: 1 in dev, 1 per AZ in staging / prod", "Layer 05", "Network"),
-    (Q_KEPT, "3. Network", "Connect to the WBD network: Transit Gateway ID and routes; DNS forwarding domains and resolver IPs", "Not required unless VDI / Splunk / on-prem access is needed", "Layer 05 (optional)", "Network"),
-    (Q_KEPT, "3. Network", "Who may reach the app: internet or only WBD IP ranges", "Internet + WAF + Okta sign-in", "Layer 06 SG alb, layer 12", "Security / Network"),
-    (Q_KEPT, "3. Network", "Proxy CA certificate for the VDI and allow-listed URLs (GitHub, PyPI, npm, Terraform registry, Databricks, LLM providers, Splunk)", ".pem file", "Engineer workstations", "Network"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "App domain name per environment (also the only CORS origin of the uploads bucket)", "mmm-dev.<domain>, mmm-stg.<domain>, mmm.<domain>", "Layer 09 uploads, layer 12", "DNS"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "ACM certificate in us-east-1 and the DNS record to the ALB (WBD DNS or a Route 53 zone we may use)", "arn:aws:acm:...; CNAME", "Layer 12", "DNS / PKI"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "Okta OIDC web app per environment: issuer URL and client ID (redirect https://<app>/oauth2/idpresponse)", "https://wbd.okta.com/oauth2/default, 0oa...", "Layer 08 /okta/issuer, layer 12", "Identity"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "Okta client secret entered in Secrets Manager by WBD (never by email)", "mmm/<env>/okta/alb-client", "Layer 08", "Identity"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "Okta group names for business unit and role (groups claim in the ID token)", "mmm-bu-streaming, mmm-role-planner", "Layer 12, API RBAC", "Identity"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "Session length; MFA / step-up for approvals", "12 hours", "Layer 12", "Identity"),
-    (Q_KEPT, "4. Domain, certificate and sign-in", "WAF policy: rate limit, country allow-list, Shield Advanced", "2000 requests / 5 min per IP; no geo block; no Shield Advanced", "Layer 12", "Security"),
-    (Q_KEPT, "5. Database", "RDS PostgreSQL size per environment (instance, storage, Multi-AZ, read replica)", "dev db.t4g.medium single-AZ 50 GB; staging db.r6g.large Multi-AZ 100 GB; prod db.r6g.xlarge Multi-AZ 200 GB; no replica", "Layer 10", "Architecture / Ops"),
-    (Q_KEPT, "5. Database", "Backup retention and maintenance windows", "PITR 7 / 14 / 35 days; Sunday maintenance", "Layer 10, 20", "Ops"),
-    (Q_CHANGED, "5. Database", "Who creates the DB users (mmm_app, mmm_migrator) and enters their secrets (v5: no separate Glue user mmm_etl)", "DevOps DB bootstrap after the instance exists", "Layer 08, 10", "Infra / DevOps"),
-    (Q_KEPT, "6. Optimization (slide 2)", "Optimizer task size and maximum run time", "4 vCPU / 16 GB / 50 GiB (prod 8 vCPU / 32 GB); 60 minutes", "Layer 13", "Data science"),
-    (Q_KEPT, "6. Optimization (slide 2)", "Runs allowed at the same time and maximum queue wait", "5 / 20 / 50 runs; 30 minutes", "Layer 08 max_concurrent_runs, layer 13", "Business / EY"),
-    (Q_KEPT, "6. Optimization (slide 2)", "API / UI task counts per environment", "api 1-2 / 2-4 / 3-10, ui 1-2 / 2-3 / 2-6", "Layer 11", "Architecture"),
-    (Q_CHANGED, "6. Optimization (slide 2)", "User file upload to S3 (slide 2 arrow from the UI): accepted file types, maximum file size, retention", "Browser PUT with a presigned URL from the API; xlsx / csv, 50 MB, 90 days", "Layer 09 uploads", "Product / Legal"),
-    (Q_KEPT, "6. Optimization (slide 2)", "Malware scanning of uploads required (GuardDuty Malware Protection for S3)", "No", "Layer 09 (optional)", "Security"),
-    (Q_KEPT, "6. Optimization (slide 2)", "'Upload future titles' file format and use", "Template xlsx; run type forecast", "API contract", "Product / Data science"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Databricks workspace URL and account ID", "https://dbc-....cloud.databricks.com", "Layer 08 /databricks/host", "Databricks"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Source catalog / schema / tables per business unit (3+ years), size and growth", "wbd_prod.mmm.<table>; GB per BU", "Glue sizing", "Databricks / Data owners"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Export job ID per business unit and job owner (job writes Parquet to the output_uri it receives)", '{"streaming": 123, ...}', "Layer 08 /databricks/export_job_ids, layer 14", "Databricks / Data"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Service principal for the Export Trigger Lambda ('Can manage run'): client ID + OAuth secret entered in Secrets Manager by WBD", "mmm/<env>/databricks/export-sp", "Layer 08, 14", "Databricks"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Unity Catalog storage credential + external location on landing raw/databricks/ using role mmm-<env>-databricks-uc (we give the role ARN and external ID)", "Registered by the Databricks admins", "Layer 14", "Databricks"),
-    (Q_KEPT, "7. Databricks export (slide 1)", "Databricks reachability: workspace IP access list allows our NAT IPs, or PrivateLink (service name)", "NAT IPs from layer 05", "Layer 05, 14", "Databricks / Network"),
-    (Q_KEPT, "8. Glue lakehouse (slide 1)", "Glue version and worker size per environment", "Glue 5.0; G.1X x 2 / 5 / 10; 120-minute timeout", "Layer 15", "Data / Architecture"),
-    (Q_KEPT, "8. Glue lakehouse (slide 1)", "Is the Glue Data Catalog encryption (account-wide setting) already managed by WBD", "No - created with this list", "Layer 15", "Cloud Platform / Security"),
-    (Q_KEPT, "8. Glue lakehouse (slide 1)", "AWS Lake Formation required, or IAM only", "IAM only", "Layer 15", "Security / Data"),
-    (Q_KEPT, "8. Glue lakehouse (slide 1)", "Silver data-quality rules, owner, behaviour on failure", "DQDL rules from the data engineers; stop the refresh", "Layer 15 ruleset", "Data engineering"),
-    (Q_CHANGED, "8. Glue lakehouse (slide 1)", "Gold tables for the app: list, size per BU, full reload or incremental (v5: loaded into RDS by the results/data publisher Lambda)", "<bu>_titles, <bu>_inventory_history; full reload per refresh", "Layer 13 publisher, layer 15 export-rds", "Data / Backend"),
-    (Q_NEW, "8. Glue lakehouse (slide 1)", "Data lineage: what must be traceable and who looks at it ('Data Catalog (Lineage)', 'Registry + lineage')", "Export run -> Glue tables -> training snapshot -> model version, in the Glue catalog + SageMaker lineage; no extra UI", "Layer 15, 17", "Data governance / Data science"),
-    (Q_NEW, "8. Glue lakehouse (slide 1)", "Is a lineage / catalog UI required (Amazon DataZone / SageMaker Catalog), or is the Glue catalog + SageMaker lineage enough", "Not required", "Layer 15 (optional)", "Data governance"),
-    (Q_KEPT, "9. Models (slide 1)", "Business unit names, refresh schedule and timezone", BUS + "; weekly Monday 06:00, America/New_York", "Layer 17", "Data"),
-    (Q_KEPT, "9. Models (slide 1)", "Model acceptance thresholds per business unit and the named model approver", "MAPE, R2, ...; WBD approver for prod", "Layer 16, GitHub environment", "Data science"),
-    (Q_KEPT, "9. Models (slide 1)", "Model results in RDS for every registered version or only approved ones", "Every registered version (tagged with the package ARN)", "Layer 13 publisher", "Data science / Backend"),
-    (Q_KEPT, "9. Models (slide 1)", "Drift threshold, check schedule, retrain automatically or alert only", "0.2; daily 07:00; alert only", "Layer 17, 19", "Data science"),
-    (Q_KEPT, "9. Models (slide 1)", "Third-party vendors still needed (API keys entered by WBD)", "adstra, inscape / none", "Layer 08 (optional)", "Data owners"),
-    (Q_CHANGED, "10. GenAI explanation (slide 2, Release 2)", "Written approval for data to external LLM providers; approved providers (or Bedrock-hosted models) - needed before Release 2", "Approval document", "Layer 18", "Responsible AI / Legal"),
-    (Q_NEW, "10. GenAI explanation (slide 2, Release 2)", "Release 1 behaviour of the explanation tool ('invoke explanation tool by default for every run' while GenAI is not part of R1)", "Skipped in R1 - the run result shows no explanation", "API, layer 08 genai_enabled", "Product / EY"),
-    (Q_KEPT, "10. GenAI explanation (slide 2, Release 2)", "Provider API keys entered in Secrets Manager by WBD", "mmm/<env>/llm/openai, anthropic, google", "Layer 08", "Vendor contracts"),
-    (Q_KEPT, "10. GenAI explanation (slide 2, Release 2)", "Token quota per business unit and per run; guardrail policy (PII, denied topics, thresholds)", "1,000,000 tokens/day per BU; ~5,000 per run; 0.75", "Layer 08, 18", "Responsible AI"),
-    (Q_KEPT, "11. Operations, security and cost", "Alert email lists / paging tool", "mmm-oncall@<domain>", "Layer 19 SNS", "Ops"),
-    (Q_KEPT, "11. Operations, security and cost", "Monthly budget per account", "3,000 / 6,000 / 15,000 USD", "Layer 04", "Finance"),
-    (Q_KEPT, "11. Operations, security and cost", "Log retention; approved scenarios (Object Lock) and training-data retention", "Logs 30 / 90 / 365 d; approved 7 years; training data 1-2 years", "Layers 09, 19", "Legal / Audit"),
-    (Q_KEPT, "11. Operations, security and cost", "Splunk shipping required: HEC endpoint, token (entered by WBD), index, source type", "Not required at go-live", "Layer 19 (optional)", "Splunk"),
-    (Q_KEPT, "11. Operations, security and cost", "RPO / RTO sign-off; cross-region backup copy and prod vault lock", "RPO 24 h (PITR 5 min for RDS), RTO 4 h; no cross-region copy", "Layer 20", "Ops / Security"),
-    (Q_KEPT, "11. Operations, security and cost", "Security incident contact, operations owner after handover, hypercare length", "Names", "Runbooks", "Security / Ops"),
-    (Q_KEPT, "12. GitHub and releases", "GitHub organization / repository (OIDC trust subject)", "wbd-org/wbd-mmm-devops", "Layer 04", "GitHub admins"),
-    (Q_KEPT, "12. GitHub and releases", "Repo admin rights for DevOps (environments, variables, branch protection)", "Admin role", "GitHub", "GitHub admins"),
-    (Q_KEPT, "12. GitHub and releases", "Approvers: staging (EY), prod (WBD), model promotion, Glue script releases", "GitHub users / teams", "GitHub environments", "WBD / EY"),
-    (Q_KEPT, "12. GitHub and releases", "CAB change-ticket format for prod", "CHG1234567", "deploy pipeline", "CAB"),
-    (Q_KEPT, "12. GitHub and releases", "Approved security tools (SAST, DAST, GitHub Advanced Security)", "Semgrep / CodeQL / ZAP", "CI", "Security"),
+    # 1. Provisioning model and ownership
+    ("1. Provisioning model", "Who creates the AWS resources of aws_resource_list_5.xlsx: WBD Infra with their own tooling (CloudFormation / Terraform / console) or WBD runs our Terraform", "WBD Infra creates them from aws_resource_list_5.xlsx", "All layers", "Cloud Platform / Infra"),
+    ("1. Provisioning model", "How we receive the created resource ARNs / IDs back (needed for app config and GitHub variables)", "Filled 'ARN / ID' column of the dev / staging / prod sheets, or SSM / Terraform outputs", "All layers", "Infra"),
+    ("1. Provisioning model", "Naming and tagging standard: accept mmm-<env>-* / wbd-mmm-<env>-*-use1 and the tags in the README sheet, or give the WBD standard", "Project, Environment, Owner, CostCenter, ManagedBy; backup = true", "All resources", "Cloud Platform"),
+    ("1. Provisioning model", "Values for the tags Owner and CostCenter per environment", "Owner = <WBD team>, CostCenter = <WBD value>", "All resources", "Finance / Cloud Platform"),
+    ("1. Provisioning model", "May the deploy pipeline update ECS services, task definitions, Lambda code and Glue scripts after the first creation ('first version; new revisions by the deploy pipeline')", "Yes - GitHub roles gha-deploy / gha-ecr-push", "04, 11, 13, 14, 15", "Security / Cloud Platform"),
+    ("1. Provisioning model", "Timeline and change process for creating the resources per environment (dev first, then staging, then prod)", "One change ticket per environment", "-", "Infra / CAB"),
+    # 2. AWS accounts and account baseline (layer 01)
+    ("2. AWS accounts and baseline", "AWS account IDs (dev, staging, prod) and account names", "12 digits; wbd-mmm-dev / wbd-mmm-stage / wbd-mmm-prod", "01 AWS account per environment", "Cloud Platform"),
+    ("2. AWS accounts and baseline", "Approved primary and DR region (Glue 5.0, SageMaker, Bedrock must be available)", "us-east-1; DR us-west-2", "01, 20", "Cloud Platform"),
+    ("2. AWS accounts and baseline", "SCPs allow the services of the list (ECS, Lambda, Step Functions, SQS, Glue, SageMaker, API Gateway, Bedrock, Firehose, Backup, EventBridge Scheduler)", "Confirmation", "01 Service Control Policies", "Cloud Platform"),
+    ("2. AWS accounts and baseline", "IAM Identity Center (drawn under Okta on slide 2): is Okta the identity source (SAML + SCIM)? Start URL and the Okta groups mapped to the permission sets", "Okta -> Identity Center; ReadOnly, Developer, DevOps, Security, BreakGlass", "01 Permission sets", "Identity / Cloud Platform"),
+    ("2. AWS accounts and baseline", "Access per environment for the DevOps team (prod: time-limited elevation on approval)", "dev + staging DevOps; prod ReadOnly, DevOps on approval", "01 Permission sets", "Security"),
+    ("2. AWS accounts and baseline", "Confirm the account baseline is on: CloudTrail org trail (with events to EventBridge), GuardDuty, Security Hub, Config, Inspector (ECR scanning), Access Analyzer, S3 Block Public Access, EBS encryption by default", "Confirmation per account", "01 baseline rows", "Security"),
+    ("2. AWS accounts and baseline", "CloudTrail 'to be enabled across all components': add S3 data events for the 7 MMM data buckets to the org trail, or may we create our own trail", "WBD org trail with advanced event selectors; dev write only, staging / prod read + write", "01 CloudTrail S3 data events", "Security / Audit"),
+    ("2. AWS accounts and baseline", "Amazon Macie on the data buckets required", "No", "01 Amazon Macie (optional)", "Security"),
+    # 3. Service quotas (layer 01)
+    ("3. Service quotas", "Fargate On-Demand vCPU quota increase (UI / API services + one optimizer task per run)", ">= 40 / >= 120 / >= 450 vCPU", "01 Fargate On-Demand vCPU", "Cloud Platform"),
+    ("3. Service quotas", "AWS Glue concurrent job runs and DPUs", ">= 20 runs; DPUs for 10 workers x 6 jobs", "01 Glue quota", "Cloud Platform"),
+    ("3. Service quotas", "SageMaker training and processing instance quotas (ml.m5.2xlarge training, ml.m5.xlarge processing)", ">= 3 each", "01 SageMaker quota", "Cloud Platform"),
+    # 4. Terraform state (layer 02)
+    ("4. Terraform state", "Is our Terraform used? If yes: may we create the state bucket + KMS key per account, or does WBD provide a state backend", "wbd-mmm-<env>-tfstate-use1 + alias/mmm-<env>-tfstate", "02 Terraform state (optional)", "Infra"),
+    # 5. Encryption (layer 03)
+    ("5. Encryption (KMS)", "Customer-managed KMS keys per purpose (s3, rds, logs, secrets, ecr, sqs, sagemaker, alerts, backup) and one per business unit - accept, or use WBD central keys", "Keys created per account with rotation on (slides draw KMS on every store)", "03 KMS keys", "Security"),
+    ("5. Encryption (KMS)", "Key administrators and the key-policy standard (account root + the roles that use the key)", "WBD Security as key admin", "03 KMS keys", "Security"),
+    # 6. IAM foundation, CI/CD access and cost (layer 04)
+    ("6. IAM and CI/CD access", "IAM roles: does WBD create the application roles with our policies (slides draw 'AWS IAM' on every integration), and is a WBD permission boundary mandatory", "WBD creates them with mmm-<env>-permission-boundary", "04 + every IAM role", "Security / Infra"),
+    ("6. IAM and CI/CD access", "GitHub organization / repository for the OIDC trust (repo + branch / environment)", "wbd-org/wbd-mmm-devops", "04 GitHub OIDC provider + roles", "GitHub admins"),
+    ("6. IAM and CI/CD access", "GitHub OIDC identity provider: already in the account or to be created", "Create token.actions.githubusercontent.com", "04 IAM OIDC identity provider", "Security"),
+    ("6. IAM and CI/CD access", "Monthly budget per account and the cost-alert recipients", "3,000 / 6,000 / 15,000 USD", "04 AWS Budget, cost anomaly monitor", "Finance"),
+    # 7. Networking (layer 05)
+    ("7. Networking", "VPC CIDR per environment (no overlap with WBD ranges)", "10.40.0.0/19, 10.40.32.0/19, 10.40.64.0/19", "05 VPC", "Network"),
+    ("7. Networking", "Availability Zones", "2 in dev, 3 in staging / prod (use1-az1, az2, az4)", "05 Subnets", "Network"),
+    ("7. Networking", "Internet egress: NAT gateways allowed, or central egress / firewall / proxy (Databricks API, Okta, package indexes; LLM providers in Release 2)", "NAT: 1 in dev, 1 per AZ in staging / prod", "05 NAT gateways", "Network"),
+    ("7. Networking", "NAT Elastic IPs must be allow-listed anywhere (Databricks workspace IP access list, Okta, vendors)", "Yes - Databricks IP access list", "05 NAT gateways, 14", "Network / Databricks"),
+    ("7. Networking", "Connect to the WBD network: Transit Gateway ID and routes", "Not required unless VDI / Splunk / on-prem access is needed", "05 Transit Gateway attachment (optional)", "Network"),
+    ("7. Networking", "DNS forwarding to WBD internal domains: domains and resolver IPs", "Not required", "05 Outbound resolver endpoint (optional)", "Network"),
+    ("7. Networking", "VPC flow-log retention and destination (CloudWatch or central log archive)", "CloudWatch, 30 / 90 / 365 days", "05 VPC flow logs", "Security"),
+    # 8. Security groups and reachability (layer 06)
+    ("8. Security groups", "Who may reach the app: internet or only WBD IP ranges (ALB security group source)", "Internet + WAF + Okta sign-in", "06 Security group - alb", "Security / Network"),
+    ("8. Security groups", "WBD IP ranges if the app is restricted", "CIDR list", "06 Security group - alb", "Network"),
+    # 9. Container registry (layer 07)
+    ("9. Container registry", "ECR in each account or a central WBD registry; image retention and scanning standard", "ECR per account: mmm/api, mmm/ui, mmm/optimizer, mmm/sagemaker-training; keep last 20 tags; enhanced scanning", "07 ECR", "Cloud Platform / Security"),
+    ("9. Container registry", "Approved base images (Python, Node, nginx) or a WBD golden-image registry", "Official slim images", "07 ECR, CI", "Security"),
+    # 10. Secrets and parameters (layer 08)
+    ("10. Secrets and parameters", "Who enters each secret value in Secrets Manager (never by email): Okta client secret, Databricks export service principal, Splunk HEC token, vendor keys", "Owner team per secret (see 'Created by / owner')", "08 Secrets", "Identity / Databricks / Splunk"),
+    ("10. Secrets and parameters", "Secret rotation policy (DB users, Okta client secret, Databricks service-principal secret)", "DB every 90 days; others yearly or per WBD policy", "08 Secrets", "Security"),
+    ("10. Secrets and parameters", "Third-party vendor data still needed (API keys entered by WBD)", "adstra, inscape / none", "08 Secret - thirdparty/* (optional)", "Data owners"),
+    # 11. Storage (layer 09)
+    ("11. Storage (S3)", "Retention per bucket: landing (Glacier after 365 d), training data (Object Lock), uploads, exports, logs", "Training data 365 d (prod 730 d COMPLIANCE); uploads 90 d; exports 30 d; logs 90 / 365 d", "09 S3 buckets", "Legal / Audit"),
+    ("11. Storage (S3)", "Approved scenarios: Object Lock mode and retention (must be set when the bucket is created)", "GOVERNANCE in dev / staging, COMPLIANCE in prod, 7 years", "09 S3 bucket - approved-worm", "Legal / Audit"),
+    ("11. Storage (S3)", "User file upload to S3 (slide 2): accepted file types, maximum file size", "xlsx / csv, 50 MB; browser PUT with a presigned URL", "09 S3 bucket - uploads", "Product"),
+    ("11. Storage (S3)", "'Upload future titles' file template and the columns required", "Template xlsx", "09 uploads, API contract", "Product / Data science"),
+    ("11. Storage (S3)", "Malware scanning of user uploads required (GuardDuty Malware Protection for S3)", "No", "09 Malware Protection for S3 (optional)", "Security"),
+    # 12. Database (layer 10)
+    ("12. Database", "RDS PostgreSQL size per environment (instance, storage, Multi-AZ, read replica)", "dev db.t4g.medium single-AZ 50 GB; staging db.r6g.large Multi-AZ 100 GB; prod db.r6g.xlarge Multi-AZ 200 GB; no replica", "10 RDS for PostgreSQL instance", "Architecture / Ops"),
+    ("12. Database", "PostgreSQL version standard", "16.x", "10 DB parameter group, instance", "Ops"),
+    ("12. Database", "Backup retention and maintenance / backup windows", "PITR 7 / 14 / 35 days; Sunday maintenance", "10 instance, 20", "Ops"),
+    ("12. Database", "Who creates the DB users mmm_app (API + results/data publisher) and mmm_migrator and enters their secrets", "DevOps DB bootstrap task after the instance exists", "10 DB users, 08 secrets", "Infra / DevOps"),
+    ("12. Database", "Who may connect to the database for support (read-only role, through which path)", "No direct access; ECS Exec on the platform-check task in dev / staging only", "10, 11", "Security / Ops"),
+    # 13. ECS UI and API (layer 11)
+    ("13. ECS UI and API", "API / UI task counts and sizes per environment", "api 1 vCPU / 2 GB, 1-2 / 2-4 / 3-10 tasks; ui 0.25 vCPU / 0.5 GB, 1-2 / 2-3 / 2-6 tasks", "11 ECS services, task definitions", "Architecture"),
+    ("13. ECS UI and API", "Fargate Spot allowed in dev / staging", "Yes for dev; no for prod", "11 ECS cluster", "Cloud Platform"),
+    ("13. ECS UI and API", "ECS Exec allowed (audited) for troubleshooting", "dev / staging only", "11 ECS cluster, log group exec-audit", "Security"),
+    # 14. Front door and sign-in (layer 12)
+    ("14. Front door and sign-in", "App domain name per environment (also the only CORS origin of the uploads bucket)", "mmm-dev.<domain>, mmm-stg.<domain>, mmm.<domain>", "12 ACM certificate, DNS record; 09 uploads", "DNS"),
+    ("14. Front door and sign-in", "ACM certificate in us-east-1 (or WBD-issued) and the DNS record to the ALB (WBD DNS or a Route 53 zone we may use)", "ACM DNS-validated; CNAME in WBD DNS", "12 ACM certificate, DNS record", "DNS / PKI"),
+    ("14. Front door and sign-in", "Okta OIDC web app per environment: issuer URL and client ID (redirect https://<app>/oauth2/idpresponse)", "https://wbd.okta.com/oauth2/default, 0oa...", "12 Okta OIDC app, 08 okta/issuer", "Identity"),
+    ("14. Front door and sign-in", "Okta group names for business unit and role (groups claim in the ID token, used for RBAC)", "mmm-bu-streaming, mmm-role-planner, mmm-role-approver", "12, API RBAC", "Identity"),
+    ("14. Front door and sign-in", "Session length; MFA / step-up for approvals", "12 hours; MFA per WBD policy", "12 Okta OIDC app", "Identity"),
+    ("14. Front door and sign-in", "WAF policy: rate limit, managed rule sets, country allow-list, Shield Advanced", "2000 requests / 5 min per IP; AWS managed rules; no geo block; no Shield Advanced", "12 WAF web ACL", "Security"),
+    # 15. Optimization engine (layer 13)
+    ("15. Optimization engine", "Optimizer task size and maximum run time", "4 vCPU / 16 GB / 50 GiB (prod 8 vCPU / 32 GB); 60 minutes", "13 ECS task definition - optimizer", "Data science"),
+    ("15. Optimization engine", "Runs allowed at the same time per environment and maximum queue wait", "5 / 20 / 50 runs; 30 minutes", "08 max_concurrent_runs, 13", "Business / EY"),
+    ("15. Optimization engine", "Expected planners and runs per day in peak planning season", "50-150 planners; runs per day per BU", "13, 01 Fargate quota", "Business"),
+    ("15. Optimization engine", "Run types: optimize (upload inventory + objective) and forecast (upload future titles) - any other", "optimize, forecast", "13, API contract", "Product"),
+    ("15. Optimization engine", "Size of the Gold reference data loaded into RDS by the results/data publisher per refresh (rows / MB per BU) - decides the publisher timeout", "< 1 GB per BU; publisher 512 MB / 120 s, 900 s if needed", "13 Lambda - results/data publisher", "Data engineering / Backend"),
+    # 16. Databricks export (layer 14)
+    ("16. Databricks export", "Databricks workspace URL and account ID per environment", "https://dbc-....cloud.databricks.com", "08 databricks/host, 14", "Databricks"),
+    ("16. Databricks export", "Source catalog / schema / tables per business unit (3+ years historical inventory), size and growth", "wbd_prod.mmm.<table>; GB per BU", "14, 15 Glue sizing", "Databricks / Data owners"),
+    ("16. Databricks export", "Export job ID per business unit and the job owner (the job writes Parquet to the output URI it receives)", '{"streaming": 123, ...}', "14 Databricks export job, 08 export_job_ids", "Databricks / Data"),
+    ("16. Databricks export", "Service principal for the Export Trigger Lambda ('Can manage run'): client ID + OAuth secret entered in Secrets Manager by WBD", "mmm/<env>/databricks/export-sp", "14 Service principal, 08 secret", "Databricks"),
+    ("16. Databricks export", "Unity Catalog storage credential + external location on landing raw/databricks/ using role mmm-<env>-databricks-uc (we give the role ARN and external ID)", "Registered by the Databricks admins", "14 IAM role - Databricks UC", "Databricks"),
+    ("16. Databricks export", "Databricks reachability: workspace IP access list allows our NAT IPs, or PrivateLink (service name)", "NAT IPs from layer 05", "05, 14", "Databricks / Network"),
+    ("16. Databricks export", "Export window and expected export duration per BU", "Monday 05:00-06:00 ET; < 30 minutes", "14, 17 schedules", "Databricks"),
+    # 17. Glue lakehouse and lineage (layer 15)
+    ("17. Glue lakehouse and lineage", "Glue version and worker size per environment", "Glue 5.0; G.1X x 2 / 5 / 10; 120-minute timeout", "15 Glue jobs", "Data / Architecture"),
+    ("17. Glue lakehouse and lineage", "Is the Glue Data Catalog encryption (account-wide setting) already managed by WBD", "No - created with this list", "15 Glue Data Catalog encryption", "Cloud Platform / Security"),
+    ("17. Glue lakehouse and lineage", "AWS Lake Formation required, or IAM only", "IAM only", "15", "Security / Data"),
+    ("17. Glue lakehouse and lineage", "Silver data-quality rules, their owner and behaviour on failure", "DQDL rules from the data engineers; stop the refresh and alert", "15 Glue Data Quality ruleset", "Data engineering"),
+    ("17. Glue lakehouse and lineage", "Gold tables needed by the app in RDS: list, size per BU, full reload or incremental", "<bu>_titles, <bu>_inventory_history; full reload per refresh", "15 export-rds, 13 publisher", "Data / Backend"),
+    ("17. Glue lakehouse and lineage", "Data lineage ('Data Catalog (Lineage)', 'Registry + S3 ... + lineage'): what must be traceable and who reviews it", "Databricks export run -> Glue tables -> training snapshot -> training job -> model version", "15 Data lineage records", "Data governance / Data science"),
+    ("17. Glue lakehouse and lineage", "Lineage / catalog UI required (Amazon DataZone / SageMaker Catalog)", "Not required", "15 DataZone domain (optional)", "Data governance"),
+    # 18. SageMaker modeling (layer 16)
+    ("18. SageMaker modeling", "Training and processing instance types, maximum training time", "ml.m5.2xlarge training, ml.m5.xlarge evaluation / drift; 4 hours", "16 Training / processing jobs", "Data science"),
+    ("18. SageMaker modeling", "Business unit names (one model package group each)", "streaming, theatrical, usnetworks", "16 Model package groups, 03 per-BU keys", "Data"),
+    ("18. SageMaker modeling", "Model acceptance thresholds per business unit and the named model approver", "MAPE, R2, ...; WBD approver for prod", "16, GitHub environment", "Data science"),
+    ("18. SageMaker modeling", "Model results in RDS for every registered version or only approved ones", "Every registered version (tagged with the model package ARN)", "13 publisher", "Data science / Backend"),
+    # 19. Model refresh and drift (layer 17)
+    ("19. Model refresh and drift", "Refresh schedule per business unit and timezone; app-triggered refresh allowed for which roles", "Weekly Monday 06:00 America/New_York; approvers only", "17 Schedules, rule on demand", "Data / Product"),
+    ("19. Model refresh and drift", "Drift threshold, check schedule, retrain automatically or alert only", "0.2; daily 07:00; alert only", "17 model monitor, 19", "Data science"),
+    # 20. GenAI (layer 18, Release 2)
+    ("20. GenAI (Release 2 - not part of R1)", "Written approval for data to external LLM providers; approved providers (or Bedrock-hosted models)", "Approval document before Release 2", "18 GenAI layer", "Responsible AI / Legal"),
+    ("20. GenAI (Release 2 - not part of R1)", "Release 1 behaviour of 'invoke explanation tool by default for every run' while GenAI is not part of R1", "Skipped in R1 - the run result shows no explanation", "08 genai_enabled, API", "Product / EY"),
+    ("20. GenAI (Release 2 - not part of R1)", "Provider API keys entered in Secrets Manager by WBD", "mmm/<env>/llm/openai, anthropic, google", "08 llm secrets", "Vendor contracts"),
+    ("20. GenAI (Release 2 - not part of R1)", "Token quota per business unit and per run; guardrail policy (PII, denied topics, thresholds)", "1,000,000 tokens/day per BU; ~5,000 per run; grounding / relevance 0.75", "08 token quota, 18 Bedrock guardrail", "Responsible AI"),
+    # 21. Monitoring, alerting and logging (layer 19)
+    ("21. Monitoring and logging", "Alert email lists / paging tool per environment", "mmm-devops@<domain>; prod on-call list", "19 SNS topic - alerts", "Ops"),
+    ("21. Monitoring and logging", "Log retention per environment", "30 / 90 / 365 days", "All log groups", "Legal / Audit"),
+    ("21. Monitoring and logging", "Splunk shipping required: HEC endpoint, token (entered by WBD), index, source type", "Not required at go-live", "19 Firehose to Splunk (optional), 08 splunk/hec", "Splunk"),
+    ("21. Monitoring and logging", "Sensitive data in logs: data identifiers for the CloudWatch Logs data protection policy", "Email, names, AWS keys", "19 Logs data protection policy", "Security / Privacy"),
+    ("21. Monitoring and logging", "CloudWatch Application Signals (APM) wanted", "No", "19 Application Signals (optional)", "Ops"),
+    # 22. Backup and DR (layer 20)
+    ("22. Backup and DR", "RPO / RTO sign-off", "RPO 24 h (RDS PITR 5 min), RTO 4 h", "20", "Ops / Security"),
+    ("22. Backup and DR", "Cross-region backup copy (us-west-2) and prod vault lock", "No cross-region copy; vault lock in prod if approved", "20 DR vault (optional), backup vault", "Ops / Security"),
+    ("22. Backup and DR", "Restore-test frequency and who signs it off", "Quarterly in staging", "20", "Ops"),
+    # 23. Releases, approvals and handover
+    ("23. Releases and handover", "Repo admin rights for DevOps (GitHub environments, variables, branch protection)", "Admin role", "GitHub", "GitHub admins"),
+    ("23. Releases and handover", "Approvers: staging (EY), prod (WBD), model promotion, Glue script releases", "GitHub users / teams", "GitHub environments", "WBD / EY"),
+    ("23. Releases and handover", "CAB change-ticket format and lead time for prod", "CHG1234567; 5 working days", "deploy pipeline", "CAB"),
+    ("23. Releases and handover", "Approved security tools (SAST, DAST, GitHub Advanced Security)", "Semgrep / CodeQL / ZAP", "CI", "Security"),
+    ("23. Releases and handover", "Proxy CA certificate for the VDI and allow-listed URLs (GitHub, PyPI, npm, Terraform registry, Databricks, LLM providers, Splunk)", ".pem file", "Engineer workstations", "Network"),
+    ("23. Releases and handover", "Security incident contact, operations owner after handover, hypercare length", "Names; 4 weeks hypercare", "Runbooks", "Security / Ops"),
 ]
 
-# (v5 status, question, proposed default)
+# (question, proposed default)
 DECISIONS = [
-    (Q_NEW, "Gold -> RDS on slide 1 now runs through 'Lambda Functions - Results/data publisher': does Glue stop writing to RDS directly?", "Yes - Glue export-rds writes Parquet to lakehouse/rds-export/; the publisher (event reference_data) loads it into RDS through RDS Proxy; Glue has no DB access, mmm_etl / rds/etl removed"),
-    (Q_NEW, "Large reference tables through a Lambda (15-minute limit)?", "Batched COPY per table; if a table cannot load within 15 minutes, Glue writes it directly again (fallback, v4 design)"),
-    (Q_NEW, "What 'lineage' must cover (Glue + Data Catalog, Registry + S3)", "Glue catalog table properties per refresh + SageMaker ML Lineage Tracking (export run -> Glue tables -> training snapshot -> training job -> model package); no extra service"),
-    (Q_NEW, "Lineage UI (Amazon DataZone / SageMaker Catalog)?", "Not in Release 1; optional add-on"),
-    (Q_NEW, "CloudTrail 'enabled across all components'", "WBD org trail adds S3 data events for the MMM buckets; we only verify"),
-    (Q_NEW, "IAM Identity Center with Okta (slide 2)", "Engineers sign in to AWS through Identity Center federated with Okta; planners only through the Okta OIDC app at the ALB"),
-    (Q_CHANGED, "GenAI timing", "Release 2 (slide 2 'Not part of R1'); genai_enabled = false in R1, the explanation tool is skipped"),
-    (Q_KEPT, "How does data leave Databricks?", "The WBD export job writes Parquet to landing raw/databricks/<bu>/<date>/ through a write-only Unity Catalog role; the Export Trigger Lambda starts and polls it"),
-    (Q_KEPT, "Glue orchestration: Glue workflows / triggers or Step Functions?", "Step Functions (glue:startJobRun.sync per layer) inside model-refresh"),
-    (Q_KEPT, "Lake Formation on the Glue catalog?", "Not used - IAM roles, bucket policies and per-BU KMS keys"),
-    (Q_KEPT, "Silver data-quality failure?", "Stops the refresh and alerts (rule glue-data-quality-failed)"),
-    (Q_KEPT, "Order of the last refresh steps?", "Register the model version, record lineage, then write the model results to RDS (rows carry the model package ARN)"),
-    (Q_KEPT, "Optimizer on ECS: one task per run or a worker service?", "One Fargate task per run started by Step Functions (isolation, simple cancel)"),
-    (Q_KEPT, "Concurrency and fairness between business units?", "5 / 20 / 50 runs at a time, bounded by the Fargate quota; first come first served; per-user limits in the app"),
-    (Q_KEPT, "Forecast runs ('upload future titles')?", "Same queue, state machine and optimizer image; run_type forecast"),
-    (Q_KEPT, "Malware scanning of uploads?", "Not at go-live; uploads only through presigned URLs scoped to the user's BU, CORS limited to the app"),
-    (Q_KEPT, "Data leaving AWS to LLM providers (Release 2)?", "Off until approved; Bedrock-hosted models as the alternative"),
-    (Q_KEPT, "Databricks reachability?", "NAT IPs on the workspace IP access list; PrivateLink if WBD requires"),
-    (Q_KEPT, "App reachable from the internet or only WBD ranges? Shield Advanced?", "Internet + WAF + Okta sign-in; no Shield Advanced"),
-    (Q_KEPT, "Database sizes and read replica?", "Single-AZ dev, Multi-AZ staging / prod, no read replica"),
-    (Q_KEPT, "Model drift above the threshold?", "Alert only; daily check switched on after the first approved model"),
-    (Q_KEPT, "Lakehouse in AWS Backup?", "Yes (daily, same retention as RDS); uploads and glue-assets not backed up"),
-    (Q_KEPT, "Shared tooling account / self-hosted runners?", "Not used - GitHub-hosted runners with OIDC"),
-    (Q_KEPT, "Which tool WBD uses to create the resources, and who keeps the state?", "WBD decides; our Terraform can be handed over if WBD prefers it (state bucket per account, layer 02)"),
-]
-
-# (v4 question, why v5 no longer needs it)
-Q_REMOVED = [
-    ("Separate Databricks export Lambda (slide 1 showed 'Results publisher' next to Databricks)?", "Answered by v5: slide 1 labels it 'Lambda Functions - Export Trigger'"),
-    ("Glue export to RDS: DB user mmm_etl and path through RDS Proxy", "v5 sends Gold -> RDS through the results/data publisher (new decision 1)"),
-    ("GenAI in Release 1 (explanation tool on every run) or Release 2?", "Answered by v5: slide 2 marks GenAI 'Not part of R1'"),
+    ("Gold -> RDS on slide 1 runs through 'Lambda Functions - Results/data publisher': does Glue write to RDS at all?", "No - Glue export-rds writes Parquet to lakehouse/rds-export/<bu>/<refresh_id>/; the publisher (event reference_data) loads it into RDS through RDS Proxy as mmm_app; Glue has no database access"),
+    ("Reference tables too large for a Lambda (15-minute limit)?", "Batched load per table; if one table cannot load within 15 minutes, Glue writes that table directly (only with WBD approval)"),
+    ("Publisher reads the Gold Delta tables directly or a Parquet export?", "Parquet export by Glue (plain files are faster and simpler to read in Lambda)"),
+    ("Lambdas drawn outside the VPC on slide 2 - inside or outside the VPC?", "Inside the VPC (private subnets) - the publisher must reach RDS Proxy privately; the others for the same egress control"),
+    ("What 'lineage' must cover (Glue + Data Catalog, Registry + S3)", "Glue catalog table properties per refresh + SageMaker ML Lineage Tracking (export run -> Glue tables -> training snapshot -> training job -> model package)"),
+    ("Lineage UI (Amazon DataZone / SageMaker Catalog)?", "Not in Release 1; optional add-on"),
+    ("CloudTrail 'to be enabled across all components'", "WBD org trail (management events) + S3 data events for the MMM data buckets; we verify"),
+    ("CloudWatch 'to be enabled across all components'", "Logs, metrics and alarms on every component (ECS, Lambda, Step Functions, Glue, SageMaker, RDS, ALB, WAF, SQS); dashboards per area"),
+    ("IAM Identity Center with Okta (slide 2)", "Engineers sign in to AWS through Identity Center federated with Okta; planners only through the Okta OIDC app at the ALB"),
+    ("'AWS IAM' on every integration", "One least-privilege IAM role per integration, all under the permission boundary"),
+    ("GenAI timing ('Not part of R1')", "Release 2; genai_enabled = false in R1 and the explanation tool is skipped"),
+    ("How does data leave Databricks?", "The WBD export job writes Parquet to landing raw/databricks/<bu>/<date>/ through a write-only Unity Catalog role; the Export Trigger Lambda starts and polls it"),
+    ("Glue orchestration: Glue workflows / triggers or Step Functions?", "Step Functions (glue:startJobRun.sync per layer) inside model-refresh"),
+    ("Lake Formation on the Glue catalog?", "Not used - IAM roles, bucket policies and per-BU KMS keys"),
+    ("Silver data-quality failure?", "Stops the refresh and alerts"),
+    ("Order of the last refresh steps?", "Publish reference data, train, evaluate, register the model version, record lineage, then write the model results to RDS (rows carry the model package ARN)"),
+    ("Optimizer on ECS: one task per run or a worker service?", "One Fargate task per run started by Step Functions (isolation, simple cancel)"),
+    ("Concurrency and fairness between business units?", "5 / 20 / 50 runs at a time, bounded by the Fargate quota; first come first served; per-user limits in the app"),
+    ("Forecast runs ('upload future titles')?", "Same queue, state machine and optimizer image; run_type forecast"),
+    ("User file upload to S3 (slide 2): through the API or straight from the browser?", "Straight from the browser with a presigned URL from the API, scoped to the user's BU prefix; CORS limited to the app domain"),
+    ("Malware scanning of uploads?", "Not at go-live; optional GuardDuty Malware Protection for S3"),
+    ("Databricks reachability?", "NAT IPs on the workspace IP access list; PrivateLink if WBD requires"),
+    ("App reachable from the internet or only WBD ranges? Shield Advanced?", "Internet + WAF + Okta sign-in; no Shield Advanced"),
+    ("Database sizes and read replica?", "Single-AZ dev, Multi-AZ staging / prod, no read replica"),
+    ("Model drift above the threshold?", "Alert only; daily check switched on after the first approved model"),
+    ("Lakehouse in AWS Backup?", "Yes (daily, same retention as RDS); uploads and glue-assets not backed up"),
+    ("Shared tooling account / self-hosted runners?", "Not used - GitHub-hosted runners with OIDC"),
+    ("Which tool WBD uses to create the resources, and who keeps the state?", "WBD decides; our Terraform can be handed over (state bucket per account, layer 02)"),
 ]
 
 Q_HEAD = PatternFill("solid", fgColor="1F4E78")
@@ -948,18 +999,15 @@ def build_questions():
     wb = Workbook()
     ws = wb.active
     ws.title = "client_inputs"
-    q_sheet(ws, "WBD MMM v5 - inputs WBD provides (filter 'v5 status' for what is new; fill the yellow columns per environment)",
-            ["#", "v5 status", "Section", "What WBD provides", "Example / proposed default", "Used for (aws_resource_list_5.xlsx)", "WBD owner",
+    q_sheet(ws, "WBD MMM v5 - inputs WBD provides before / while the infra team creates the AWS resources (fill the yellow columns per environment)",
+            ["#", "Section", "What WBD provides", "Example / proposed default", "Used for (aws_resource_list_5.xlsx)", "WBD owner",
              "Dev value", "Staging value", "Prod value", "Status", "Notes"],
             [(i, *r, "", "", "", "Open", "") for i, r in enumerate(INPUTS, 1)],
-            (5, 14, 26, 60, 44, 30, 22, 22, 22, 22, 10, 30), input_cols=(8, 9, 10, 11, 12))
+            (5, 26, 60, 44, 30, 22, 22, 22, 22, 10, 30), input_cols=(7, 8, 9, 10, 11))
     q_sheet(wb.create_sheet("decisions_to_confirm"), "WBD MMM v5 - design decisions to confirm (proposed default until WBD answers)",
-            ["#", "v5 status", "Question", "Proposed default", "WBD answer", "Status"],
+            ["#", "Question", "Proposed default", "WBD answer", "Status"],
             [(f"Q{i}", *d, "", "Open") for i, d in enumerate(DECISIONS, 1)],
-            (6, 14, 60, 70, 40, 10), input_cols=(5, 6))
-    q_sheet(wb.create_sheet("removed_vs_v4"), "v4 questions that v5 answers or no longer needs (do not send)",
-            ["#", "v4 question", "Why not needed in v5"],
-            [(i, *r) for i, r in enumerate(Q_REMOVED, 1)], (5, 70, 80), input_cols=())
+            (6, 60, 70, 40, 10), input_cols=(4, 5))
     wb.save(OUT / "devops_5_client_question.xlsx")
 
 
@@ -1077,14 +1125,15 @@ def build_docx():
     ] + [("Removed vs v4", len(REMOVED), "", "", "")])
 
     d.add_heading("9. Questions for WBD (v5) and the proposed default")
-    table(["#", "Status", "Question", "Proposed default"], [(f"Q{i}", *q) for i, q in enumerate(DECISIONS, 1)])
+    table(["#", "Question", "Proposed default"], [(f"Q{i}", *q) for i, q in enumerate(DECISIONS, 1)])
     d.save(OUT / "wbd_mmm_ecs_final_5.docx")
 
 
-build_resources()
-build_questions()
-build_docx()
+if "--questions-only" in sys.argv:
+    build_questions()
+else:
+    build_resources()
+    build_questions()
+    build_docx()
 print("resource rows:", len(R), "new:", sum(1 for r in R if r[12][0] == NEW), "changed:", sum(1 for r in R if r[12][0] == CHANGED),
-      "removed:", len(REMOVED), "| inputs:", len(INPUTS), "decisions:", len(DECISIONS), "removed questions:", len(Q_REMOVED))
-
-
+      "removed:", len(REMOVED), "| inputs:", len(INPUTS), "decisions:", len(DECISIONS))

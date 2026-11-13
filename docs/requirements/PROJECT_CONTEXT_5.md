@@ -27,7 +27,7 @@ change is moderate (one data path, lineage, audit and labelling), not a redesign
 | `devops_plan_5.txt` | v5 step-by-step build prompt (Steps 0–16); section A = change summary vs v4; **(v5)** marks every step that changes the built code |
 | `aws_resource_list_5.xlsx` | Complete v5 resource list (219 rows) in the `_4_new` layout: `all_resources` with dev / staging / prod values, sheets `dev` / `staging` / `prod` with real names, `architecture_flow`, `alarms_and_events`, `outside_aws`, `summary`; filter columns **Release**, **Scope** and **Change vs v4** (New 3 / Changed 14 / Same); sheets `v5_changes` and `removed_vs_v4` (4) |
 | `wbd_mmm_ecs_final_5.docx` | v5 design document (what changed vs v4, target platform, flows, environments, impact on the v4 code, stages, risks, resource summary, questions with the proposed default) |
-| `devops_5_client_question.xlsx` | Inputs only WBD can provide (68, per environment; **v5 status** New in v5 / Changed by v5 / From v4) + `decisions_to_confirm` (24) + `removed_vs_v4` (3 questions v5 answers) |
+| `devops_5_client_question.xlsx` | Complete v5 client questions in the `_4_new` layout: `client_inputs` (100, in 23 sections by layer of `aws_resource_list_5.xlsx`; yellow dev / staging / prod value columns) + `decisions_to_confirm` (28, proposed default until WBD answers) |
 | `tools/build_v5.py` | Generates the three v5 xlsx / docx files |
 | `*_4.*`, `*_4_new.xlsx`, `WBD_MMM_Architecture_4.pptx` | v4 inputs (what the current code implements) |
 
