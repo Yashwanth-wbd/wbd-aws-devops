@@ -1,0 +1,300 @@
+# PROMPT v5 — Build the WBD MMM AWS Platform (Infra + CI/CD) — AWS Glue lakehouse + lineage, Databricks source export, ECS inference & optimization
+
+> **Version 5** of the build prompt, written for the client architecture in
+> `WBD_MMM_Architecture_5.pptx` (2 slides: "supports auto ML activities" and "supports optimization and
+> explainable planning"). v4 (`devops_plan_4.txt`, from `WBD_MMM_Architecture_4.pptx`) is **implemented in
+> the repo** (`e2cac7b`); this file lists what v5 changes on top of that build. Everything not changed by
+> the v5 deck is carried over from v4 as built (including the differences recorded in `PROJECT_CONTEXT_4.md` §4a).
+>
+> **How to use this file:** give this entire document to an AI coding agent (or follow it yourself).
+> Section A lists what changed vs v4; the steps below are the full v5 build, with **(v5)** marking
+> every step that changes the existing code. Implement the steps **in order**; each step has a
+> **Validate** gate — do not proceed until it passes.
+>
+> **Scope:** DevOps only — **do NOT write application, model or data-pipeline code** (the developers
+> own `apps/api`, `apps/ui`, `apps/results-publisher`; the data scientists own the SageMaker training /
+> evaluation / drift code and the **inference & optimization container**; the data engineers own the
+> **AWS Glue job scripts** and, with WBD Databricks, the **Databricks export job**). This prompt builds
+> everything that **provisions, secures, runs and deploys** their work.
+>
+> Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
+>
+> **Status (13 Nov 2026):** **plan only — not implemented.** The repo holds the v4 build. Implement only
+> after the user has verified this plan, `PROJECT_CONTEXT_5.md`, `aws_resource_list_5.xlsx`,
+> `wbd_mmm_ecs_final_5.docx` and `devops_5_client_question.xlsx`.
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+Execute exactly ONE numbered step at a time. Do NOT start the next step until the user explicitly
+confirms the current step is validated.
+
+After completing a step you MUST:
+1. Create only the files/resources for **that single step**.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands**, (c) any Git/AWS inputs to set.
+3. **WAIT** for the user to run the commands and confirm ("validated" / "passed").
+4. Only then begin the next step.
+
+Never batch steps. If a validation fails, fix only the current step. If anything is ambiguous, ask.
+
+---
+
+## A. What changed vs v4 (summary)
+
+Slide-by-slide comparison of `WBD_MMM_Architecture_5.pptx` with `WBD_MMM_Architecture_4.pptx`. The
+layout and the services are the same; v5 changes labels, one data path and the security / operations
+annotations. **The change is moderate, not a redesign** – most of the v4 build stays as it is.
+
+| # | Area | v4 (built in the repo) | v5 (new client architecture) |
+|---|---|---|---|
+| 1 | Databricks Lambda (slide 1) | Separate `mmm-<env>-databricks-export` Lambda; the slide labelled it "Results publisher" | Slide labels it "**Lambda Functions – Export Trigger**" (Databricks API connector). Confirms the v4 build – **no change** |
+| 2 | Gold → RDS (slide 1) | Glue `export-rds` writes the Gold reference tables over JDBC to RDS Proxy as `mmm_etl` (secret `rds/etl`) | "Glue Export" → "**Lambda Functions – Results/data publisher**" → RDS PostgreSQL. **(v5)** `export-rds` writes Parquet to `lakehouse/rds-export/<bu>/<refresh_id>/`; the results/data publisher (new event `reference_data`) loads it into RDS as `mmm_app`; Glue has no DB access [ASK] |
+| 3 | Lineage (slide 1) | "AWS Glue"; "SageMaker Registry + S3 – approved models, curves, drift monitoring" | "**AWS Glue + Data Catalog (Lineage)**"; Registry + S3 "… **+ lineage**". **(v5)** lineage recorded per refresh: Glue Data Catalog table properties + **SageMaker ML Lineage Tracking** (new state `RecordLineage`); Amazon DataZone / SageMaker Catalog optional [ASK] |
+| 4 | IAM / KMS (both) | IAM and KMS only in the security band | "**AWS IAM**" on every integration arrow and "**KMS**" on every data store. Already built (one least-privilege role per integration, CMK per store) – **no change**, documented per resource |
+| 5 | Environment level (both) | Security + network / logging bands | New box "**Environment level component**": Secrets Manager, VPC routes, CloudWatch, **CloudTrail "enabled across all components"**. **(v5, optional)** CloudTrail S3 data events on the MMM data buckets (default: WBD adds them to the org trail) [ASK] |
+| 6 | GenAI (slide 2) | Release 2 behind `enable_genai`; "GenAI in Release 1?" was open | GenAI box (API Gateway, Bedrock Guardrails, OpenAI / Anthropic / Google) marked "**Not part of R1**". Confirms Release 2. The API text still says "invoke explanation tool by default for every run" → in R1 runs complete without the explanation |
+| 7 | User upload (slide 2) | Browser PUT to `uploads` with a presigned URL from the API | New arrow "**User file upload to S3**" from the UI. Confirms the v4 build – **no change** |
+| 8 | Identity (slide 2) | Okta "authentication and RBAC"; IAM Identity Center in the security band | "**IAM Identity Center**" drawn under Okta → Okta as the Identity Center identity source for engineers (account baseline, WBD) [ASK] |
+
+**Unchanged from v4 (as built):** everything else – Terraform modules + per-env stacks, GitHub Actions via
+OIDC, ECR, ECS Fargate `ui` / `api` / `migrate` / `optimizer`, ALB + WAF + ACM + DNS, Okta at the ALB, RDS
+PostgreSQL + RDS Proxy, SQS + DLQ + dispatcher, optimization state machine (`ecs:runTask.sync`), results
+publisher (`run` + `model_results` events), `uploads` / `glue-assets` buckets, Databricks export Lambda +
+Unity Catalog role, Glue bronze / silver (+ DQ) / gold / export-training / export-monitor, SageMaker
+training / evaluation / registry / governance / drift, Release 2 GenAI gateway, monitoring, backup, CI/CD.
+
+**Removed vs v4:** secret `mmm/<env>/rds/etl` and its RDS Proxy auth entry; DB user `mmm_etl` (`db-bootstrap.py`
+`ETL_SECRET_ID`); Glue in the `data-clients` security group (5432 to RDS Proxy) and the JDBC part of the Glue
+connection; `rds-db:connect` on the Glue role.
+
+---
+
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Change the built v4 WBD MMM platform to the v5 architecture.
+The application (UI + API) and the inference & optimization engine run on **Amazon ECS on Fargate**;
+model training, evaluation and the registry stay on **Amazon SageMaker**; everything is orchestrated by
+**AWS Step Functions**; optimization requests are **buffered in Amazon SQS**; data engineering runs on
+**AWS Glue** with **Delta Lake on S3** and **lineage in the Glue Data Catalog + SageMaker**, fed by an
+export from the WBD Databricks source catalog; **all writes to RDS go through the API or the results/data
+publisher**; planners sign in with **WBD Okta**.
+
+**Golden rules (apply to every step):**
+1. **Everything is Terraform**, run from GitHub Actions via OIDC. Exceptions: the one-time state bootstrap and the first apply per account — run with SSO.
+2. **No secrets in Git, images or Terraform variables.** Runtime secrets live in Secrets Manager / SSM (v5 removes `rds/etl`). Values supplied by WBD are marked `# add actual value`.
+3. **Modularize**: reusable modules in `infra/modules/`, thin stacks in `infra/environments/{dev,staging,prod}/`; edit dev, then `scripts/sync-environments.ps1`.
+4. **Build order: dev → prove it works → staging (same code) → prod (same code).**
+5. **Validate after every step.**
+6. **Naming:** `mmm-<env>-<component>` (env = `dev|stg|prd`). **Tags:** `Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component`.
+7. **ECS tasks, Glue jobs, SageMaker jobs and Lambda functions run inside the VPC** (private subnets, no public IP), with KMS on every store (v5 draws KMS on each one).
+8. **One IAM role per integration** (v5 draws "AWS IAM" on every arrow), all with the permission boundary.
+9. **Remove what v5 drops** (`rds/etl`, `mmm_etl`, Glue DB path) – no leftover variables, outputs, docs or runbooks.
+
+---
+
+## 1. Final target stack
+
+`Terraform · GitHub Actions (OIDC) · ECR · ECS on Fargate (UI + API + inference & optimization task) + ALB ·
+Route 53 · AWS WAF (regional) · ACM · WBD Okta (OIDC at the ALB; identity source of IAM Identity Center) ·
+RDS for PostgreSQL (+ RDS Proxy) · Amazon SQS (+ DLQ) · AWS Lambda (message dispatcher, results/data
+publisher, Databricks Export Trigger) · AWS Step Functions · AWS Glue (Spark jobs, Data Catalog + lineage,
+Data Quality, connection) · Amazon SageMaker (training, evaluation, Model Registry, ML Lineage Tracking,
+drift checks) · S3 · KMS · Secrets Manager + Parameter Store · Amazon EventBridge (+ Scheduler) · Databricks
+on AWS (source catalog, export job – WBD) · CloudWatch + CloudTrail (+ S3 data events, optional) (+ Splunk via
+Firehose) · AWS Backup · Release 2: Amazon API Gateway (LLM gateway) · Amazon Bedrock Guardrails.`
+
+**Prescribed stack (slide footer, unchanged):** React + TypeScript · Python / FastAPI · scikit-learn /
+XGBoost / LangGraph · SciPy · RDS PostgreSQL + Databricks / S3 · ECS · AWS recommended.
+
+**Two flows (from the v5 slides):**
+- **Auto ML activities (slide 1):** scheduled / manual / app-triggered refresh → EventBridge → Step Functions (wait / retry) → **Lambda Export Trigger** → Databricks API connector → Databricks source catalog export job → raw data in S3 (3+ years) → **AWS Glue + Data Catalog (lineage)**: Bronze → Silver (cleansed and validated) → Gold (per-BU modeling tables, adstock & saturation) on Delta Lake (S3) → Glue exports: Gold → training data (immutable Parquet + metadata); **(v5) Gold → `lakehouse/rds-export/` → Lambda results/data publisher → RDS PostgreSQL** → SageMaker training → evaluation (baseline → channel lift → title adjustment) → registration → SageMaker Registry + S3 (approved models, curves, drift monitoring **+ lineage**); model predictions, lift & evaluation results → results/data publisher → RDS.
+- **Optimization and explainable planning (slide 2):** planner (upload inventory + objective + run & compare, or upload future titles) → DNS/WAF → ALB → Okta (authentication + RBAC; IAM Identity Center for engineers) → ECS UI (web + QA dashboard; **user file upload to S3**) ↔ ECS API (FastAPI + LangGraph tools) ↔ RDS. API → SQS → dispatcher Lambda → Step Functions → ECS inference & optimization task (Model Summarizer · Optimizer · Simulation) reading the Registry + approved curves + user files → S3 outputs → results publisher → RDS. **GenAI box (API Gateway → OpenAI / Anthropic / Google, Bedrock Guardrails) "Not part of R1".** Sized for 50–150 concurrent planners.
+
+**Control plane (unchanged):** Data lineage & observability · Code repository · Security (RBAC, SSO/MFA) · Amazon Bedrock for GenAI · Privacy & GenAI guardrails.
+**Environment level component (v5):** Secrets Manager · VPC routes · CloudWatch · CloudTrail (enabled across all components); IAM on every integration, KMS on every store.
+
+---
+
+## 2. Prerequisite tools (unchanged)
+
+Terraform ≥ 1.10, AWS CLI v2, Git, GitHub CLI, jq, tflint, Checkov, Trivy, actionlint, Node 22 + uv /
+Python 3.12. Docker optional. Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE`.
+
+---
+
+## 3. Access & inputs to request (ASK the client)
+
+Everything in v4 §3 still applies (full list in `devops_5_client_question.xlsx`, tagged New in v5 /
+Changed by v5 / From v4), **except** the two v4 questions the v5 slides answer (separate export Lambda;
+GenAI in Release 1) and the `mmm_etl` path. **New or changed for v5:**
+- **Gold → RDS through the publisher:** confirm the route; list and size of the Gold reference tables per BU (decides the publisher's timeout / batching; fallback = direct Glue write as in v4).
+- **Lineage:** what must be traceable (export run → Glue tables → training snapshot → training job → model package) and whether a lineage UI (Amazon DataZone / SageMaker Catalog) is required.
+- **CloudTrail data events:** S3 data events for the MMM buckets in the WBD org trail, or may we create a trail.
+- **IAM Identity Center:** Okta as the identity source; permission sets / Okta groups for DevOps.
+- **GenAI:** confirmed Release 2; Release 1 behaviour of "explanation tool by default for every run" (default: skipped).
+
+---
+
+## 4. GitHub branching strategy (unchanged)
+
+Trunk-based: `main` protected. Merge to `main` → dev (`sha-<7>`); tag `vX.Y.Z-rcN` → staging (EY lead
+approves); tag `vX.Y.Z` → prod (WBD approver + change ticket). Glue scripts follow the same tags via `glue.yml`.
+
+---
+
+## 5. Repository & folder structure (v5 changes)
+
+```
+infra/modules/
+├── glue/                 # CHANGE (v5) – connection NETWORK only (glue SG, no data-clients); role without rds-db:connect;
+│                         #   export-rds argument --output_uri (lakehouse/rds-export/); lineage table properties allowed (glue:UpdateTable)
+├── network/              # CHANGE (v5) – data-clients SG no longer used by Glue; glue SG egress 443 only
+├── monitoring/           # CHANGE (v5) – data-pipeline dashboard: rows published by reference_data
+└── (all other modules unchanged)
+infra/environments/<env>/
+├── data.tf               # CHANGE – Glue module inputs; model-refresh states PublishReferenceData + RecordLineage; role lineage APIs
+├── optimization.tf       # CHANGE – publisher role reads lakehouse/rds-export/* + per-BU keys; publisher timeout / memory variables
+├── main.tf               # CHANGE – remove secret rds/etl and its RDS Proxy auth; lakehouse lifecycle rds-export/ (30 days)
+├── variables.tf / tfvars # CHANGE – enable_cloudtrail_data_events (false), publisher_timeout_seconds; lineage flags
+├── outputs.tf / tests/mock-plan.tftest.hcl  # CHANGE accordingly (new expected counts)
+scripts/db-bootstrap.py   # CHANGE – remove mmm_etl / ETL_SECRET_ID
+data/README.md            # CHANGE – export-rds output contract, publisher reference_data event, lineage properties
+docs/ + docs/runbooks/    # CHANGE – 05, 06, 08, 10; model-refresh-failed (reference data, lineage), rotation (no rds/etl), glue-job-failed
+```
+
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION
+
+### Step 0 — Prereqs & access (unchanged)
+- Tools (§2), AWS CLI SSO for dev. **Validate:** `aws sts get-caller-identity`; `terraform version` ≥ 1.10.
+
+### Step 1 — Bootstrap the Terraform state backend (unchanged)
+- `infra/bootstrap/`: state bucket (versioned, KMS, TLS-only), KMS key, S3 native lock file.
+
+### Step 2 — Module changes (v5)
+- `modules/glue`: remove the JDBC / RDS Proxy pieces from the connection and the role; keep the `NETWORK` connection in private-app with the `glue` SG; allow `glue:UpdateTable` / `GetTable` on the MMM databases (lineage table properties). `modules/network`: Glue no longer in `data-clients`.
+- **Validate:** `terraform fmt -recursive` clean; `scripts/validate-modules.ps1` passes; `git grep -n -i "mmm_etl\|rds/etl"` only in history docs.
+
+### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets (unchanged)
+- Keys, boundary, OIDC roles as built. The permission boundary must allow the SageMaker lineage actions for the refresh role (Step 14).
+- **Validate:** plan shows no key changes.
+
+### Step 4 — Networking (v5: small change)
+- **Security groups:** `glue` SG keeps the self-referencing rule and egress 443 to endpoints / S3 prefix list; **no 5432 to RDS Proxy**; `data-clients` SG only for the API, migrate task and results/data publisher.
+- **Environment level (v5):** "VPC routes" – route tables as built (data subnets without internet route); verify, no change.
+- **Validate:** the RDS Proxy SG has no rule from the Glue SG; a Glue test job still reaches the Data Catalog and S3 through the endpoints.
+
+### Step 5 — Secrets, configuration and identity settings (v5)
+- **Secrets Manager:** **remove `mmm/<env>/rds/etl`** and its entry in the RDS Proxy `auth`. Keep `api/db`, `rds/proxy`, `rds/migrate` (`mmm_migrator`), `okta/alb-client`, `databricks/export-sp`, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>`.
+- **SSM:** unchanged (`ecs/optimizer_task_definition`, `databricks/export_job_ids`, `databricks/host`, `okta/issuer`, `optimization/max_concurrent_runs`, `images/sagemaker-training`, `genai_enabled = false`, GenAI token quotas).
+- **IAM Identity Center (v5) [ASK]:** confirm Okta is the identity source (SAML + SCIM) and the permission sets for DevOps – WBD account baseline, no Terraform in this repo.
+- **Validate:** secret scan clean; `aws secretsmanager list-secrets` shows no `rds/etl`; the proxy still authenticates `mmm_app` and `mmm_migrator`.
+
+### Step 6 — Data & storage (ECR, S3, RDS PostgreSQL) (v5)
+- **s3-bucket:** `lakehouse` gets the prefix **`rds-export/<bu>/<refresh_id>/`** (Parquet written by Glue `export-rds`, read by the publisher; lifecycle expiry 30 days [ASM]). Other buckets unchanged.
+- **rds:** instance / Proxy unchanged; **DB users `mmm_app` (API + results/data publisher) and `mmm_migrator` only** – remove `mmm_etl` from `scripts/db-bootstrap.py`. Gold reference tables and model-result tables stay in the backend team's Alembic migrations; `mmm_app` needs insert / truncate on the reference tables.
+- **Validate:** `db-bootstrap.py` creates no `mmm_etl`; a test object in `lakehouse/rds-export/<bu>/` is readable by the publisher role only (besides Glue).
+
+### Step 7 — ECS compute (UI + API) and ALB (unchanged)
+- API role / env as built (`UPLOADS_BUCKET`, presigned PUT – matches the v5 arrow "User file upload to S3"). No GenAI env in Release 1.
+
+### Step 8 — Edge & login (Route 53, WAF, ACM, Okta) (unchanged)
+
+### Step 9 — Optimization engine (SQS + dispatcher + Step Functions + ECS optimizer + results/data publisher) (v5: small change)
+- Queue, dispatcher, optimization state machine, optimizer task: unchanged.
+- **Results/data publisher (v5):** same function and `live` alias, new event **`reference_data`** (`business_unit`, `refresh_id`, `input_uri = s3://<lakehouse>/rds-export/<bu>/<refresh_id>/`, table list) next to `run` and `model_results`. Role adds `s3:GetObject` / `ListBucket` on `lakehouse/rds-export/*` and decrypt with the per-BU lakehouse keys. Timeout / memory as variables (default 900 s / 2048 MB [ASM]); the code (backend team) loads in batches and is idempotent per `refresh_id`.
+- **Validate:** a test `reference_data` event loads a small Parquet set into RDS through the proxy as `mmm_app`; a re-run of the same `refresh_id` does not duplicate rows.
+
+### Step 10 — Monitoring & logging (v5)
+- **Alarms:** unchanged list; a failed `reference_data` publish fails the refresh (alarm `model-refresh-failed`) and counts in the publisher errors alarm.
+- **Dashboards:** `data-pipeline` adds rows published to RDS per BU (custom metric from the publisher, namespace `MMM/Data` [ASM]) and lineage records per refresh.
+- **CloudTrail (v5, optional) [ASK]:** S3 data events (write, prod read + write) on `landing`, `lakehouse`, `training-data`, `models`, `uploads`, `results`, `approved-worm`. Default: WBD adds advanced event selectors to the org trail; variable `enable_cloudtrail_data_events` (false) creates our own trail into the log bucket only if WBD asks.
+- **Validate:** a failed reference-data load alarms; one `refresh_id` is traceable export → Glue → rds-export → publisher → RDS.
+
+### Step 11 — Backup & DR (unchanged)
+- `lakehouse` (incl. `rds-export/`, expires after 30 days) in AWS Backup as built; lineage records live in SageMaker / the Glue catalog (re-creatable from the refresh history; not backed up) [ASM].
+
+### Step 12 — CI/CD pipelines + GitHub Environments/variables (unchanged)
+- `publisher-ci` deploys the publisher with the new event handler (backend code); `glue.yml` deploys the changed `export-rds` script (data engineers). No new GitHub variables.
+
+### Step 13 — Promote the platform to staging then prod (unchanged)
+
+### Step 14 — Data & ML platform (Databricks export + Glue + lineage + SageMaker + RDS via publisher + drift) (v5)
+> Everything here stays behind `enable_data_platform`. A named WBD approver authorizes model promotion.
+- **Export Trigger Lambda** (`mmm-<env>-databricks-export`): unchanged – v5 names it "Lambda Functions – Export Trigger" (Databricks API connector).
+- **Glue `export-rds` (v5):** writes the Gold reference tables as Parquet + `_manifest.json` (tables, row counts) to `lakehouse/rds-export/<bu>/<refresh_id>/`; no JDBC, no DB user.
+- **Lineage (v5) [ASK]:**
+  - Glue jobs write table properties on the Bronze / Silver / Gold / export tables per refresh (`refresh_id`, `source_export_run_id`, `source_uri`, job run id, script version) – data engineers' scripts, contract in `data/README.md`.
+  - New model-refresh state **`RecordLineage`** (after `RegisterModel`): SageMaker ML Lineage Tracking – context `mmm-<env>-refresh-<refresh_id>`, artifacts for the Databricks export (landing URI), Gold snapshot and training-data URI, associations to the training job and the model package (SDK integration `aws-sdk:sagemaker:createContext` / `createArtifact` / `addAssociation`, or a step in the publisher [ASM]). Idempotent on `refresh_id`.
+  - Optional: Amazon DataZone / SageMaker Catalog domain for a lineage graph – not in Release 1 by default.
+- **Model refresh `mmm-<env>-model-refresh` (v5 states):** `Init` → `GetTrainingImage` → `StartDatabricksExport` → `WaitForExport` / `GetExportStatus` → `ExportDone` → `RunBronze` → `RunSilver` → `RunGold` → `Parallel`: `ExportTrainingData` + **`ExportReferenceData`** (Glue `export-rds`, to S3) → **`PublishReferenceData`** (results/data publisher, event `reference_data`; failure fails the execution) → `TrainModel` → `EvaluateModel` → `RegisterModel` → **`RecordLineage`** → `PublishModelResults` → `RefreshComplete`. Role adds `sagemaker:CreateContext`, `CreateArtifact`, `AddAssociation`, `AddTags` (+ Describe / List) on `mmm-<env>-*` lineage entities.
+- **Unchanged:** Unity Catalog role (write `landing/raw/databricks/*`), Glue bronze / silver (+ DQ) / gold / export-training / export-monitor, training / evaluation roles, model package groups, Scheduler + `mmm.refresh`, `model-governance.yml`, drift monitor.
+- **Validate:** a refresh writes `rds-export/<bu>/<refresh_id>/`, the publisher loads it into RDS, SageMaker trains / evaluates / registers, `RecordLineage` creates the context + associations (`aws sagemaker query-lineage` from the model package reaches the training data and the export), model results appear in RDS; Glue has no network path to RDS.
+
+---
+
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2
+
+Release 1 = slide 2 optimization + slide 1 auto ML + platform, with `enable_genai = false`. The v5 slide marks
+GenAI "**Not part of R1**", so the v4 open point is closed: runs complete without the explanation (the API
+skips the explanation tool while GenAI is off) [ASK: confirm the R1 UI shows no explanation].
+
+---
+
+### Step 15 — Release 2: GenAI (unchanged)
+- Gateway as built: LangGraph tools inside `mmm-api`; private API Gateway + proxy Lambda to OpenAI / Anthropic / Google; Bedrock Guardrail on every prompt and answer; behind `enable_genai`. Needs WBD's data-egress approval (or Bedrock-hosted models) first. Explanation on every completed run; explanation failures never fail the run.
+
+### Step 16 — Handover & ongoing operations (v5)
+- Runbooks changed: `model-refresh-failed` (+ `PublishReferenceData`, `RecordLineage`), `glue-job-failed` (export-rds writes to S3), `rotation` (no `rds/etl`), `databricks-export-failed` (wording "Export Trigger"). New section in `model-drift` / governance docs: how to query the lineage of a model version.
+- Ongoing: unchanged (image patching, Glue upgrades, vulnerability fixes, drift checks, quarterly access + restore tests).
+
+---
+
+## 7. Environment variables — quick reference (v5)
+
+**GitHub (per Environment, non-secret):** unchanged from v4. **No AWS keys, no app secrets.**
+**Secrets Manager:** `mmm/<env>/api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `databricks/export-sp`, `splunk/hec`, `thirdparty/<vendor>`, R2 `llm/<provider>` (**`rds/etl` removed**).
+**SSM:** unchanged from v4.
+**Publisher event types:** `run`, `model_results`, **`reference_data` (v5)**.
+
+---
+
+## 8. Security, authorization & OIDC (v5)
+
+- Keyless CI/CD unchanged. Engineers: **IAM Identity Center federated with Okta** + permission sets. App users: Okta OIDC at the ALB → `groups` → app RBAC → PostgreSQL RLS per BU.
+- Workloads: one role per integration ("AWS IAM" on every arrow). **Only the API, the migrate task and the results/data publisher reach RDS** (v5: Glue no longer does).
+- Encryption: KMS on every store (as drawn); `rds-export/` uses the per-BU lakehouse keys.
+- Audit: CloudTrail management events (org trail) + S3 data events on the MMM buckets (v5, optional / WBD).
+
+---
+
+## 9. Deployment strategy & rollback (unchanged)
+
+Publisher: Lambda alias (the `reference_data` handler ships with the publisher). Glue scripts: `glue.yml`
+overwrites `scripts/<job>.py`; rollback = previous commit. DB: Alembic migrations (reference-table grants for `mmm_app`).
+
+---
+
+## 10. Release tagging — unchanged.
+
+---
+
+## 11. Per-step validation checklist (v5 additions)
+
+Everything from v4, minus the `mmm_etl` / Glue → RDS Proxy checks, plus: Glue has no route / SG path to
+RDS; `export-rds` writes `rds-export/<bu>/<refresh_id>/`; the publisher's `reference_data` load is idempotent
+and within its timeout for the largest BU; `RecordLineage` links export → training data → training job →
+model package; CloudTrail data events visible for the MMM buckets (if enabled); Release 1 runs without GenAI.
+
+---
+
+## 12. Order-of-operations summary
+
+**Glue module (no JDBC, no rds-db:connect) + network (Glue out of data-clients) → secrets (remove rds/etl,
+proxy auth) → lakehouse `rds-export/` lifecycle + db-bootstrap without mmm_etl → publisher role / timeout for
+`reference_data` → model-refresh states `ExportReferenceData` → `PublishReferenceData`, `RecordLineage` +
+role lineage APIs → monitoring (dashboard, optional CloudTrail data events) → docs / runbooks / data README /
+mock-plan → staging → prod → 🚦 RELEASE 1 (GenAI off) → Release 2 GenAI → handover.** One step at a time;
+validate each; keep all three environments on identical code.

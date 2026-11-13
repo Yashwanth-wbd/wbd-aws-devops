@@ -31,10 +31,16 @@ uv run --no-project --with openpyxl python .\build_client_questions.py $req
 # aws_resource_list_4_new.xlsx (R rows: name per env, flow step, what it does, sizes, owner; FLOW, ALARMS, OUTSIDE sheets)
 # and devops_client_question_4_new.xlsx (INPUTS, DECISIONS)
 uv run --no-project --with openpyxl python .\build_v4_new.py $req
+
+# Regenerate the v5 set from WBD_MMM_Architecture_5.pptx (based on build_v4_new.py; every R row carries
+# 'Change vs v4' + note): aws_resource_list_5.xlsx (+ v5_changes, removed_vs_v4 from REMOVED),
+# devops_5_client_question.xlsx (INPUTS / DECISIONS tagged New in v5 / Changed by v5 / From v4, Q_REMOVED)
+# and wbd_mmm_ecs_final_5.docx
+uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req
 ```
 
-Regenerating `devops_4_client_question.xlsx` or `devops_client_question_4_new.xlsx` overwrites the values typed into it – once WBD starts
-answering, edit the workbook directly instead.
+Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx` or `devops_5_client_question.xlsx` overwrites the
+values typed into it – once WBD starts answering, edit the workbook directly instead.
 
-For a new requirement (v5), copy `build_v4.py` to `build_v5.py`, change the output names to `_5`,
-and edit the `ROWS`, `REMOVED` and `DECISIONS` lists and the docx sections.
+For a new requirement (v6), copy `build_v5.py` to `build_v6.py`, change the output names to `_6`,
+and edit the `R` rows (change column), `FLOW`, `REMOVED`, `INPUTS`, `DECISIONS` and the docx sections.

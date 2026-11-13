@@ -21,7 +21,11 @@ def walk(shapes, slide_no, depth=0):
             walk(sh.shapes, slide_no, depth + 1)
             continue
         if sh.shape_type == MSO_SHAPE_TYPE.PICTURE:
-            ext = sh.image.ext
+            try:
+                ext = sh.image.ext
+            except ValueError:
+                lines.append(f"{pad}[linked image {sh.name}]")
+                continue
             name = f"slide{slide_no:02d}_{sh.shape_id}.{ext}"
             (img_dir / name).write_bytes(sh.image.blob)
             lines.append(f"{pad}[image {name}]")
