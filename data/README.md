@@ -43,8 +43,10 @@ Databricks export -> Glue Bronze -> Silver (DQ) -> Gold -> [export-training || e
   * **Lineage table properties:** after writing, every job sets these Data Catalog table parameters
     (`glue:UpdateTable`) on the Bronze / Silver / Gold / export tables it wrote: `mmm_refresh_id`
     (`--run_id`), `mmm_business_unit`, `mmm_source_export_run_id` (`--source_export_run_id`, the
-    Databricks run), `mmm_source_uri` (the input folder), `mmm_glue_run_id` (`JOB_RUN_ID`),
-    `mmm_script_version` (the `commit` metadata `glue.yml` sets on the script object) and `mmm_written_at` (ISO 8601 UTC).
+    Databricks run), `mmm_source_uri` (the input folder), `mmm_upstream_tables` (comma-separated
+    `<database>.<table>` read by the job; empty for Bronze), `mmm_delta_version` (the Delta table version
+    this write created), `mmm_glue_run_id` (`JOB_RUN_ID`), `mmm_script_version` (the `commit` metadata
+    `glue.yml` sets on the script object) and `mmm_written_at` (ISO 8601 UTC).
 * **Training image** writes the model artifact; the evaluation step (argument `evaluate`) writes under
   `s3://<models>/evaluation/<bu>/<refresh_id>/`:
   * `evaluation.json` – a flat `{"metric": value}` object with every metric in `model-thresholds.yaml`

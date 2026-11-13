@@ -414,7 +414,7 @@ add(L, "Databricks", "Service principal (export) + Unity Catalog storage credent
 
 L = "15. AWS Glue lakehouse (slide 1)"
 add(L, "Glue", "Glue Data Catalog databases - bronze, silver, gold", "mmm_{e}_bronze / mmm_{e}_silver / mmm_{e}_gold", s("3"), "S1-4..S1-6, S1-13",
-    "Catalog of the Delta tables in the lakehouse bucket; table properties carry the lineage of each refresh (source export run, refresh_id, upstream tables, Delta version).",
+    "Catalog of the Delta tables in the lakehouse bucket; table properties carry the lineage of each refresh (mmm_refresh_id, mmm_business_unit, mmm_source_export_run_id, mmm_source_uri, mmm_upstream_tables, mmm_delta_version, mmm_glue_run_id, mmm_script_version, mmm_written_at - data/README.md).",
     "Location s3://lakehouse/<layer>/", s("same"), "lakehouse bucket", DP, INFRA, (CHANGED, "'Data Catalog (Lineage)': lineage table properties written by every job"))
 add(L, "Glue", "Glue Data Catalog encryption settings", "account / region setting", ALL1, "S1-4..S1-6", "Encrypts catalog metadata and connection passwords (s3 key). Skip if WBD already manages it.", "SSE-KMS", s("same"), "KMS s3", DP, INFRA)
 add(L, "Glue", "Glue security configuration", "mmm-{e}-glue", ALL1, "S1-4..S1-7", "KMS for job S3 output, bookmarks and CloudWatch logs.", "S3 s3 key, logs key", s("same"), "KMS", DP, INFRA)
@@ -449,7 +449,7 @@ L = "16. SageMaker modeling (slide 1)"
 add(L, "IAM", "IAM role - SageMaker training / evaluation / drift", "mmm-{e}-sagemaker-training", ALL1, "S1-8..S1-12", "Read training-data and lakehouse/monitoring, write models, register model packages, VPC ENIs, logs, metrics.", "Permission boundary", s("same"), "-", DP, INFRA)
 add(L, "SageMaker", "Model package groups - one per business unit", "mmm-{e}-streaming / -theatrical / -usnetworks", s("3"), "S1-10, S2-6", "Model Registry: every trained version (PendingManualApproval -> Approved); the optimizer reads the approved one.", "-", s("same"), "-", DP, INFRA)
 add(L, "CloudWatch Logs", "Log groups - SageMaker TrainingJobs, ProcessingJobs", "/aws/sagemaker/TrainingJobs ; /aws/sagemaker/ProcessingJobs", s("2"), "P-2", "Training, evaluation and drift job logs.", "KMS logs", s("30 d", "90 d", "365 d"), "KMS logs", DP, INFRA)
-add(L, "SageMaker", "Training job (per refresh)", "mmm-{e}-train-<bu>-<id>", s("per refresh"), "S1-8", "Trains the multi-stage model in the VPC; writes the artifact and drift baseline.", "VPC app subnets, SG sagemaker, KMS sagemaker",
+add(L, "SageMaker", "Training job (per refresh)", "mmm-{e}-train-<refresh_id>", s("per refresh"), "S1-8", "Trains the multi-stage model in the VPC; writes the artifact and drift baseline.", "VPC app subnets, SG sagemaker, KMS sagemaker",
     s("ml.m5.2xlarge"), "Training image, role", RUN, DS)
 add(L, "SageMaker", "Processing job - evaluation (per refresh)", "mmm-{e}-eval-<bu>-<id>", s("per refresh"), "S1-9", "Baseline -> channel lift -> title adjustment; evaluation.json, curves, predictions, lift.", "VPC, KMS sagemaker",
     s("ml.m5.xlarge"), "Training image, role", RUN, DS)
@@ -492,7 +492,7 @@ L = "19. Monitoring, alerting and logging"
 add(L, "SNS", "SNS topic - alerts + policy + email subscription", "mmm-{e}-alerts", s("3"), "P-2", "Receives every alarm and alert rule; emails on-call (Teams / paging if WBD adds it).", "KMS alerts",
     s("devops alerts list", "devops alerts list", "on-call list"), "KMS alerts", CORE, INFRA)
 add(L, "CloudWatch", "CloudWatch alarms (core)", "see sheet alarms_and_events", s("21"), "P-2", "API, availability, RDS, run queue, Step Functions optimization, publisher, certificate expiry.", "Actions to SNS alerts", s("same"), "SNS", CORE, INFRA)
-add(L, "CloudWatch", "CloudWatch alarms (data platform)", "see sheet alarms_and_events", s("8"), "P-2", "Refresh / monitor failures, refresh overdue, model drift per BU, Databricks export errors.", "Actions to SNS alerts", s("same"), "SNS", DP, INFRA)
+add(L, "CloudWatch", "CloudWatch alarms (data platform)", "see sheet alarms_and_events", s("9"), "P-2", "Refresh / monitor failures, refresh overdue, model drift per BU, Databricks export errors, lineage not recorded per BU.", "Actions to SNS alerts", s("same"), "SNS", DP, INFRA)
 add(L, "CloudWatch", "CloudWatch alarms (GenAI)", "see sheet alarms_and_events", s("7"), "P-2", "Gateway 4xx / 5xx / latency, guardrail interventions, token quota per BU.", "Actions to SNS alerts", s("same"), "SNS", GENAI, INFRA)
 add(L, "EventBridge", "EventBridge alert rules -> SNS", "see sheet alarms_and_events", s("8"), "P-2", "GuardDuty high, break-glass used, ECS deployment failed / service error, optimizer task not started, backup failed, Glue job failed, Glue DQ failed.", "Targets SNS alerts", s("same"), "SNS, CloudTrail", CORE, INFRA)
 add(L, "CloudWatch", "CloudWatch dashboards", "mmm-{e}-platform / -api-ui / -optimization / -rds / -cost / -data-pipeline / -training / -genai", s("8"), "P-2",
@@ -542,6 +542,7 @@ ALARMS = [
     ("Alarm", "mmm-{e}-model-monitor-throttled", "Model monitor executions were throttled", "S1-12", DP),
     ("Alarm", "mmm-{e}-model-drift-<bu> (x3)", "Model drift for the business unit above 0.2 (one alarm per BU)", "S1-12", DP),
     ("Alarm", "mmm-{e}-databricks-export-errors", "Databricks export Lambda failed in 2 of the last 3 periods of 5 minutes", "S1-2", DP),
+    ("Alarm", "mmm-{e}-lineage-record-failed-<bu> (x3)", "The refresh registered a model but could not record its SageMaker ML Lineage (metric MMM/Models LineageRecordFailed)", "S1-13", DP),
     ("Alarm", "mmm-{e}-llm-gateway-4xx", "LLM gateway 4xx > 20 in 5 minutes", "S2-9", GENAI),
     ("Alarm", "mmm-{e}-llm-gateway-5xx", "LLM gateway 5xx (provider down, timeout or proxy error)", "S2-9", GENAI),
     ("Alarm", "mmm-{e}-llm-gateway-latency-p95", "LLM gateway p95 latency > 30 s for 3 of 5 periods", "S2-9", GENAI),

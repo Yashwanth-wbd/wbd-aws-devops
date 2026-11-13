@@ -155,7 +155,7 @@ ship_vpc_flow_logs  = false
 # v5: own S3 data-events trail on the data buckets, only if the WBD organization trail does not record them
 # add actual value
 enable_cloudtrail_data_events        = false
-cloudtrail_data_events_include_reads = false
+cloudtrail_data_events_include_reads = true
 
 # ------------------------------------------------------------------ Backup and DR (Step 10)
 # add actual value

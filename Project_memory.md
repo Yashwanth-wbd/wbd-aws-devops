@@ -61,7 +61,7 @@ Everything in 1.0 / 1.0a stays except the database path of the data platform and
 * **Publisher sizing as variables**: `publisher_timeout_seconds` (120, max 900), `publisher_memory_mb` (512).
 * **Optional CloudTrail S3 data-events trail** `mmm-<env_short>-data-events`
   (`enable_cloudtrail_data_events`, default false – the WBD org trail covers it;
-  `cloudtrail_data_events_include_reads`): single-region, log bucket `cloudtrail/`, KMS purpose
+  `cloudtrail_data_events_include_reads`: dev false = writes only, staging / prod true = reads + writes): single-region, log bucket `cloudtrail/`, KMS purpose
   `cloudtrail`, log file validation; log-bucket module input `cloudtrail_trail_arn`.
 * **Dashboard** `data-pipeline`: reference rows published (app metric `ReferenceRowsPublished`) and
   lineage not recorded (monitoring input `data_business_units`).
@@ -546,9 +546,9 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 
 1. v5 is pushed. Check `repo-checks` and `terraform` on GitHub (`gh run list --limit 5`) and fix
    anything red.
-2. Open doc points (not done – the user did not ask): `devops_plan_5.txt` Step 9 still says
-   publisher default 900 s / 2048 MB (built and client questions: 120 s / 512 MB); the `_5` xlsx /
-   docx could show "implemented" (regenerate with `tools/build_v5.py`). Ask before changing.
+2. Session 35 verified `aws_resource_list_5.xlsx` and `devops_5_client_question.xlsx` against the
+   code and aligned the five differences (see session 35). Lineage table properties now include
+   `mmm_upstream_tables` and `mmm_delta_version` (`data/README.md`) – tell the data engineers.
 3. Data / backend teams: `export-rds` writes Parquet + `_manifest.json` and lineage table
    properties, publisher `reference_data` handler + `MMM/Data` `ReferenceRowsPublished` metric
    (contract in `data/README.md`).
@@ -626,3 +626,4 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 27–29 | 12 Nov 2026 | Implement v4 (no doc fixes yet); update `Project_memory.md`; say when ready to push | v4 implemented (sections 1.0, 1.0a, 2, 5): modules `glue` + `databricks-export`, ECS optimizer task + SSM pointer, `uploads` / `glue-assets` buckets, export + Glue + `PublishModelResults` in the state machines, monitoring, `glue.yml`, deploy / dry run / scripts, docs 01, 03, 05, 06, 07, 09, 10, 11, 13, runbooks (2 new, 1 removed), module + env READMEs, `data/README.md`; all offline checks clean (section 4.3). Pushed as `e2cac7b` |
 | 30–33 | 13 Nov 2026 | v5 architecture `WBD_MMM_Architecture_5.pptx`: `_5` docs, complete v5 client questions, then implement the code | `_5` docs pushed (`e722304`, `828733a`); v5 implemented (section 1.0v5): Gold → RDS via the publisher (`rds-export/`, no `mmm_etl` / `rds/etl`), PublishReferenceData + SageMaker ML Lineage states, publisher sizing variables, optional CloudTrail data-events trail, dashboard rows; docs, runbooks, READMEs, `data/README.md`; offline checks clean |
 | 34 | 13 Nov 2026 | Update `Project_memory.md` and push | This file updated (sections 1, 4.3, 5, 11, 12); v5 implementation pushed to `main` |
+| 35 | 13 Nov 2026 | Verify the `_5` workbooks against the code and fix the differences | Staging / prod `cloudtrail_data_events_include_reads = true`; `data/README.md` lineage properties + `mmm_upstream_tables`, `mmm_delta_version`; `devops_plan_5.txt` publisher default 120 s / 512 MB; `build_v5.py`: alarm `lineage-record-failed-<bu>` (data platform alarms 9), training job `mmm-{e}-train-<refresh_id>`, lineage property names; `aws_resource_list_5.xlsx` + docx regenerated (client questions unchanged) |

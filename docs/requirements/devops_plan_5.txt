@@ -204,7 +204,7 @@ docs/ + docs/runbooks/    # CHANGE – 05, 06, 08, 10; model-refresh-failed (ref
 
 ### Step 9 — Optimization engine (SQS + dispatcher + Step Functions + ECS optimizer + results/data publisher) (v5: small change)
 - Queue, dispatcher, optimization state machine, optimizer task: unchanged.
-- **Results/data publisher (v5):** same function and `live` alias, new event **`reference_data`** (`business_unit`, `refresh_id`, `input_uri = s3://<lakehouse>/rds-export/<bu>/<refresh_id>/`, table list) next to `run` and `model_results`. Role adds `s3:GetObject` / `ListBucket` on `lakehouse/rds-export/*` and decrypt with the per-BU lakehouse keys. Timeout / memory as variables (default 900 s / 2048 MB [ASM]); the code (backend team) loads in batches and is idempotent per `refresh_id`.
+- **Results/data publisher (v5):** same function and `live` alias, new event **`reference_data`** (`business_unit`, `refresh_id`, `input_uri = s3://<lakehouse>/rds-export/<bu>/<refresh_id>/`, table list) next to `run` and `model_results`. Role adds `s3:GetObject` / `ListBucket` on `lakehouse/rds-export/*` and decrypt with the per-BU lakehouse keys. Timeout / memory as variables `publisher_timeout_seconds` / `publisher_memory_mb` (default 120 s / 512 MB; raise up to 900 s per environment if the reference tables are large); the code (backend team) loads in batches and is idempotent per `refresh_id`.
 - **Validate:** a test `reference_data` event loads a small Parquet set into RDS through the proxy as `mmm_app`; a re-run of the same `refresh_id` does not duplicate rows.
 
 ### Step 10 — Monitoring & logging (v5)
