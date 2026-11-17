@@ -5,8 +5,9 @@
 .DESCRIPTION
   Runs `terraform test` with infra/environments/<env>/tests/mock-plan.tftest.hcl, which has two
   plan-only runs: the environment's terraform.tfvars as is, and every optional feature switched on
-  (cross-region copy, vault lock, Splunk, Transit Gateway, Resolver, Application Signals, DB
-  bootstrap, Okta sign-in, data platform with drift monitor, GenAI). AWS data sources return
+  (cross-region copy, vault lock, Splunk, Transit Gateway, Application Signals, DB bootstrap,
+  Okta sign-in, data platform with drift monitor, GenAI on Bedrock with optional models), plus a run
+  that must reject a public ALB entry (alb_ingress_cidrs = 0.0.0.0/0). AWS data sources return
   fixed fake values; resource attributes stay "known after apply", like in a first real plan.
 
   It catches what `validate` cannot: count/for_each that depend on values only known after apply,

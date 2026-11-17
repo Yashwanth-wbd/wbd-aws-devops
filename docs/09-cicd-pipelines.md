@@ -72,7 +72,7 @@ If `apps/<folder>` is missing in the checkout, that component is skipped with a 
    `mmm/api` image; `run-migration.sh` runs the task once and fails the job on non-zero exit.
 5. **ECS** (`api`, `ui`): `ecs-deploy.sh render` overlays `ecs/<env>/<service>.json`, sets image
    and `APP_VERSION`; `ecs-deploy.sh update` waits for `rolloutState = COMPLETED`.
-6. **Smoke test** `scripts/smoke.sh` against `SMOKE_BASE_URL` or `APP_URL`: `/api/health` → 200;
+6. **Smoke test** `scripts/smoke.sh` against `SMOKE_BASE_URL` or `APP_URL` (internal ALB; the job runs on `DEPLOY_RUNNER`): `/api/health` → 200;
    `/` → 302 to the Okta authorize endpoint (12 × 10 s by default; only while `SMOKE_CHECK_LOGIN = true`).
 7. **Optimizer task revision**: render `ecs/<env>/optimizer.json` with the new `mmm/optimizer`
    image (`ecs-deploy.sh render`), `register-task-definition`; the new ARN is the next value of SSM
@@ -159,6 +159,11 @@ gh auth login
 | `SMOKE_DRY_RUN` | `true` | Set `false` to skip the post-release optimization dry run (dev, staging) |
 | `CHANGE_TICKET_PATTERN` | `CHG[0-9]{7}` | Regex for the change ticket in the prod tag message |
 
+**Repository variable for the private entry point:** `DEPLOY_RUNNER` (default `ubuntu-latest`) –
+label of a self-hosted runner on the WBD network or in the VPC that runs the `deploy` job. The ALB
+is internal (v6: no public entry), so the smoke test cannot reach it from a GitHub-hosted runner.
+WBD provides the runner (e.g. ECS / EC2 in the shared-services VPC with a route through the Transit Gateway).
+
 **Repository variables** (from `terraform output github_repository_variables` per env):
 `AWS_REGION`, `TF_PLAN_ROLE_ARN_<ENV>`. With data platform:
 `MODEL_EVAL_ROLE_ARN_<ENV>`, `MODEL_APPROVE_ROLE_ARN_<ENV>`, `MODELS_BUCKET_<ENV>` for
@@ -222,7 +227,7 @@ same approvals.
 | `must be tagged on a commit that was released to staging` | The prod tag is on a different commit than the rc tag |
 | `deployment failed … circuit breaker` | New tasks failed health checks. Check service events and `/ecs/mmm-<env>/<service>` logs |
 | Migration fails | Log printed in the job. ECS may not have rolled forward; fix forward in a new release |
-| Smoke test: `/api/health` not 200 | WAF block, unhealthy targets, or API not listening on 8080 |
+| Smoke test: `/api/health` not 200 | Runner cannot reach the internal ALB (needs a runner on the WBD network / in the VPC), unhealthy targets, or API not listening on 8080 |
 | Smoke test: `/` returns 503 | Okta sign-in is off (`okta_sign_in_enabled = false`) but `SMOKE_CHECK_LOGIN` is `true`; re-run `setup-github.ps1` |
 | Smoke test: `/` not 302 to Okta | ALB listener rules, `okta_issuer` or `okta_client_id` wrong; check `front_door` output |
 | Dry run: `dry run not started after 600s` | Dispatcher not consuming: check `mmm-<env>-run-dispatcher` logs, the `runs-*` alarms and whether `max_concurrent_runs` runs are already active |

@@ -8,13 +8,18 @@ output "alb_arn_suffix" {
   value       = aws_lb.this.arn_suffix
 }
 
+output "internal" {
+  description = "true = internal scheme (private entry only)."
+  value       = var.internal
+}
+
 output "alb_dns_name" {
-  description = "ALB DNS name. The app host name must point (alias / CNAME) here."
+  description = "ALB DNS name. The internal app host name in WBD DNS must point (CNAME) here."
   value       = aws_lb.this.dns_name
 }
 
 output "alb_zone_id" {
-  description = "ALB hosted zone ID (Route 53 alias)."
+  description = "ALB hosted zone ID."
   value       = aws_lb.this.zone_id
 }
 

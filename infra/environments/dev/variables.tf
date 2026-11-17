@@ -59,6 +59,12 @@ variable "github_repo" {
   type        = string
 }
 
+variable "app_repositories" {
+  description = "WBD frontend, backend and data repositories (same GitHub organisation) whose pipelines release images, task revisions, Lambda code and Glue scripts through the deploy / ECR / model roles. Empty = only github_repo."
+  type        = list(string)
+  default     = []
+}
+
 variable "create_github_oidc_provider" {
   description = "Create the GitHub OIDC provider (false if the account already has one)."
   type        = bool
@@ -118,9 +124,9 @@ variable "flow_logs_retention_days" {
 }
 
 variable "enable_transit_gateway" {
-  description = "Attach the VPC to the WBD Transit Gateway."
+  description = "Attach the VPC to the WBD Transit Gateway - the only path from the WBD network to the internal ALB (no public entry)."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "transit_gateway_id" {
@@ -130,25 +136,7 @@ variable "transit_gateway_id" {
 }
 
 variable "transit_gateway_routes" {
-  description = "WBD CIDRs routed from the private-app subnets to the Transit Gateway."
-  type        = list(string)
-  default     = []
-}
-
-variable "enable_resolver_forwarding" {
-  description = "Forward WBD-internal DNS domains to the WBD DNS servers."
-  type        = bool
-  default     = false
-}
-
-variable "resolver_forward_domains" {
-  description = "WBD-internal domains to forward."
-  type        = list(string)
-  default     = []
-}
-
-variable "resolver_target_ips" {
-  description = "WBD DNS server IPs."
+  description = "WBD CIDRs routed from the private-app subnets to the Transit Gateway (include the alb_ingress_cidrs user ranges)."
   type        = list(string)
   default     = []
 }
@@ -197,7 +185,7 @@ variable "uploads_retention_days" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention for service logs (RDS, ECS, Lambda, Step Functions, SageMaker, WAF)."
+  description = "CloudWatch log retention for service logs (RDS, ECS, Lambda, Step Functions, SageMaker, Glue, Bedrock invocations)."
   type        = number
   default     = 30
 }
@@ -343,27 +331,25 @@ variable "publisher_memory_mb" {
   }
 }
 
-# ------------------------------------------------------------------ Step 8 - Front door and sign-in
+# ------------------------------------------------------------------ Step 8 - Private entry and sign-in
 variable "app_domain_name" {
-  description = "App host name (e.g. mmm-dev.<wbd-domain>); on alb_certificate_arn, CNAME / alias to the ALB."
+  description = "Internal app host name (e.g. mmm-dev.<wbd-internal-domain>) on alb_certificate_arn; WBD DNS (outside AWS) points it to the internal ALB (output dns_records_for_wbd)."
   type        = string
 }
 
 variable "alb_certificate_arn" {
-  description = "ACM certificate (this region) for app_domain_name."
+  description = "ACM certificate (this region) for app_domain_name: DNS-validated, or from the WBD private CA (ACM Private CA / imported)."
   type        = string
 }
 
 variable "alb_ingress_cidrs" {
-  description = "Source ranges allowed to reach the ALB: 0.0.0.0/0 (internet, filtered by the WAF and Okta sign-in) or the WBD egress ranges."
+  description = "WBD ranges (corporate network / VPN, through the Transit Gateway) allowed to reach the internal ALB. 0.0.0.0/0 is rejected - no public entry."
   type        = list(string)
-  default     = ["0.0.0.0/0"]
-}
 
-variable "route53_zone_id" {
-  description = "Route 53 hosted zone of app_domain_name in this account. null = WBD DNS adds the CNAME (output dns_records_for_wbd)."
-  type        = string
-  default     = null
+  validation {
+    condition     = length(var.alb_ingress_cidrs) > 0 && !contains(var.alb_ingress_cidrs, "0.0.0.0/0")
+    error_message = "alb_ingress_cidrs must be the WBD ranges; 0.0.0.0/0 is not allowed (internal application, no public entry)."
+  }
 }
 
 variable "okta_issuer" {
@@ -392,25 +378,6 @@ variable "session_hours" {
   type        = number
   default     = 12
 }
-
-variable "geo_allow_countries" {
-  description = "Countries allowed to reach the app (ISO codes). Empty = no geo restriction."
-  type        = list(string)
-  default     = []
-}
-
-variable "waf_rate_limit" {
-  description = "WAF: requests per 5 minutes per IP before blocking."
-  type        = number
-  default     = 2000
-}
-
-variable "waf_count_only" {
-  description = "Common-rule-set rules switched to count (e.g. SizeRestrictions_BODY for large plan uploads)."
-  type        = list(string)
-  default     = []
-}
-
 # ------------------------------------------------------------------ Step 9 - Monitoring and logging
 variable "alert_emails" {
   description = "On-call / DevOps addresses that receive alarm emails (each confirms the subscription)."
@@ -626,32 +593,58 @@ variable "auto_refresh_on_drift" {
   default     = false
 }
 
-# ------------------------------------------------------------------ Step 14 - Release 2 GenAI (LLM gateway)
+# ------------------------------------------------------------------ Step 14 - Release 2 GenAI (Amazon Bedrock)
 variable "enable_genai" {
-  description = "Create the Release 2 GenAI stack: Bedrock guardrail, private API Gateway + proxy Lambda to the approved LLM providers, llm/<provider> secrets."
+  description = "Create the Release 2 GenAI stack: Bedrock guardrail, bedrock-runtime VPC endpoint, API role access to the approved Bedrock models (guardrail enforced), SSM genai/*, Bedrock alarms and dashboard."
   type        = bool
   default     = false
 }
 
-variable "llm_providers" {
-  description = "Approved external LLM providers: name => { base_url, auth = bearer | x-api-key | x-goog-api-key }. One secret llm/<name> each."
-  type = map(object({
-    base_url = string
-    auth     = string
-  }))
-  default = {}
+variable "genai_model_ids" {
+  description = "Bedrock model or inference-profile IDs the API may call. The first is the default and must be an Anthropic model; the others (OpenAI / Google on Bedrock) are optional, for experimentation (dev / staging, after approval)."
+  type        = list(string)
+  default     = ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+
+  validation {
+    condition     = length(var.genai_model_ids) > 0 && strcontains(var.genai_model_ids[0], "anthropic.")
+    error_message = "genai_model_ids must start with the default Anthropic model (e.g. us.anthropic.claude-...)."
+  }
 }
 
-variable "genai_reserved_concurrency" {
-  description = "Concurrency cap of the LLM proxy Lambda."
-  type        = number
-  default     = 20
+variable "genai_inference_regions" {
+  description = "Destination regions of the cross-region inference profile in genai_model_ids (us.* = us-east-1, us-east-2, us-west-2); the permission boundary allows only Bedrock InvokeModel there. The WBD SCP must allow them too."
+  type        = list(string)
+  default     = []
 }
 
-variable "manage_apigw_account_logging_role" {
-  description = "Set the account-level API Gateway CloudWatch role (false if WBD already manages it)."
+variable "enable_genai_bu_inference_profiles" {
+  description = "Create one Bedrock application inference profile per business unit on the default model (cost allocation by BU tag; SSM genai/inference_profile/<bu>)."
   type        = bool
-  default     = true
+  default     = false
+}
+
+variable "enable_bedrock_invocation_logging" {
+  description = "Bedrock model invocation logging to CloudWatch Logs (one setting per account and region; false if WBD already manages it)."
+  type        = bool
+  default     = false
+}
+
+variable "bedrock_invocation_log_text" {
+  description = "Also log prompt and answer text in the invocation logs (only with WBD Privacy approval); false = metadata only."
+  type        = bool
+  default     = false
+}
+
+variable "bedrock_error_alarm_threshold" {
+  description = "Bedrock client + server errors in 5 minutes above which bedrock-invocation-errors fires."
+  type        = number
+  default     = 5
+}
+
+variable "bedrock_latency_p95_ms" {
+  description = "Bedrock p95 invocation latency (ms) above which bedrock-latency-p95 fires (3 x 5 minutes)."
+  type        = number
+  default     = 30000
 }
 
 variable "genai_guardrail_version_label" {

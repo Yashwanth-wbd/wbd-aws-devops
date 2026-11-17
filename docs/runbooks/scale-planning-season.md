@@ -39,8 +39,8 @@ vCPU quota must cover that sum. Ask for a quota increase if headroom is below 20
 | RDS instance | `rds_instance_class` / `rds_max_allocated_storage` in env tfvars | prod `db.r6g.xlarge` → `db.r6g.2xlarge` (WBD approval; applied in the maintenance window or with a Multi-AZ failover, about 1–2 min of errors) |
 | Optimizer task size | `optimizer_cpu` / `optimizer_memory` / `optimizer_ephemeral_storage_gib` in tfvars | prod 8 vCPU / 32 GB → 16 vCPU / 64 GB |
 | Training (data platform) | `training_instance_type` | one size up |
-| GenAI | `genai_reserved_concurrency` in tfvars | raise if token alarms fire |
-| External LLM quotas | `genai_token_quotas` | per-BU increase with WBD |
+| GenAI (Amazon Bedrock) | Service Quotas for the model (tokens / requests per minute); a cross-region inference profile (`us.` model ID) spreads load | raise if `bedrock-throttles` fires |
+| GenAI token quotas per BU | `genai_token_quotas` | per-BU increase with WBD |
 
 `ecs_sizing` is shared code – change only the `prod` (and `staging`, for load test) map entries.
 Apply, then load-test staging with the new limits.

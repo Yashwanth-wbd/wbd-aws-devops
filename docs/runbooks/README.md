@@ -36,7 +36,7 @@ aws sso login --sso-session wbd && aws sts get-caller-identity
 | [rotation.md](rotation.md) | Rotating secrets, tokens, certificates | `cert-expiry-*`, schedule |
 | [pipeline-failure.md](pipeline-failure.md) | A GitHub Actions workflow is red | GitHub notification |
 | [model-rollback.md](model-rollback.md) | A promoted MMM model gives bad results | planners, governance report, `model-package-state` (Rejected) |
-| [genai.md](genai.md) | GenAI on / off, GenAI alarms, guardrail issues (Release 2) | `llm-gateway-5xx`, `llm-gateway-4xx`, `llm-gateway-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>` |
+| [genai.md](genai.md) | GenAI on / off, GenAI alarms, guardrail issues (Release 2) | `bedrock-invocation-errors`, `bedrock-throttles`, `bedrock-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>` |
 | [security-incident.md](security-incident.md) | Suspected compromise, leaked secret, GuardDuty HIGH | `guardduty-high`, secret scan |
 | [break-glass.md](break-glass.md) | Emergency change in prod when the pipeline or normal access cannot be used | `breakglass-used` |
 

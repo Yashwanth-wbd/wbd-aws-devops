@@ -22,6 +22,10 @@ state_kms_key_arn = "arn:aws:kms:us-east-1:333333333333:key/00000000-0000-0000-0
 github_org  = "Yashwanth-wbd"
 github_repo = "wbd-aws-devops"
 
+# WBD frontend, backend and data repositories (names only) – their pipelines use the release roles
+# add actual value
+app_repositories = []
+
 create_github_oidc_provider = true
 
 # ------------------------------------------------------------------ Budgets
@@ -46,22 +50,14 @@ enable_nat_gateway = true
 
 flow_logs_retention_days = 365
 
-# WBD hub connectivity - off until WBD Network shares the details
-enable_transit_gateway = false
+# WBD hub connectivity - the only path from the WBD network to the internal ALB (no public entry)
+enable_transit_gateway = true
 
 # add actual value
 transit_gateway_id = "tgw-00000000000000000"
 
 # add actual value
 transit_gateway_routes = ["10.0.0.0/8"]
-
-enable_resolver_forwarding = false
-
-# add actual value
-resolver_forward_domains = ["wbd.internal"]
-
-# add actual value
-resolver_target_ips = ["10.0.0.2", "10.0.0.3"]
 
 # ------------------------------------------------------------------ Secrets and configuration
 # Secret VALUES are never set here - only names and non-secret settings.
@@ -127,14 +123,15 @@ max_queue_wait_minutes = 30
 publisher_timeout_seconds = 120
 publisher_memory_mb       = 512
 
-# ------------------------------------------------------------------ Front door and sign-in (Step 8)
+# ------------------------------------------------------------------ Private entry and sign-in (Step 8)
+# Internal app host name; WBD DNS (outside AWS) points it (CNAME) to terraform output dns_records_for_wbd
 # add actual value
 app_domain_name = "mmm.example.wbd.com"
 # add actual value
 alb_certificate_arn = "arn:aws:acm:us-east-1:333333333333:certificate/00000000-0000-0000-0000-000000000000"
+# WBD corporate / VPN ranges that reach the internal ALB through the Transit Gateway (0.0.0.0/0 is rejected)
 # add actual value
-alb_ingress_cidrs = ["0.0.0.0/0"]
-route53_zone_id   = null
+alb_ingress_cidrs = ["10.0.0.0/8"]
 # add actual value
 okta_issuer = "https://wbd.okta.com/oauth2/default"
 # add actual value
@@ -142,11 +139,6 @@ okta_client_id = "0oa00000000000000002"
 # true once mmm/prod/okta/alb-client holds {"client_secret":"..."}
 okta_sign_in_enabled = false
 session_hours        = 12
-# add actual value
-geo_allow_countries = []
-# add actual value
-waf_rate_limit = 2000
-waf_count_only = []
 
 # ------------------------------------------------------------------ Monitoring and Splunk (Step 9)
 # add actual value
@@ -213,16 +205,17 @@ model_drift_threshold = 0.2
 auto_refresh_on_drift = false
 
 # ------------------------------------------------------------------ Release 2 GenAI (Step 14)
-# Turn on after the Release 1 gate (docs/11) and WBD approval of data egress to the providers
+# Turn on after the Release 1 gate (docs/11) and WBD approval of the Bedrock models (model access enabled in the account)
 enable_genai = false
+# Amazon Bedrock: prod uses the default Anthropic model only (OpenAI / Google are for experimentation in dev / staging)
 # add actual value
-llm_providers = {
-  openai    = { base_url = "https://api.openai.com", auth = "bearer" }
-  anthropic = { base_url = "https://api.anthropic.com", auth = "x-api-key" }
-  google    = { base_url = "https://generativelanguage.googleapis.com", auth = "x-goog-api-key" }
-}
-genai_reserved_concurrency        = 50
-manage_apigw_account_logging_role = true
+genai_model_ids = ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+# Destination regions of the us.* cross-region inference profile (permission boundary; WBD SCP must allow them)
+# add actual value
+genai_inference_regions            = ["us-east-1", "us-east-2", "us-west-2"]
+enable_genai_bu_inference_profiles = false
+enable_bedrock_invocation_logging  = false
+bedrock_invocation_log_text        = false
 # add actual value
 genai_grounding_threshold = 0.75
 # add actual value

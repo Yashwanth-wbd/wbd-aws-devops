@@ -15,11 +15,11 @@ locals {
 
 resource "aws_lb" "this" {
   #checkov:skip=CKV_AWS_150:Deletion protection is set per environment (on in prod).
-  #checkov:skip=CKV2_AWS_28:The regional WAF is associated by the waf-regional module (aws_wafv2_web_acl_association).
+  #checkov:skip=CKV2_AWS_28:Internal ALB with no public entry; the architecture has no WAF (access limited to WBD ranges and Okta sign-in).
   name                       = "${var.name_prefix}-alb"
-  internal                   = false
+  internal                   = var.internal
   load_balancer_type         = "application"
-  subnets                    = var.public_subnet_ids
+  subnets                    = var.subnet_ids
   security_groups            = [var.security_group_id]
   drop_invalid_header_fields = true
   desync_mitigation_mode     = "strictest"
@@ -79,7 +79,8 @@ resource "aws_lb_listener" "http" {
   tags = local.tags
 }
 
-# Everything that is not /api/* is the UI; a browser without a session is sent to WBD Okta (SSO + MFA).
+# Okta first: the first action authenticates (a browser without a session is sent to WBD Okta, SSO + MFA);
+# only then is the request forwarded. Everything that is not /api/* is the UI.
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
   port              = 443

@@ -39,7 +39,7 @@ module "kms" {
 
   name_prefix = local.name_prefix
 
-  # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (guardrail, LLM secrets);
+  # Step 13: one S3 key per business unit (data isolation); Step 14: GenAI key (Bedrock guardrail);
   # v5: cloudtrail key only with the optional S3 data-events trail (monitoring.tf)
   purposes = concat(
     ["rds", "s3", "logs", "secrets", "ecr", "sagemaker", "sqs"],
@@ -54,8 +54,9 @@ module "kms" {
 module "permission_boundary" {
   source = "../../modules/permission-boundary"
 
-  name_prefix     = local.name_prefix
-  allowed_regions = var.allowed_regions
+  name_prefix               = local.name_prefix
+  allowed_regions           = var.allowed_regions
+  bedrock_inference_regions = var.enable_genai ? var.genai_inference_regions : []
 }
 
 module "iam_oidc" {
@@ -66,6 +67,7 @@ module "iam_oidc" {
   env_short                  = local.env_short
   github_org                 = var.github_org
   github_repo                = var.github_repo
+  app_repositories           = var.app_repositories
   create_oidc_provider       = var.create_github_oidc_provider
   existing_oidc_provider_arn = var.existing_github_oidc_provider_arn
   permissions_boundary_arn   = module.permission_boundary.policy_arn
@@ -119,24 +121,20 @@ module "network" {
   logs_kms_key_arn         = module.kms.key_arns["logs"]
   permissions_boundary_arn = module.permission_boundary.policy_arn
 
+  # WBD network -> Transit Gateway -> internal ALB (the only entry point)
   enable_transit_gateway = var.enable_transit_gateway
   transit_gateway_id     = var.transit_gateway_id
   transit_gateway_routes = var.transit_gateway_routes
-
-  enable_resolver_forwarding = var.enable_resolver_forwarding
-  resolver_forward_domains   = var.resolver_forward_domains
-  resolver_target_ips        = var.resolver_target_ips
 
   app_port          = local.app_port
   ui_port           = local.ui_port
   alb_ingress_cidrs = var.alb_ingress_cidrs
 
-  # Step 14: LLM gateway proxy security group and the private API Gateway / Bedrock endpoints
-  create_genai_security_group = var.enable_genai
-
   # Step 13: Glue (self-referencing job ENIs) and Databricks export Lambda security groups, Glue endpoint
+  # Step 14: bedrock-runtime endpoint, limited to the approved models
   create_data_platform_security_groups = var.enable_data_platform
   additional_interface_endpoints       = concat(local.genai_interface_endpoints, var.enable_data_platform ? ["glue"] : [])
+  interface_endpoint_policies          = var.enable_genai ? { "bedrock-runtime" = data.aws_iam_policy_document.bedrock_endpoint[0].json } : {}
 }
 
 # ================================================================== Step 5 - Secrets and configuration
@@ -157,8 +155,6 @@ locals {
     var.enable_data_platform ? {
       "databricks/export-sp" = { description = "Databricks service principal {\"client_id\": \"...\", \"client_secret\": \"...\"} from the WBD Databricks team - may only run the export job" }
     } : {},
-    # Step 14: one API key per approved external LLM provider, read only by the LLM gateway proxy
-    var.enable_genai ? { for p in keys(var.llm_providers) : "llm/${p}" => { description = "${p} API key {\"api_key\": \"...\"} - only the LLM gateway proxy can read it" } } : {},
   )
 
   parameters = merge(
@@ -169,6 +165,13 @@ locals {
       "optimization/max_concurrent_runs" = { value = tostring(var.max_concurrent_runs), description = "Optimization runs allowed at the same time - read by the run dispatcher" }
     },
     { for bu, q in var.genai_token_quotas : "genai/token_quota/${bu}" => { value = tostring(q), description = "Daily GenAI token quota for BU ${bu}" } },
+    # Step 14: Bedrock model and guardrail the API uses (Anthropic default; optional models for experimentation)
+    var.enable_genai ? {
+      "genai/model_id"           = { value = local.genai_default_model_id, description = "Default Bedrock model / inference-profile ID (Anthropic)" }
+      "genai/optional_model_ids" = { value = jsonencode(slice(var.genai_model_ids, 1, length(var.genai_model_ids))), description = "Optional Bedrock models for experimentation (JSON list; OpenAI / Google)" }
+      "genai/guardrail"          = { value = jsonencode({ id = module.guardrails[0].guardrail_id, version = module.guardrails[0].guardrail_version }), description = "Bedrock guardrail passed as guardrailConfig on every call (JSON)" }
+    } : {},
+    { for bu, p in aws_bedrock_inference_profile.bu : "genai/inference_profile/${bu}" => { value = p.arn, description = "Bedrock application inference profile of BU ${bu} (cost allocation)" } },
     var.enable_data_platform ? {
       "databricks/export_job_ids" = { value = jsonencode(var.databricks_export_job_ids), description = "WBD Databricks export job ID per business unit (JSON) - read by the export Lambda" }
     } : {},

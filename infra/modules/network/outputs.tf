@@ -14,12 +14,12 @@ output "availability_zones" {
 }
 
 output "public_subnet_ids" {
-  description = "Public subnets (ALB, NAT)."
+  description = "Public subnets (NAT gateways only; the ALB is internal)."
   value       = [for az in local.azs : aws_subnet.public[az].id]
 }
 
 output "private_app_subnet_ids" {
-  description = "Private-app subnets (ECS tasks incl. the optimizer, SageMaker jobs, Glue jobs, Lambda)."
+  description = "Private-app subnets (internal ALB, ECS tasks incl. the inference & optimization task, SageMaker jobs, Glue jobs, Lambda)."
   value       = [for az in local.azs : aws_subnet.app[az].id]
 }
 
@@ -29,7 +29,7 @@ output "private_data_subnet_ids" {
 }
 
 output "private_endpoint_subnet_ids" {
-  description = "Private-endpoint subnets (interface endpoints, resolver, TGW attachment)."
+  description = "Private-endpoint subnets (interface endpoints, TGW attachment)."
   value       = [for az in local.azs : aws_subnet.endpoint[az].id]
 }
 
@@ -49,7 +49,7 @@ output "nat_public_ips" {
 }
 
 output "security_group_ids" {
-  description = "Security group ID per role: endpoints, alb, api, ui, tasks, data_clients, rds_proxy, rds, sagemaker, lambda, optimizer (+ resolver, genai, glue, databricks_export when enabled)."
+  description = "Security group ID per role: endpoints, alb, api, ui, tasks, data_clients, rds_proxy, rds, sagemaker, lambda, optimizer (+ glue, databricks_export when enabled)."
   value       = { for k, sg in aws_security_group.this : k => sg.id }
 }
 
@@ -71,9 +71,4 @@ output "flow_log_group_name" {
 output "transit_gateway_attachment_id" {
   description = "TGW attachment ID (null when disabled)."
   value       = one(aws_ec2_transit_gateway_vpc_attachment.this[*].id)
-}
-
-output "resolver_endpoint_id" {
-  description = "Resolver outbound endpoint ID (null when disabled)."
-  value       = one(aws_route53_resolver_endpoint.outbound[*].id)
 }

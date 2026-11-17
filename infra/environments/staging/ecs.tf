@@ -22,9 +22,6 @@ locals {
   proxy_dbuser_arn = "arn:${local.partition}:rds-db:${var.aws_region}:${local.account_id}:dbuser:${module.rds.proxy_resource_id}"
   ssm_path_arn     = "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}/*"
 
-  # Built from the name, so modules that trust the API role do not depend on the service module.
-  api_task_role_arn = "arn:${local.partition}:iam::${local.account_id}:role/${local.name_prefix}-task-api"
-
   bucket_arns = { for k, b in module.buckets : k => b.bucket_arn }
 
   # Non-secret settings every service that uses the database gets (task-definition environment)
@@ -150,15 +147,8 @@ data "aws_iam_policy_document" "task_api" {
     resources = [local.ssm_path_arn, "arn:${local.partition}:ssm:${var.aws_region}:${local.account_id}:parameter/mmm/${local.env_short}"]
   }
 
-  # Step 14: the LLM gateway is a private API Gateway with IAM auth.
-  dynamic "statement" {
-    for_each = var.enable_genai ? [1] : []
-    content {
-      sid       = "InvokeLlmGateway"
-      actions   = ["execute-api:Invoke"]
-      resources = [module.llm_gateway[0].execution_arn]
-    }
-  }
+  # Step 14: Amazon Bedrock (approved models, guardrail enforced) - genai.tf
+  source_policy_documents = var.enable_genai ? [data.aws_iam_policy_document.task_api_genai[0].json] : []
 }
 
 # The UI container only serves static files; it calls no AWS API.
@@ -259,7 +249,11 @@ module "svc_api" {
     # The API verifies the x-amzn-oidc-data header: signer must be this ALB, users come from this Okta
     ALB_ARN     = module.alb.alb_arn
     OKTA_ISSUER = local.okta_issuer
-  }, var.enable_genai ? { LLM_GATEWAY_URL = module.llm_gateway[0].invoke_url } : {})
+    }, var.enable_genai ? {
+    BEDROCK_MODEL_ID          = local.genai_default_model_id
+    BEDROCK_GUARDRAIL_ID      = module.guardrails[0].guardrail_id
+    BEDROCK_GUARDRAIL_VERSION = module.guardrails[0].guardrail_version
+  } : {})
   secrets            = local.api_secrets
   log_retention_days = var.log_retention_days
   logs_kms_key_arn   = module.kms.key_arns["logs"]

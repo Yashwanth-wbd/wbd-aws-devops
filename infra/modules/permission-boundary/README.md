@@ -20,7 +20,8 @@ cannot do anything the boundary denies.
 | `DenyRemovingBoundaryFromRoles` | Taking the boundary off a role |
 | `DenyRolesWithoutThisBoundary` | Creating a role (or changing a role's boundary) unless this boundary is attached, so no role can escape it |
 | `DenyDisablingSecurityServices` | Stopping or deleting CloudTrail, GuardDuty, Security Hub, Config, Access Analyzer, Inspector, Macie |
-| `DenyUnapprovedRegions` | Any regional API call outside `allowed_regions` (global services such as IAM, CloudFront and Route 53 are exempt) |
+| `DenyUnapprovedRegions` | Any regional API call outside `allowed_regions` (global services such as IAM and CloudFront are exempt; Bedrock invoke actions are handled by the next statement) |
+| `DenyBedrockOutsideInferenceRegions` | `bedrock:InvokeModel` / `InvokeModelWithResponseStream` outside `allowed_regions` + `bedrock_inference_regions` (the destination regions of the Bedrock cross-region inference profile, Release 2 GenAI) |
 
 ## Changing the boundary later
 
@@ -40,6 +41,7 @@ This is deliberate: the boundary is the last guard rail, so changing it needs a 
 |---|---|---|
 | `name_prefix` | string | e.g. `mmm-dev` → policy `mmm-dev-permission-boundary` |
 | `allowed_regions` | list(string) | The workload region and the DR region |
+| `bedrock_inference_regions` | list(string) | Destination regions of the Bedrock cross-region inference profile (`[]` default) |
 | `tags` | map(string) | Extra tags |
 
 ## Outputs

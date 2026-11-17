@@ -107,10 +107,10 @@ variable "data_business_units" {
   default     = []
 }
 
-variable "llm_gateway_api_name" {
-  description = "LLM gateway REST API name (GenAI dashboard). null = no GenAI dashboard."
-  type        = string
-  default     = null
+variable "bedrock_model_ids" {
+  description = "Bedrock model / inference-profile IDs the API calls (GenAI dashboard on AWS/Bedrock). Empty = no GenAI dashboard."
+  type        = list(string)
+  default     = []
 }
 
 variable "genai_business_units" {
@@ -134,13 +134,6 @@ variable "certificate_arns" {
   type        = map(string)
   default     = {}
 }
-
-variable "waf_web_acl_name" {
-  description = "Regional WAF web ACL name on the ALB (dashboard)."
-  type        = string
-  default     = null
-}
-
 # ------------------------------------------------------------------ Thresholds
 variable "api_5xx_percent_threshold" {
   description = "API 5xx rate (%) that raises the alarm."

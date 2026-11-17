@@ -14,7 +14,6 @@ locals {
   lambda_functions = concat(
     [module.publisher.function_name, module.run_queue.dispatcher_function_name],
     var.enable_data_platform ? [local.databricks_export_function] : [],
-    var.enable_genai ? [module.llm_gateway[0].proxy_function_name] : [],
   )
 
   # RDS for PostgreSQL max_connections = LEAST(DBInstanceClassMemory / 9531392, 5000); unknown class = no connections alarm
@@ -31,7 +30,7 @@ locals {
   }
   rds_max_connections = try(min(floor(local.rds_memory_gib[var.rds_instance_class] * 1073741824 / 9531392), 5000), null)
 
-  # Shipped to Splunk: app logs, audit logs, WAF; VPC flow logs only on request (volume / licence).
+  # Shipped to Splunk: app logs, audit logs; VPC flow logs only on request (volume / licence).
   splunk_log_groups = merge(
     {
       api              = module.svc_api.log_group_name
@@ -39,7 +38,6 @@ locals {
       migrate          = module.task_migrate.log_group_name
       ecs-exec         = module.ecs_cluster.exec_audit_log_group_name
       rds-postgres     = module.rds.log_group_name
-      waf              = module.waf.log_group_name
       sfn-optimization = module.optimization_sfn.log_group_name
       publisher        = module.publisher.log_group_name
       run-dispatcher   = module.run_queue.log_group_name
@@ -54,7 +52,7 @@ locals {
       glue-jobs         = module.glue[0].log_group_name
       databricks-export = module.databricks_export[0].log_group_name
     } : {},
-    var.enable_genai ? { for k, v in module.llm_gateway[0].log_group_names : "llm-${k}" => v } : {},
+    { for g in aws_cloudwatch_log_group.bedrock_invocations : "bedrock-invocations" => g.name },
   )
 }
 
@@ -74,7 +72,6 @@ module "monitoring" {
   lambda_function_names     = local.lambda_functions
   publisher_function_name   = module.publisher.function_name
   certificate_arns          = local.watched_certificates
-  waf_web_acl_name          = module.waf.web_acl_name
 
   rds_max_connections  = local.rds_max_connections
   rds_free_storage_gib = max(floor(var.rds_allocated_storage / 10), 5)
@@ -92,7 +89,7 @@ module "monitoring" {
   # Weekly schedule: alarm after 7 days without a successful refresh
   model_refresh_overdue_days = var.enable_data_platform && var.enable_model_refresh_schedule ? 7 : null
 
-  llm_gateway_api_name = var.enable_genai ? module.llm_gateway[0].api_name : null
+  bedrock_model_ids    = var.enable_genai ? var.genai_model_ids : []
   genai_business_units = var.enable_genai ? keys(var.genai_token_quotas) : []
 
   enable_log_data_protection = var.enable_log_data_protection

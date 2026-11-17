@@ -32,13 +32,13 @@ The platform replaces a third-party tool. It:
 2. Refreshes media-mix models per business unit (Step Functions model refresh → Databricks export → Glue medallion → Glue exports to the training snapshot and RDS → SageMaker training and evaluation → SageMaker Model Registry → results publisher writes predictions, lift and evaluation to RDS), and watches them for drift (model-monitor state machine per business unit).
 3. Runs the optimizer (optimize or forecast) asynchronously with a limit on concurrent runs (browser upload to S3 → API → SQS run queue → dispatcher Lambda → Step Functions → ECS Fargate optimizer task → results publisher Lambda → RDS PostgreSQL).
 4. Gives planners a web UI and API for scenarios, comparison, synchronous what-if, overrides and exports (ECS `ui` + `api` behind an ALB that signs users in with WBD Okta over OIDC).
-5. Release 2 adds GenAI (private API Gateway LLM gateway, external providers, Bedrock Guardrails) behind `enable_genai`.
+5. Release 2 adds GenAI (Amazon Bedrock through the `bedrock-runtime` VPC endpoint, Anthropic models by default, OpenAI / Google optional for experimentation, Bedrock Guardrails) behind `enable_genai`.
 
 ## 2. Target architecture
 
 ```mermaid
 flowchart LR
-  user[Planner browser] -->|Okta OIDC + MFA| alb[Public ALB + regional WAF]
+  user[Planner on WBD network] -->|Transit Gateway| alb[Internal ALB<br/>Okta OIDC + MFA first]
   alb -->|authenticate-oidc| ui[ECS mmm-ui]
   alb -->|/api/* JWT| api[ECS mmm-api]
   api --> proxy[RDS Proxy] --> rds[(RDS PostgreSQL<br/>Multi-AZ in stg / prd)]
@@ -62,7 +62,7 @@ flowchart LR
   refresh -->|model_results| pub
   monitor[Step Functions model-monitor] -->|drift| cw
   vpc[VPC] --> cw[CloudWatch] --> fh[Firehose] --> splunk[Splunk]
-  api -. enable_genai .-> llm[Private API GW LLM gateway]
+  api -. enable_genai .-> llm[bedrock-runtime endpoint<br/>Bedrock + Guardrails]
 ```
 
 | Layer | AWS services |
@@ -71,12 +71,12 @@ flowchart LR
 | Network | VPC /19, public / private-app / private-data / private-endpoint subnets, NAT, VPC endpoints, Transit Gateway (WBD hub) |
 | Compute | ECS Fargate: `api`, `ui`, one-off `migrate`, `platform-check` and `optimizer` (one task per run); Step Functions; AWS Glue; SageMaker Training / Processing (evaluation, drift); Lambda publisher, run dispatcher and Databricks export |
 | Data | RDS PostgreSQL + RDS Proxy (IAM auth, TLS), SQS run queue (KMS), S3 (versioned, KMS, Object Lock), SageMaker Model Registry |
-| Front door | Public ALB with Okta OIDC sign-in, regional WAF, ACM, optional Route 53 |
+| Private entry | Internal ALB (no public entry) reached from WBD through the Transit Gateway, Okta OIDC sign-in first, ACM; app name in WBD DNS (no WAF, no Route 53, no API Gateway) |
 | Security | KMS, Secrets Manager, SSM, permission boundary, Inspector / Trivy / Checkov |
 | Observability | CloudWatch (Container Insights, alarms, dashboards), SNS, Firehose → Splunk |
 | Resilience | RDS Multi-AZ (stg / prd) and PITR, AWS Backup (+ vault lock and cross-region copy in prod), SQS DLQ |
 | Data platform | EventBridge Scheduler + `mmm.refresh`, Step Functions model refresh and model monitor (drift), Databricks export Lambda + write-only Unity Catalog role, AWS Glue (Data Catalog, Delta Lake jobs, Data Quality) |
-| GenAI (R2) | Bedrock Guardrails, private API Gateway + proxy Lambda, provider keys in Secrets Manager |
+| GenAI (R2) | Amazon Bedrock (Anthropic default; OpenAI / Google optional) through the `bedrock-runtime` endpoint, Bedrock Guardrails, optional inference profiles per BU and invocation logging |
 
 ## 3. Environments
 
@@ -135,16 +135,16 @@ wbd_devops_implmenetation_1/
 | 5 | Secrets Manager / SSM containers (out-of-band values) | ✅ Validated (apply pending accounts) |
 | 6 | Platform: ECR, S3, RDS PostgreSQL + Proxy | ✅ Validated (apply pending accounts) |
 | 7 | ECS cluster, ALB, `api` / `ui`, optimization (SQS run queue + dispatcher, Step Functions + ECS optimizer task + publisher) | ✅ Validated (apply pending accounts) |
-| 8 | Front door: Okta OIDC sign-in at the ALB, regional WAF, ACM, DNS outputs, Okta app settings | ✅ Validated (apply pending accounts) |
+| 8 | Private entry: internal ALB, Okta OIDC sign-in first, ACM, DNS records for WBD, Okta app settings | ✅ Validated (apply pending accounts) |
 | 9 | Monitoring, dashboards, Splunk shipping | ✅ Validated (apply pending accounts) |
 | 10 | Backup and DR | ✅ Validated (apply pending accounts) |
 | 11 | CI/CD pipelines, GitHub Environments | ✅ Validated (apply pending accounts) |
 | 12 | Promote platform to staging, then prod | ✅ Validated (apply pending accounts) |
 | 13 | Data platform: Databricks export, Glue medallion + exports, model refresh → RDS results, drift monitor, governance (curves + baseline + `approval.json`) | ✅ Code done (flag off until WBD values) |
-| 14 | Release 2: LLM gateway + guardrails (`enable_genai`) | ✅ Code done (after Release 1 gate) |
+| 14 | Release 2: Amazon Bedrock + guardrails (`enable_genai`) | ✅ Code done (after Release 1 gate) |
 | 15 | Runbooks and handover | ✅ Written |
 
-Deferred until WBD provides details: CODEOWNERS, Route 53 in-account, account security baseline.
+Deferred until WBD provides details: CODEOWNERS, account security baseline.
 
 ## 6. Conventions
 
@@ -196,6 +196,6 @@ SSM: `/mmm/<env_short>/...`.
 | [09-cicd-pipelines](docs/09-cicd-pipelines.md) | Workflows, deploy, rollback |
 | [10-data-platform-and-model-governance](docs/10-data-platform-and-model-governance.md) | Model refresh, Databricks export, Glue, SageMaker registry |
 | [11-release-1-readiness](docs/11-release-1-readiness.md) | Gate checklist |
-| [12-genai-bedrock](docs/12-genai-bedrock.md) | LLM gateway, guardrails |
+| [12-genai-bedrock](docs/12-genai-bedrock.md) | Amazon Bedrock models, guardrails, alarms |
 | [13-operations-and-handover](docs/13-operations-and-handover.md) | Schedule, alarms → runbooks |
 | [runbooks/](docs/runbooks/README.md) | Operational procedures |

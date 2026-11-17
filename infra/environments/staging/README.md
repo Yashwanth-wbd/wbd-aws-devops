@@ -56,7 +56,7 @@ the current resource count (includes the third AZ and backup vault deny policy).
    `Invoke-Expression (terraform output -raw db_bootstrap_run_command)`. Then set it back to
    `false` and apply. Details under "First-time DB setup" in the [dev README](../dev/README.md).
 6. **Alert emails:** every address in `alert_emails` confirms the SNS subscription.
-7. **DNS:** WBD DNS creates the CNAME from `terraform output dns_records_for_wbd` (or Route 53 alias if configured).
+7. **DNS:** WBD DNS creates the CNAME from `terraform output dns_records_for_wbd` (internal ALB; no Route 53).
 8. **GitHub Environment `staging`** (reviewers, refs, variables). Promotion source is dev:
 
    ```powershell

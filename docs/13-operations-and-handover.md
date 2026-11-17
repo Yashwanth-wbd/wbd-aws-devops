@@ -33,7 +33,7 @@ R = responsible, A = approves, C = consulted, I = informed.
 | Monthly | Minor version upgrades | RDS PostgreSQL minor (maintenance window), Terraform provider (`terraform init -upgrade` in dev → sync → PR), GitHub Actions via Dependabot | PR |
 | Quarterly | Access review | Permission-set assignments per account with WBD Identity; GitHub environment reviewers; no IAM users / keys (`aws iam list-users` empty); break-glass test ([break-glass.md](runbooks/break-glass.md)) | Signed review |
 | Quarterly | Restore test | RDS point-in-time + S3 restore in staging ([docs/08 §7](08-backup-and-dr.md#7-regular-tests)), record RPO / RTO achieved | Restore record (docs/11 §4.2 format) |
-| Quarterly | Rotate long-lived tokens due | [rotation.md](runbooks/rotation.md) schedule (Okta ALB client secret, LLM provider keys, Splunk HEC, third-party vendors) | Ticket |
+| Quarterly | Rotate long-lived tokens due | [rotation.md](runbooks/rotation.md) schedule (Okta ALB client secret, Splunk HEC, third-party vendors) | Ticket |
 | Monthly | Drift review | `mmm-<env>-training` dashboard drift widgets per business unit; agree with data science whether a refresh is needed ([model-drift.md](runbooks/model-drift.md)) | – |
 | Twice a year | DR exercise | Rebuild staging from code + restore data (docs/08 §5); prod region failover rehearsal if WBD approved the DR region (§6) | DR report |
 | Twice a year | Failover tests | RDS Multi-AZ failover, kill API/UI tasks, optimization abort test (docs/11 §4.3) in staging | Test record |
@@ -64,12 +64,12 @@ Lambda `-errors`. Full list with thresholds: [monitoring README](../infra/module
 | EventBridge `backup-job-failed` | [docs/08](08-backup-and-dr.md); re-run the job on demand |
 | Budget email `mmm-<env>-monthly`, Cost Anomaly email | Cost dashboard `mmm-<env>-cost`; [scale-planning-season.md](runbooks/scale-planning-season.md) to scale back down |
 | `splunk-delivery`, `splunk-freshness` | HEC token / endpoint ([rotation.md](runbooks/rotation.md)); failed records in the log bucket |
-| `llm-gateway-5xx`, `llm-gateway-4xx`, `llm-gateway-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>` | [genai.md](runbooks/genai.md) |
+| `bedrock-invocation-errors`, `bedrock-throttles`, `bedrock-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>` | [genai.md](runbooks/genai.md) |
 | EventBridge `guardduty-high`, `breakglass-used` | [security-incident.md](runbooks/security-incident.md), [break-glass.md](runbooks/break-glass.md) |
 
 **On-call daily check (prod):** `describe-alarms` in ALARM; scan SNS topic subscriptions; open the
 `mmm-prd-platform` dashboard (alarm list, requests and 5xx, ECS tasks, RDS, Step Functions,
-Lambda, WAF), then `mmm-prd-api-ui`, `mmm-prd-optimization` (incl. run queue), `mmm-prd-rds`, `mmm-prd-cost`
+Lambda), then `mmm-prd-api-ui`, `mmm-prd-optimization` (incl. run queue), `mmm-prd-rds`, `mmm-prd-cost`
 (and `-training`, `-genai` when those are on) as needed. If Splunk shipping is on, spot-check
 freshness for `api`, `sfn-optimization`, and `publisher` log groups.
 

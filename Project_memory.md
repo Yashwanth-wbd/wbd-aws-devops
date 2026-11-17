@@ -4,7 +4,7 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 13 Nov 2026 – requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
+Last updated: 17 Nov 2026 – requirement 6 (v6 architecture: `WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`) **implemented and validated offline** (see 1.0v6). Before that: requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
 `devops_plan_5.txt`, `PROJECT_CONTEXT_5.md`) **implemented, validated offline and pushed to `main`**
 (v5 code commit "Implement requirement 5"; v5 docs `e722304` / `828733a`; v4 code `e2cac7b`).
 Check the latest with `git log --oneline -5`.
@@ -39,9 +39,38 @@ At the end of every session ask the agent to **update this file** (sections 1, 6
 | GitHub login | `gh` CLI logged in as `Yashwanth-wbd` (keyring). After a VDI reset: `gh auth login --web --scopes repo,workflow` |
 | Requirement documents (`docs/requirements/`) | **v5 (implemented, current):** `WBD_MMM_Architecture_5.pptx` (target architecture), `devops_plan_5.txt` (v4 → v5 delta, steps), `PROJECT_CONTEXT_5.md` (planning context + implementation status + where the build differs), `aws_resource_list_5.xlsx`, `wbd_mmm_ecs_final_5.docx`, `devops_5_client_question.xlsx` (100 inputs, 28 decisions; generator `tools/build_v5.py`, `--questions-only`). **v4 (history):** `WBD_MMM_Architecture_4.pptx` (target architecture), `devops_plan_4.txt` (v3 → v4 delta, steps), `PROJECT_CONTEXT_4.md` (planning context + implementation status), `aws_resource_list_4.xlsx`, `wbd_mmm_ecs_final_4.docx`, `devops_4_client_question.xlsx` (generator `tools/build_v4.py`). **v3 (history):** `wbd_Presentation_3.pptx` (v3 target architecture), `devops_plan_3.txt` (v3 plan + implementation status + where the build differs), `aws_resource_list_3.xlsx` (v3 resources per env + column H "v3 implementation" + `removed_vs_v2` and `decisions` sheets), `wbd_mmm_ecs_final_3.docx` (v3 design doc + implemented defaults), `PROJECT_CONTEXT_3.md` (v3 planning context, section 4a = where the build differs from the plan), **`devops_3_client_question.xlsx`** (what WBD must provide – section 7). v2 kept for history: `wbd_Presentation.pptx`, `devops_plan_2.txt`, `aws_resource_list_2.xlsx`, `wbd_mmm_ecs_final_2.docx`, `PROJECT_CONTEXT_2.md`, `devops_2_client_question.xlsx`. v1 inputs kept for history: `devops_plan_1.txt`, `devops_plan.txt`, `wbd_mmm_ecs_final.docx`, `aws_resource_list.xlsx`, `wbd_final.docx` (RFP, confidential), `wbd_0.docx`, `wbd_1.docx`. Generator scripts: `docs/requirements/tools/` |
 | AWS accounts | Not provided yet: `wbd-mmm-dev`, `wbd-mmm-stage`, `wbd-mmm-prod` (placeholders `111111111111`, `222222222222`, `333333333333`) |
-| Status | **v5 implemented with placeholder values, validated offline and pushed to `main` (13 Nov 2026).** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
+| Status | **v6 implemented with placeholder values and validated offline (17 Nov 2026); v5 pushed 13 Nov 2026.** Nothing applied to AWS. Real validation waits for client values, accounts and the app code. |
 
-### 1.0v5 What v5 changed (vs v4, current)
+### 1.0v6 What v6 changed (vs v5, current)
+
+`WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`. Everything in 1.0v5 stays except:
+
+* **Internal application, private entry only.** Internal ALB (`internal = true`) in the private-app
+  subnets, reached from the WBD network through the **Transit Gateway** (`enable_transit_gateway = true`
+  everywhere). `alb_ingress_cidrs` = WBD ranges, no default, `0.0.0.0/0` rejected (test
+  `rejects_public_entry`). Okta `authenticate-oidc` is the first listener action (user signs in with
+  Okta, then the ALB routes); the ALB reaches Okta through NAT. App name = CNAME in WBD DNS from
+  `dns_records_for_wbd`.
+* **Removed:** modules `waf-regional` and `llm-gateway` (24 modules now), WAF log group, Route 53 record
+  and the Route 53 Resolver option, private API Gateway + `execute-api` endpoint, proxy Lambda,
+  `genai` SG, secrets `llm/<provider>`, variables `route53_zone_id`, `geo_allow_countries`, `waf_*`,
+  `enable_resolver_forwarding` / `resolver_*`, `llm_providers`, `genai_reserved_concurrency`,
+  `manage_apigw_account_logging_role`. (The optional Databricks PrivateLink private zone stays.)
+* **One ECS cluster:** `ui`, `api` services plus the inference & optimization task (Model Summarizer,
+  Optimizer, Simulation in one task per run) – no separate clusters.
+* **GenAI on Amazon Bedrock:** the API task role calls Bedrock through the `bedrock-runtime` endpoint
+  (endpoint policy = this account + approved models). `genai_model_ids` – first entry must be
+  Anthropic (default); OpenAI / Google entries optional for experimentation. IAM `InvokeModel` /
+  `InvokeModelWithResponseStream` with condition `bedrock:GuardrailIdentifier`, `ApplyGuardrail`.
+  SSM `genai/model_id`, `genai/optional_model_ids`, `genai/guardrail`, optional
+  `genai/inference_profile/<bu>` (`enable_genai_bu_inference_profiles`); optional invocation logging
+  (`enable_bedrock_invocation_logging`); alarms `bedrock-invocation-errors`, `bedrock-throttles`,
+  `bedrock-latency-p95`; permission boundary allows Bedrock in `genai_inference_regions`
+  (cross-region inference profiles).
+* **Deploy runner:** `deploy.yml` runs on `vars.DEPLOY_RUNNER` (self-hosted runner on the WBD network,
+  needed for the smoke test against the internal ALB; default `ubuntu-latest`).
+
+### 1.0v5 What v5 changed (vs v4)
 
 Everything in 1.0 / 1.0a stays except the database path of the data platform and the additions below.
 
@@ -201,13 +230,13 @@ Databricks or model code.
 |---|---|---|
 | Container registry | **One ECR per environment**; CI pushes to dev ECR, promotion copies the same digest to staging (`vX.Y.Z-rcN`) and prod (`vX.Y.Z`) with `skopeo` | `README.md`, `docs/09` |
 | Shared/tooling account | **Not built** | GitHub-hosted runners make it unnecessary. **Needs confirmation with WBD** |
-| CI runners | GitHub-hosted (`ubuntu-latest`) | `docs/00` |
+| CI runners | GitHub-hosted (`ubuntu-latest`); the deploy job uses `DEPLOY_RUNNER` (self-hosted on the WBD network, v6) for the smoke test against the internal ALB | `docs/09` |
 | Repository layout | Single repo (infra + pipelines + ecs + data hooks + docs) | |
 | Account security baseline | CloudTrail, GuardDuty, Security Hub, Config, SCPs, … **owned by WBD, only verified** | `docs/01` |
 | Terraform state lock | S3 native lock file (`use_lockfile = true`) | `infra/bootstrap/README.md` |
-| Front door | **No CloudFront.** Public ALB + regional WAF; `alb_ingress_cidrs` default `0.0.0.0/0` (WAF + Okta sign-in protect it); set WBD ranges to restrict | `infra/modules/alb`, `waf-regional` |
+| Private entry (v6) | **Internal ALB only**, reached from WBD through the Transit Gateway; `alb_ingress_cidrs` = WBD ranges (no default, `0.0.0.0/0` rejected); no WAF, no Route 53, no API Gateway | `infra/modules/alb`, `frontdoor.tf` |
 | Sign-in | **Okta OIDC at the ALB** (`authenticate-oidc`, scopes `openid profile email groups`), one Okta OIDC web app per env; client secret in `mmm/<env>/okta/alb-client` read by a Terraform data source (lands in the encrypted state); `okta_sign_in_enabled` switch, 503 until on; MFA in Okta; groups claim `groups` | `docs/04` |
-| App DNS | Route 53 alias only if `route53_zone_id` is set; otherwise WBD DNS adds the CNAME from `dns_records_for_wbd` | `docs/01` |
+| App DNS | WBD internal DNS adds the CNAME from `dns_records_for_wbd` (no Route 53) | `docs/01` |
 | UI hosting | **`ui` ECS Fargate container** (`/healthz`), image `mmm/ui` | `ecs/dev/ui.json` |
 | Database | **RDS PostgreSQL** 16.6 + RDS Proxy (IAM auth, TLS). dev `db.t4g.medium` Single-AZ 50 GiB, staging `db.r6g.large` Multi-AZ 100 GiB, prod `db.r6g.xlarge` Multi-AZ 200 GiB; gp3 + storage autoscaling; PITR 7 / 14 / 35 days; DB snapshot before prod migrations | `infra/modules/rds` |
 | Cache / queue | No cache. **Standard SQS run queue + DLQ** (KMS key `sqs`; visibility 360 s, maxReceiveCount 10 → DLQ after ~60 min); dispatcher Lambda keeps running executions ≤ `max_concurrent_runs` (5 / 20 / 50, soft limit, SSM, change applies within a minute); requests older than `max_queue_wait_minutes` (30, allowed 5–50) are dropped with metric `ExpiredRunRequests`; `0` pauses new runs | `run-queue.tf`, `infra/modules/run-queue` |
@@ -220,7 +249,7 @@ Databricks or model code.
 | Model results (v4, replaces write-back) | After `RegisterModel`, `PublishModelResults` invokes the publisher with `model_results` (business_unit, refresh_id, model_package_arn, evaluation_uri) → predictions, lift, evaluation into RDS | `data.tf`, `data/README.md` |
 | Drift monitor | `mmm-<env>-model-monitor`: export (`purpose=monitor`) → Glue medallion → Glue export-monitor → `CheckDrift` (training image, writes `drift.json` `{"score":0-1,"checks":{}}`) → metric `MMM/Models ModelDrift` → alarm `<prefix>-model-drift-<bu>`; threshold `drift.threshold` (0.2) in `data/model-thresholds.yaml`; daily schedule `mmm-<env_short>-drift-<bu>`, off until the first baseline; `auto_refresh_on_drift = false` (alert only) | `data.tf`, `docs/10` §3b |
 | Data code (v4) | Glue job scripts `data/glue/jobs/<job>.py` (data engineers) uploaded by `glue.yml` to `glue-assets/scripts/` (seed script until then); Silver rules `data/glue/dq/silver.dqdl` (default `RowCount > 0`). The Databricks export job is WBD's, not in this repo | `docs/10` |
-| GenAI (Release 2) | Built but **off** (`enable_genai = false`): private API Gateway + proxy Lambda; Bedrock guardrail on every call | `docs/12` |
+| GenAI (Release 2) | Built but **off** (`enable_genai = false`): API task → `bedrock-runtime` endpoint → Amazon Bedrock (Anthropic default, OpenAI / Google optional), guardrail required on every call | `docs/12` |
 | Data platform | Built but **off** (`enable_data_platform = false`); per-BU KMS keys `s3-<bu>` come with it | `docs/10` |
 | Splunk | CloudWatch primary; Firehose → Splunk built, off; token in `mmm/<env>/splunk/hec` | `docs/05` |
 | Authorization | App RBAC by Okta group + PostgreSQL row-level security per BU | `docs/06` |
@@ -331,11 +360,11 @@ the whole folder).
 | Area | Content |
 |---|---|
 | Bootstrap | `infra/bootstrap`: state bucket (versioned, KMS, TLS-only), KMS key |
-| Modules (`infra/modules`, 26) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, rds, ecs-cluster, alb, ecs-service, waf-regional, step-functions, run-queue, sagemaker, lambda-function, monitoring, log-shipping, backup, databricks-access, **glue**, **databricks-export**, bedrock-guardrails, llm-gateway (bold = new in v4). Each has a README |
-| Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets incl. `uploads` + `glue-assets`, RDS), `frontdoor.tf` (Okta OIDC on the ALB, ALB, WAF, Route 53), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (optimizer ECS task + role, SSM release pointers, publisher Lambda, optimization state machine), `run-queue.tf` (run queue, dispatcher, SSM run limit), `data.tf` (Databricks access + export Lambda, Glue, training side, model-refresh and model-monitor state machines, refresh + drift schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
+| Modules (`infra/modules`, 24; v6 removed waf-regional and llm-gateway) | kms, permission-boundary, iam-oidc, budgets, network, secrets, ecr, s3-bucket, log-bucket, rds, ecs-cluster, alb, ecs-service, step-functions, run-queue, sagemaker, lambda-function, monitoring, log-shipping, backup, databricks-access, **glue**, **databricks-export**, bedrock-guardrails (bold = new in v4). Each has a README |
+| Stack files (`infra/environments/<env>`) | `main.tf` (KMS, IAM/OIDC, network, secrets, ECR, buckets incl. `uploads` + `glue-assets`, RDS), `frontdoor.tf` (Okta OIDC on the internal ALB), `ecs.tf` (api, ui, migrate, platform-check), `optimization.tf` (optimizer ECS task + role, SSM release pointers, publisher Lambda, optimization state machine), `run-queue.tf` (run queue, dispatcher, SSM run limit), `data.tf` (Databricks access + export Lambda, Glue, training side, model-refresh and model-monitor state machines, refresh + drift schedules, on-demand rule), `genai.tf`, `monitoring.tf`, `backup.tf`, `outputs.tf`, `variables.tf`, `tests/mock-plan.tftest.hcl` |
 | ECS templates | `ecs/<env>/api.json`, `ui.json`, `migrate.json`, `optimizer.json` |
 | Workflows | `api-ci`, `ui-ci`, `optimizer-ci` (`apps/optimizer` → `mmm/optimizer`), `training-ci`, `publisher-ci` (via `_python-service-ci`; skip while the app folder is absent), `deploy` (api, ui, optimizer task revision + SSM pointer, training, publisher; promotion, prod RDS snapshot (`DB_INSTANCE_ID`), migration, smoke (Okta redirect when `SMOKE_CHECK_LOGIN`), optimization dry run through the run queue in dev/staging (input in `uploads`), rollback of ECS + SSM pointers + Lambda alias; deploys only when the CI run's test job succeeded), `terraform` (+ `_terraform-apply`, drift skip when no role; also on `data/model-thresholds.yaml`), `glue` (Glue scripts to `glue-assets/scripts/`), `model-governance` (curves + baseline + `approval.json`), `repo-checks`. **All actions pinned to commit SHAs** (`@<sha> # vX.Y.Z`; Dependabot updates them) |
-| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, RDS CPU / free storage / connections / read + write latency, run queue (`runs-oldest-request`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, `runs-expired-requests`), `model-drift-<bu>`, `model-monitor-failed`, what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors (incl. `databricks-export-errors`), cert expiry, model refresh overdue (7 days), `lineage-record-failed-<bu>` (v5), LLM gateway 4xx / 5xx / latency, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization (+ run queue, optimizer tasks), rds, cost (+ training with drift, data-pipeline incl. reference rows published + lineage not recorded (v5), genai). Optional (v5) CloudTrail S3 data-events trail `mmm-<env_short>-data-events` (`enable_cloudtrail_data_events`). Events: ECS deploy failed / service error, `optimizer-task-not-started`, `glue-job-failed`, `glue-data-quality-failed`, GuardDuty High, break-glass, backup job failed, model package state |
+| Monitoring | Alarms: API 5xx, availability (hourly 99.5 %), UI/API healthy targets, RDS CPU / free storage / connections / read + write latency, run queue (`runs-oldest-request`, `runs-dlq-not-empty`, `runs-dispatcher-errors`, `runs-dispatcher-throttles`, `runs-expired-requests`), `model-drift-<bu>`, `model-monitor-failed`, what-if p95, optimization runtime max 10 min + standard p95 2 min (app metric), state machines failed + throttled, Lambda errors (incl. `databricks-export-errors`), cert expiry, model refresh overdue (7 days), `lineage-record-failed-<bu>` (v5), Bedrock invocation errors / throttles / latency p95, guardrail interventions, GenAI token quota 80 % per BU. Dashboards: platform, api-ui, optimization (+ run queue, optimizer tasks), rds, cost (+ training with drift, data-pipeline incl. reference rows published + lineage not recorded (v5), genai). Optional (v5) CloudTrail S3 data-events trail `mmm-<env_short>-data-events` (`enable_cloudtrail_data_events`). Events: ECS deploy failed / service error, `optimizer-task-not-started`, `glue-job-failed`, `glue-data-quality-failed`, GuardDuty High, break-glass, backup job failed, model package state |
 | Backup | RDS instance (native PITR + AWS Backup) + `results`, `approved-worm`, `models`, and with the data platform `training-data`, `lakehouse` (lakehouse cost to confirm); `uploads` and `glue-assets` are not backed up (user input kept `uploads_retention_days`, Glue scripts are in Git) |
 | Scripts | `smoke.sh` (health + Okta redirect when `SMOKE_CHECK_LOGIN`), `dry-run-optimization.sh` (input to `uploads`, request to the run queue; skipped while the optimizer pointer is `:unset`), `deploy-components.sh` (kind `task` for the optimizer), `lambda-release.sh`, `trigger-model-refresh.sh`, `platform-check.sh` (queue, RDS Proxy, release pointers), `model_governance.py` (SageMaker registry, thresholds incl. `drift`, baseline, `approval.json`), `promote-images.sh`, `ecs-deploy.sh`, `run-migration.sh`, `db-bootstrap.py` (`mmm_migrator`, `mmm_app`), `setup-github.ps1`, `sync-environments.ps1` (also `ecs/dev/*.json`), `mock-plan.ps1`, `validate-modules.ps1`, `checkov-scan.ps1 -Path infra`, `secret-scan.ps1` |
 | Docs | `docs/00`–`13` and `docs/runbooks/` (deploy, rollback, scaling, optimization run failed incl. DLQ redrive and ECS task, model refresh failed, **glue job failed**, **databricks export failed**, model drift, Okta outage, DB restore (RDS), ECS task stuck, rotation incl. Okta secret and export SP, pipeline failure, model rollback, GenAI, security incident, break-glass); `data/README.md` = export, Glue (incl. `export-rds` Parquet + `_manifest.json`, lineage table properties), publisher `reference_data` / `model_results`, SageMaker lineage, evaluation and monitor contracts (v5) |
@@ -352,9 +381,9 @@ skopeo installed in `deploy.yml`, `github_org`/`github_repo` = `Yashwanth-wbd`/`
 
 | # | Question | Default implemented |
 |---|---|---|
-| Q1 | ALB reachable from the internet or only WBD ranges? Shield Advanced? | Internet + WAF + Okta sign-in; `alb_ingress_cidrs` to restrict; no Shield Advanced |
+| Q1 | ALB reachable from the internet or only WBD ranges? Shield Advanced? | v6: internal only – internal ALB, WBD ranges through the Transit Gateway, Okta sign-in first; no WAF, no Shield Advanced |
 | Q2 | Optimization runs at the same time; fairness between BUs; queue wait | Run queue, soft limit 5 / 20 / 50, order of arrival, 30 min wait; per-user limits app side |
-| Q3 | External LLM providers = data leaves AWS | Behind `enable_genai` + guardrail PII masking/blocking; needs written WBD approval |
+| Q3 | GenAI models and data | v6: Amazon Bedrock in the account (Anthropic default; OpenAI / Google optional on Bedrock for experiments), `bedrock-runtime` endpoint, guardrail on every call; WBD approves the models |
 | Q4 | Databricks workspace IP access list must allow the export Lambda (NAT IPs, `nat_public_ips` output) | Confirm with WBD Databricks; PrivateLink optional |
 | Q5 | Okta: OIDC app per env, issuer, group names, logout with `client_id` | `groups` claim; names `mmm-bu-*` / `mmm-role-*` (docs/04, 06); Okta logout URL with `client_id` (to confirm) |
 | Q6 | (v4) One Databricks service principal for the export Lambda ("Can manage run" on the export jobs only); no bundle deploy from GitHub | One SP in `databricks/export-sp` |
@@ -430,7 +459,7 @@ elevation per change ticket; `ReadOnly` everywhere; `SecurityAudit` in prod.
 | App URL / DNS / certificate | Output `dns_records_for_wbd` → WBD DNS team; ACM certificate issued by WBD, ARN into tfvars |
 | Okta OIDC app | Output `okta_app_settings` → WBD Identity team → issuer + client ID (tfvars); they or DevOps put the client secret in `mmm/<env>/okta/alb-client` |
 | Quotas, GuardDuty / CloudTrail / Config, Databricks admin, GitHub repo admin | Quota request (WBD Cloud approves); account baseline; WBD Databricks admins; repo admin for `setup-github.ps1` |
-| External URLs (LLM providers, Splunk, Databricks) | Egress via NAT, allow-list / proxy by WBD network team; on the VDI set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` |
+| External URLs (Okta, Splunk, Databricks) | Egress via NAT, allow-list / proxy by WBD network team; on the VDI set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` |
 | Service-to-service access | Already in code: per-service IAM roles (API task, SageMaker, Step Functions, publisher) |
 
 **Fallbacks if access is even smaller:** pipeline only (`ReadOnly` + PRs, GitHub Actions plans and
@@ -457,13 +486,13 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 | Area | tfvars / place |
 |---|---|
 | Accounts, region | `aws_account_id`, `aws_region`, `allowed_regions`, `dr_region`, `backend.tf`, `infra/bootstrap/<env>.tfvars` |
-| Network | `vpc_cidr`, `availability_zone_ids`, `enable_nat_gateway`, TGW / resolver values |
-| Front door | `app_domain_name`, `alb_certificate_arn` (workload region, ISSUED), `alb_ingress_cidrs`, `route53_zone_id` (optional), `geo_allow_countries`, `waf_count_only` |
+| Network | `vpc_cidr`, `availability_zone_ids`, `enable_nat_gateway`, `transit_gateway_id`, `transit_gateway_routes` (WBD ranges) |
+| Private entry | `app_domain_name`, `alb_certificate_arn` (workload region, ISSUED), `alb_ingress_cidrs` (WBD ranges) |
 | Sign-in | `okta_issuer`, `okta_client_id` (one Okta OIDC app per env; give WBD Okta `terraform output okta_app_settings`), `session_hours`; secret `mmm/<env>/okta/alb-client`, then `okta_sign_in_enabled = true` and re-run `setup-github.ps1` |
 | Database | `rds_instance_class`, `rds_allocated_storage`, `rds_max_allocated_storage`, `rds_multi_az` (`rds_engine_version`) |
 | Optimization | `optimizer_cpu`, `optimizer_memory`, `optimizer_ephemeral_storage_gib`, `optimizer_max_runtime_seconds`, `max_concurrent_runs`, `max_queue_wait_minutes`, `uploads_retention_days` |
 | Data platform | `databricks_host`, `databricks_account_id`, `databricks_privatelink_service_name`, `databricks_export_job_ids`, `glue_worker_type`, `glue_number_of_workers`, `glue_job_timeout_minutes`, `manage_glue_catalog_encryption`, `training_instance_type`, `evaluation_instance_type`, `evaluation_max_runtime_seconds`, `model_refresh_schedule` / `_timezone`, `enable_model_refresh_schedule`, `model_monitor_schedule`, `enable_model_monitor_schedule` (after the first approval), `model_drift_threshold`, `auto_refresh_on_drift`, `training_data_retention_days`, `data/model-thresholds.yaml` (incl. `drift.threshold`), then `enable_data_platform = true` (UC role two-phase) |
-| GenAI | `llm_providers`, `genai_token_quotas`, `genai_reserved_concurrency`, guardrail thresholds, `manage_apigw_account_logging_role`, then `enable_genai = true` |
+| GenAI | `genai_model_ids` (Anthropic first), `genai_inference_regions`, `genai_token_quotas`, guardrail thresholds, `enable_genai_bu_inference_profiles`, `enable_bedrock_invocation_logging`, Bedrock model access in the account, then `enable_genai = true` |
 | Monitoring, budgets, backup | `alert_emails`, `budget_alert_emails`, `monthly_budget_usd`, `splunk_hec_endpoint`, `approved_worm_lock_mode` (irreversible for COMPLIANCE), `approved_worm_retention_days`, prod `enable_vault_lock` / `enable_cross_region_copy` |
 | GitHub | reviewer teams/users, model approvers, change-ticket pattern |
 
@@ -479,8 +508,6 @@ Full list with owners: `docs/01-client-inputs-tracker.md`. Find every placeholde
 | `mmm/<env>/databricks/export-sp` (`{"client_id","client_secret"}`) | DevOps from the WBD Databricks admins (`put-secret-value`, docs/05) | data platform |
 | `mmm/<env>/splunk/hec` | WBD Splunk team | before `enable_splunk_shipping = true` |
 | `mmm/<env>/thirdparty/<vendor>` | WBD data owners | when the feed is used |
-| `mmm/<env>/llm/<provider>` (`{"api_key": "..."}`) | DevOps with WBD-approved keys | before `enable_genai = true` |
-
 GitHub needs **no secrets** (OIDC). Details: `docs/05`.
 
 ---

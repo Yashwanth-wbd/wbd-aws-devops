@@ -3,8 +3,9 @@ locals {
   name = "${var.name_prefix}-genai"
 }
 
-# Applied by the LLM gateway (ApplyGuardrail) to every prompt and every answer, whichever
-# provider (OpenAI, Anthropic, Google) serves the call. The version is pinned.
+# Applied by Amazon Bedrock to every prompt and every answer: the API passes guardrailConfig on each
+# Converse / InvokeModel call (Anthropic default, OpenAI / Google optional), and the API role may only
+# invoke models with this guardrail (IAM condition bedrock:GuardrailIdentifier). The version is pinned.
 resource "aws_bedrock_guardrail" "this" {
   name                      = local.name
   description               = "MMM GenAI guardrail: prompt attacks, harmful content, PII, contextual grounding."

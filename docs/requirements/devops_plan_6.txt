@@ -25,7 +25,7 @@
 >
 > Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
 >
-> **Status (17 Nov 2026):** **plan only — not implemented.** The repo holds the v5 build. Implement only
+> **Status (17 Nov 2026):** **implemented with placeholder values and validated offline** (nothing applied to AWS; details in `PROJECT_CONTEXT_6.md`). Originally: implement only
 > after the user has verified this plan, `PROJECT_CONTEXT_6.md`, `aws_resource_list_6.xlsx`,
 > `wbd_mmm_ecs_final_6.docx` and `devops_6_client_question.xlsx`.
 

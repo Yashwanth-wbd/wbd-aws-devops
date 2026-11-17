@@ -53,10 +53,8 @@ run "plan_all_features" {
     enable_splunk_shipping     = true
     ship_vpc_flow_logs         = true
     enable_transit_gateway     = true
-    enable_resolver_forwarding = true
     enable_application_signals = true
     enable_db_bootstrap        = true
-    route53_zone_id            = "Z0000000000000000000"
     okta_sign_in_enabled       = true
 
     enable_cloudtrail_data_events        = true
@@ -69,6 +67,25 @@ run "plan_all_features" {
     enable_model_monitor_schedule  = true
     auto_refresh_on_drift          = true
 
-    enable_genai = true
+    enable_genai                       = true
+    app_repositories                   = ["mmm-frontend", "mmm-backend", "mmm-data"]
+    genai_model_ids                    = ["us.anthropic.claude-sonnet-4-5-20250929-v1:0", "openai.gpt-oss-120b-1:0", "google.gemma-3-27b-it"]
+    enable_genai_bu_inference_profiles = true
+    enable_bedrock_invocation_logging  = true
+    bedrock_invocation_log_text        = true
   }
+
+  assert {
+    condition     = output.front_door.alb_scheme == "internal"
+    error_message = "The ALB must be internal (no public entry)."
+  }
+}
+
+# v6: internal application - a public entry must be rejected.
+run "rejects_public_entry" {
+  command = plan
+  variables {
+    alb_ingress_cidrs = ["0.0.0.0/0"]
+  }
+  expect_failures = [var.alb_ingress_cidrs]
 }

@@ -143,12 +143,12 @@ output "db_bootstrap_run_command" {
 
 # ------------------------------------------------------------------ Step 8 - Front door and sign-in
 output "front_door" {
-  description = "App URL, ALB, WAF and Okta sign-in values."
+  description = "Private entry point: app URL, internal ALB and Okta sign-in values."
   value = {
     app_url        = local.app_url
     alb_dns_name   = module.alb.alb_dns_name
-    web_acl_arn    = module.waf.web_acl_arn
-    waf_log_group  = module.waf.log_group_name
+    alb_scheme     = module.alb.internal ? "internal" : "internet-facing"
+    reachable_from = var.alb_ingress_cidrs
     okta_issuer    = local.okta_issuer
     okta_client_id = var.okta_client_id
     sign_in        = var.okta_sign_in_enabled ? "okta" : "closed (503 until okta_sign_in_enabled = true)"
@@ -157,8 +157,8 @@ output "front_door" {
 }
 
 output "dns_records_for_wbd" {
-  description = "CNAME WBD DNS must create when Route 53 is not used (route53_zone_id = null)."
-  value       = var.route53_zone_id == null ? { (var.app_domain_name) = module.alb.alb_dns_name } : {}
+  description = "CNAME WBD DNS (outside AWS) creates for the internal app name: app_domain_name -> internal ALB DNS name."
+  value       = { (var.app_domain_name) = module.alb.alb_dns_name }
 }
 
 output "okta_app_settings" {
@@ -299,15 +299,19 @@ output "data_platform" {
 
 # ------------------------------------------------------------------ Step 14 - Release 2 GenAI
 output "genai" {
-  description = "LLM gateway and guardrail values (null while enable_genai = false)."
+  description = "Bedrock models, guardrail and alarms (null while enable_genai = false)."
   value = var.enable_genai ? {
-    gateway_url       = module.llm_gateway[0].invoke_url
-    rest_api_id       = module.llm_gateway[0].rest_api_id
-    proxy_function    = module.llm_gateway[0].proxy_function_name
-    log_groups        = module.llm_gateway[0].log_group_names
-    alarms            = concat(module.llm_gateway[0].alarm_names, [module.guardrails[0].alarm_name], [for a in aws_cloudwatch_metric_alarm.genai_token_quota : a.alarm_name])
-    guardrail_id      = module.guardrails[0].guardrail_id
-    guardrail_version = module.guardrails[0].guardrail_version
-    provider_secrets  = [for p in keys(var.llm_providers) : module.secrets.secret_names["llm/${p}"]]
+    default_model_id     = local.genai_default_model_id
+    optional_model_ids   = slice(var.genai_model_ids, 1, length(var.genai_model_ids))
+    bedrock_endpoint_id  = module.network.interface_endpoint_ids["bedrock-runtime"]
+    guardrail_id         = module.guardrails[0].guardrail_id
+    guardrail_version    = module.guardrails[0].guardrail_version
+    bu_inference_profile = { for bu, p in aws_bedrock_inference_profile.bu : bu => p.arn }
+    invocation_log_group = one(aws_cloudwatch_log_group.bedrock_invocations[*].name)
+    alarms = concat(
+      [aws_cloudwatch_metric_alarm.bedrock_invocation_errors[0].alarm_name, aws_cloudwatch_metric_alarm.bedrock_throttles[0].alarm_name, aws_cloudwatch_metric_alarm.bedrock_latency_p95[0].alarm_name],
+      [module.guardrails[0].alarm_name],
+      [for a in aws_cloudwatch_metric_alarm.genai_token_quota : a.alarm_name],
+    )
   } : null
 }

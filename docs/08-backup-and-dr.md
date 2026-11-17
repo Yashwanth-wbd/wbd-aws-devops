@@ -138,7 +138,7 @@ against section 1.
 
 1. In the prod tfvars, set `aws_region` to `dr_region` and use a separate state key. Apply Steps 3–10.
 2. Restore the RDS instance and the buckets from the **DR vault** `mmm-prd-vault-dr` (import the instance as in section 5).
-3. Point WBD DNS at the new ALB (`terraform output dns_records_for_wbd` or Route 53 alias).
+3. Point WBD DNS at the new internal ALB (`terraform output dns_records_for_wbd`); WBD Network attaches the DR VPC to the Transit Gateway.
 4. Deploy the release. ECR images are copied to the DR region by the promotion job, or rebuilt.
 
 ## 7. Regular tests

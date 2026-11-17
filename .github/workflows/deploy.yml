@@ -18,6 +18,8 @@
 # migration -> ECS -> smoke test -> optimizer task revision -> release pointers -> publisher ->
 # optimization dry run through the run queue (dev/staging) -> release record.
 # Any failure rolls every changed component back.
+# The ALB is internal (no public entry), so the smoke test needs a runner that reaches the WBD
+# network or the VPC: repository variable DEPLOY_RUNNER = label of that self-hosted runner.
 name: deploy
 
 on:
@@ -117,7 +119,7 @@ jobs:
   deploy:
     needs: resolve
     if: needs.resolve.outputs.components != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     environment:
       name: ${{ needs.resolve.outputs.environment }}

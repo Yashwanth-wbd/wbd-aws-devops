@@ -2,7 +2,8 @@
 
 Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in logs.
 
-**Status:** implemented in Step 9; v4 adds the optimizer task, Glue and Databricks export monitoring.
+**Status:** implemented in Step 9; v4 adds the optimizer task, Glue and Databricks export monitoring;
+v6 replaces the WAF and LLM gateway widgets with Amazon Bedrock metrics.
 
 ## What it creates
 
@@ -34,7 +35,7 @@ Alerts, alarms, event alerts, the platform dashboard, and masking of secrets in 
 | `model-refresh-overdue` | No successful model refresh for 7 days (data platform with the scheduled refresh on) | `runbooks/model-refresh-failed.md` |
 | `<state machine>-failed`, `<state machine>-throttled` | From the `step-functions` module | Failed execution in the console, then the failed step's log (optimizer task, Glue job, export Lambda, SageMaker job); throttling: Step Functions quota |
 | `<function>-errors` | From the `lambda-function` module | Function log |
-| `llm-gateway-5xx`, `-4xx`, `-latency-p95`; `genai-tokens-<bu>` | From the `llm-gateway` module; token quota alarms (80 % of `genai_token_quotas`) in the stack's `genai.tf` | `runbooks/genai.md` |
+| `bedrock-invocation-errors`, `bedrock-throttles`, `bedrock-latency-p95`; `genai-tokens-<bu>`; `genai-guardrail-interventions` | Bedrock alarms on the default model (`AWS/Bedrock`) and token quota alarms (80 % of `genai_token_quotas`) in the stack's `genai.tf`; interventions from `bedrock-guardrails` | `runbooks/genai.md` |
 | `cert-expiry-<name>` | ACM certificate expires in < 30 days | The ACM renewal status: usually a missing DNS validation record |
 | `splunk-delivery`, `splunk-freshness` | From the `log-shipping` module | Firehose error log |
 
@@ -65,14 +66,14 @@ it has no dead-letter queue. Run requests that cannot be started end in the run 
 
 | Dashboard | Shows |
 |---|---|
-| `<prefix>-platform` | The alarm list, requests and 5xx (UI + API), ECS tasks, RDS CPU / connections, Step Functions, Lambda, regional WAF |
+| `<prefix>-platform` | The alarm list, requests and 5xx (UI + API), ECS tasks, RDS CPU / connections, Step Functions, Lambda |
 | `<prefix>-api-ui` | API requests / 4xx / 5xx and latency, UI requests / 5xx, ECS CPU and memory, what-if p95 |
 | `<prefix>-optimization` | Executions (started, succeeded, failed, timed out, throttled), execution time, run duration by size, optimizer task CPU / memory / running tasks (Container Insights), results publisher, run queue (waiting, DLQ, oldest request, running runs, expired requests) |
 | `<prefix>-training` | Model-refresh and model-monitor executions, drift score per business unit (data platform) |
 | `<prefix>-data-pipeline` | Glue job elapsed time, failed tasks and records read per job, Databricks export Lambda invocations / errors / duration, model-refresh executions (data platform) |
 | `<prefix>-rds` | CPU, connections, free storage, memory, read / write latency, IOPS, RDS Proxy connections |
 | `<prefix>-cost` | Estimated charges, total and by service (us-east-1 billing metrics; needs "Receive Billing Alerts" on in the account) |
-| `<prefix>-genai` | LLM gateway requests, 4xx / 5xx, latency, tokens per BU (`enable_genai`) |
+| `<prefix>-genai` | Bedrock invocations, client / server errors, throttles, latency p50 / p95, input / output tokens per model, tokens per BU (`enable_genai`) |
 
 ## App contract (for the backend team)
 
@@ -101,7 +102,7 @@ extra IAM needed):
 |---|---|---|---|
 | `WhatIfDurationMs` | API | `Environment` | `whatif-p95`, api-ui dashboard |
 | `OptimizeDurationMs` | results publisher (run end − run start) | `Environment`, `RunSize` = `standard` or `large` | `optimization-standard-p95`, optimization dashboard |
-| `GenAITokens` | API (tokens of each LLM call) | `Environment`, `BusinessUnit` | `genai-tokens-<bu>`, genai dashboard |
+| `GenAITokens` | API (tokens of each Bedrock call) | `Environment`, `BusinessUnit` | `genai-tokens-<bu>`, genai dashboard |
 
 Until the app publishes them, these alarms stay `INSUFFICIENT_DATA`, which is expected.
 
@@ -128,7 +129,7 @@ aws application-signals start-discovery
 | `alb_arn_suffix`, `target_group_arn_suffixes` | – | From `alb` (map must contain `api`) |
 | `rds_instance_id` | – | From `rds` |
 | `state_machine_arns`, `lambda_function_names` | – | Dashboard widgets; keys `optimization` / `model-refresh` add their dashboard and alarms, `model-monitor` joins the training dashboard |
-| `publisher_function_name`, `llm_gateway_api_name`, `genai_business_units` | `null` / `null` / `[]` | Optimization and GenAI dashboards |
+| `publisher_function_name`, `bedrock_model_ids`, `genai_business_units` | `null` / `[]` / `[]` | Optimization and GenAI dashboards |
 | `run_queue_name`, `run_dlq_name` | `null` | Run queue widgets on the optimization dashboard |
 | `drift_business_units` | `[]` | Drift score widget on the training dashboard |
 | `optimizer_task_family` | `null` | Optimizer widgets and the `optimizer-task-not-started` rule |
@@ -137,7 +138,6 @@ aws application-signals start-discovery
 | `model_refresh_overdue_days` | `null` | Model refresh overdue alarm (data platform) |
 | `ecs_cluster_name`, `ecs_service_names` | – | |
 | `certificate_arns` | `{}` | name → ARN, in **this** region only |
-| `waf_web_acl_name` | `null` | Regional web ACL (dashboard) |
 | Thresholds | see `variables.tf` | `api_5xx_percent_threshold` 2, `availability_target_percent` 99.5, `rds_cpu_percent` 80, `rds_connections_percent` 80, `rds_latency_ms` 20, `whatif_p95_ms` 10000, `optimization_standard_p95_seconds` 120, `optimization_max_minutes` 10, `certificate_days_to_expiry` 30 |
 | `app_metric_namespace` | `MMM` | |
 | `enable_guardduty_alerts` | `true` | |

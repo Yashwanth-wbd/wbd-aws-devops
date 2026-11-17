@@ -15,7 +15,7 @@ Status values: `Open` · `In progress` · `Done` · `Waived (by …)`.
 | G2 | Data-team platform (Step 13) live in all three environments; model governance blocks a failing model and promotes a passing one only with approval (section 3) | EY DevOps + data team | WBD model-promotion approver | Open | |
 | G3 | Production readiness checklist passed (section 4) | EY DevOps | WBD InfoSec + WBD Cloud Platform | Open | |
 | G4 | Parallel run against the incumbent and UAT signed off; Release 1 go-live accepted in prod (section 5) | EY delivery lead | WBD business owner | Open | |
-| G5 | WBD approves starting Release 2: approved external LLM providers, data-egress approval, and token capacity confirmed (section 6) | WBD | WBD Responsible AI + InfoSec | Open | |
+| G5 | WBD approves starting Release 2: approved Amazon Bedrock models (Anthropic default), model access enabled, and token capacity confirmed (section 6) | WBD | WBD Responsible AI + InfoSec | Open | |
 
 Only when G1–G5 are `Done` (or formally waived) is the answer **"Release 1 complete / go for
 Release 2"** recorded here:
@@ -38,7 +38,7 @@ environment's profile and name prefix (`mmm-dev-`, `mmm-stg-`, `mmm-prd-`).
 | Step 11: GitHub Environment + variables set (`setup-github.ps1`), approvals configured | ☐ | ☐ | ☐ |
 | Step 13: `enable_data_platform = true` applied; model-refresh state machine and schedules exist | ☐ | ☐ | ☐ |
 | App release deployed by `deploy.yml` (dev `sha-…`, staging `vX.Y.Z-rcN`, prod `vX.Y.Z`) | ☐ | ☐ | ☐ |
-| Smoke test green (`scripts/smoke.sh` against the public ALB URL: `/api/health` 200, `/` redirects to Okta) | ☐ | ☐ | ☐ |
+| Smoke test green (`scripts/smoke.sh` from the `DEPLOY_RUNNER` on the WBD network against the internal ALB URL: `/api/health` 200, `/` redirects to Okta) | ☐ | ☐ | ☐ |
 | Okta sign-in on (`okta_sign_in_enabled = true`, secret `okta/alb-client` set, `SMOKE_CHECK_LOGIN=true`) | ☐ | ☐ | ☐ |
 | Optimization dry run through the run queue green (`deploy.yml`, dev and staging) | ☐ | ☐ | – |
 | Nightly drift check green for 3 nights in a row | ☐ | ☐ | ☐ |
@@ -219,7 +219,7 @@ aws cloudwatch set-alarm-state --alarm-name "$p-cert-expiry-alb" --state-value A
 
 Also confirm: one `run_id` can be followed in Splunk across API, optimization Step Functions, publisher,
 and audit events; the CloudWatch dashboard `mmm-<env>-platform` shows API, ECS, RDS, Step Functions,
-Lambda, and WAF; every alarm description points to a runbook.
+and Lambda; every alarm description points to a runbook.
 
 ## 5. G4 – Parallel run, UAT and go-live
 
@@ -241,10 +241,10 @@ These are the Step 14 inputs; they are tracked in [docs/01](01-client-inputs-tra
 
 | Input | Used for | Status |
 |---|---|---|
-| WBD approval to send planner-visible data to external LLM APIs (data egress) | `enable_genai`, provider keys | Open |
-| Approved providers (`openai`, `anthropic`, `google`, …) | `llm_providers` tfvar | Open |
-| Provider API keys | Secrets Manager `mmm/<env>/llm/<provider>` (`{"api_key":"..."}`) | Open |
+| WBD approval of the Bedrock models (Anthropic default; OpenAI / Google only for experiments) and Bedrock model access enabled in each account | `enable_genai`, `genai_model_ids` | Open |
+| Regions for cross-region inference profiles (`us.` / `global.` model IDs) | `genai_inference_regions` (permission boundary) | Open |
+| Per-BU cost tracking with application inference profiles, prompt / response logging | `enable_genai_bu_inference_profiles`, `enable_bedrock_invocation_logging`, `bedrock_invocation_log_text` | Open |
 | Token capacity and per-business-unit quotas | `genai_token_quotas` → SSM `/mmm/<env>/genai/token_quota/<bu>` (API enforcement) | Open |
 | Responsible AI review outcome (guardrail thresholds: prompt attack, PII, grounding) | `bedrock-guardrails` module | Open |
-| `genai_reserved_concurrency`, `manage_apigw_account_logging_role` | LLM gateway Lambda / API Gateway logging | Open |
-| Monthly platform budget (includes GenAI provider spend) | `monthly_budget_usd`, Cost Explorer | Open |
+| Bedrock quotas (tokens / requests per minute) for the chosen models | Service Quotas; `bedrock-throttles` alarm | Open |
+| Monthly platform budget (includes Amazon Bedrock spend) | `monthly_budget_usd`, Cost Explorer | Open |

@@ -2,7 +2,7 @@ locals {
   security_groups = merge(
     {
       endpoints    = "Interface VPC endpoints - HTTPS from inside the VPC"
-      alb          = "Public ALB - HTTPS (and HTTP for the redirect) from the allowed ranges; WAF in front"
+      alb          = "Internal ALB - HTTPS (and HTTP for the redirect) from the WBD ranges only; Okta sign-in first"
       api          = "API tasks - app port from the ALB only"
       ui           = "UI tasks - web port from the ALB only"
       tasks        = "One-off ECS tasks (platform check, DB bootstrap) - no inbound, HTTPS out"
@@ -13,8 +13,6 @@ locals {
       lambda       = "VPC Lambda functions (results publisher, run dispatcher) - no inbound, HTTPS to VPC endpoints and S3"
       optimizer    = "ECS inference and optimization tasks - no inbound, HTTPS to VPC endpoints and S3 only"
     },
-    var.enable_resolver_forwarding ? { resolver = "Route 53 Resolver outbound endpoint - DNS to WBD servers" } : {},
-    var.create_genai_security_group ? { genai = "LLM gateway proxy Lambda - no inbound, HTTPS out to the approved LLM providers and VPC endpoints" } : {},
     var.create_data_platform_security_groups ? {
       glue              = "AWS Glue jobs - all traffic between the workers of a job, HTTPS to VPC endpoints and S3"
       databricks_export = "Databricks export Lambda - no inbound, HTTPS out to the Databricks workspace and VPC endpoints"
@@ -48,7 +46,7 @@ locals {
     alb_to_api                = { sg = "alb", description = "App port to API tasks", protocol = "tcp", port = var.app_port, cidr = null, prefix_list = null, source_sg = "api", enabled = true }
     alb_to_ui                 = { sg = "alb", description = "Web port to UI tasks", protocol = "tcp", port = var.ui_port, cidr = null, prefix_list = null, source_sg = "ui", enabled = true }
     alb_https_out             = { sg = "alb", description = "HTTPS to Okta (authenticate-oidc token and user info calls)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
-    api_https_out             = { sg = "api", description = "HTTPS to AWS endpoints, S3 and the ALB token-signing keys", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
+    api_https_out             = { sg = "api", description = "HTTPS to AWS endpoints (incl. Bedrock), S3 and the ALB token-signing keys", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
     ui_to_endpoints           = { sg = "ui", description = "HTTPS to interface endpoints (ECR, logs)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     ui_to_s3                  = { sg = "ui", description = "HTTPS to S3 gateway endpoint (ECR layers)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
     tasks_https_out           = { sg = "tasks", description = "HTTPS to AWS endpoints, S3 and package indexes (bootstrap)", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = true }
@@ -61,7 +59,6 @@ locals {
     sagemaker_to_s3           = { sg = "sagemaker", description = "HTTPS to S3 gateway endpoint (data, models, outputs)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
     lambda_to_endpoints       = { sg = "lambda", description = "HTTPS to interface endpoints (logs, STS, KMS)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     lambda_to_s3              = { sg = "lambda", description = "HTTPS to S3 gateway endpoint (run evidence)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
-    genai_https_out           = { sg = "genai", description = "HTTPS to the approved LLM providers and VPC endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_genai_security_group }
     optimizer_to_endpoints    = { sg = "optimizer", description = "HTTPS to interface endpoints (ECR, logs, STS, KMS, SageMaker API)", protocol = "tcp", port = 443, cidr = null, prefix_list = null, source_sg = "endpoints", enabled = true }
     optimizer_to_s3           = { sg = "optimizer", description = "HTTPS to S3 gateway endpoint (ECR layers, inputs, curves, outputs)", protocol = "tcp", port = 443, cidr = null, prefix_list = local.s3_prefix_list, source_sg = null, enabled = true }
     glue_to_self              = { sg = "glue", description = "Between the workers of one Glue job (Spark)", protocol = "-1", port = null, cidr = null, prefix_list = null, source_sg = "glue", enabled = var.create_data_platform_security_groups }
@@ -70,15 +67,8 @@ locals {
     databricks_export_out     = { sg = "databricks_export", description = "HTTPS to the Databricks workspace (Jobs API) and VPC endpoints", protocol = "tcp", port = 443, cidr = "0.0.0.0/0", prefix_list = null, source_sg = null, enabled = var.create_data_platform_security_groups }
   }
 
-  resolver_egress_rules = {
-    for p in setproduct(var.resolver_target_ips, ["tcp", "udp"]) :
-    "resolver_dns_${p[1]}_${replace(p[0], ".", "_")}" => {
-      sg = "resolver", description = "DNS (${p[1]}) to WBD server ${p[0]}", protocol = p[1], port = 53,
-    cidr = "${p[0]}/32", prefix_list = null, source_sg = null, enabled = var.enable_resolver_forwarding }
-  }
-
   enabled_ingress_rules = { for k, r in local.ingress_rules : k => r if r.enabled }
-  enabled_egress_rules  = { for k, r in merge(local.static_egress_rules, local.resolver_egress_rules) : k => r if r.enabled }
+  enabled_egress_rules  = { for k, r in local.static_egress_rules : k => r if r.enabled }
 }
 
 resource "aws_security_group" "this" {
@@ -93,7 +83,7 @@ resource "aws_security_group" "this" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "this" {
-  #checkov:skip=CKV_AWS_260:Port 80 on the public ALB only answers with a redirect to HTTPS; the WAF filters both.
+  #checkov:skip=CKV_AWS_260:Port 80 on the internal ALB only answers with a redirect to HTTPS, from the WBD ranges only.
   for_each = local.enabled_ingress_rules
 
   security_group_id            = aws_security_group.this[each.value.sg].id

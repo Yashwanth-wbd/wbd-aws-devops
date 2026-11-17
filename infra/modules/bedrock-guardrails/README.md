@@ -1,16 +1,19 @@
 # bedrock-guardrails
 
-Bedrock guardrail applied by the LLM gateway to every prompt and answer, whichever provider
-answers (`ApplyGuardrail`). Only with `enable_genai`.
+Bedrock guardrail applied by Amazon Bedrock to every prompt and answer. The API passes
+`guardrailConfig` (ID + pinned version) on every Converse / InvokeModel call, whichever Bedrock
+model serves it (Anthropic default; OpenAI / Google optional), and the API task role can only
+invoke models with this guardrail (IAM condition `bedrock:GuardrailIdentifier`). `ApplyGuardrail`
+is also allowed for checks outside a model call. Only with `enable_genai`.
 
-**Status:** implemented (v2 architecture).
+**Status:** implemented (v6 architecture: Bedrock directly, no LLM gateway).
 
 ## What it creates
 
 | Resource | Notes |
 |---|---|
 | `aws_bedrock_guardrail` `<prefix>-genai` | Prompt-attack filter on input (`prompt_attack_strength`), content filters (`content_filter_strength`), PII masking (`pii_anonymize_types`) and blocking (`pii_block_types`, incl. AWS keys and passwords), contextual grounding and relevance thresholds, fixed blocked messages. KMS (`genai`) |
-| `aws_bedrock_guardrail_version` | Pinned version used by the gateway. Change `version_label` to publish a new one after a policy change |
+| `aws_bedrock_guardrail_version` | Pinned version used by the API (SSM `genai/guardrail`, task env `BEDROCK_GUARDRAIL_VERSION`). Change `version_label` to publish a new one after a policy change |
 | `aws_cloudwatch_metric_alarm` interventions | More than `intervention_alarm_threshold` blocks per 15 minutes → `alarm_topic_arn` |
 
 ## Inputs

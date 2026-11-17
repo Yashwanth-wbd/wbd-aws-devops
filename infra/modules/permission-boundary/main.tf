@@ -12,6 +12,10 @@ locals {
     "route53domains:*", "waf:*", "shield:*", "globalaccelerator:*", "trustedadvisor:*",
     "sso:*", "identitystore:*", "s3:GetBucketLocation", "s3:ListAllMyBuckets",
   ]
+
+  # A Bedrock cross-region inference profile routes InvokeModel to the profile's other regions.
+  bedrock_invoke_actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+  bedrock_regions        = distinct(concat(var.allowed_regions, var.bedrock_inference_regions))
 }
 
 data "aws_iam_policy_document" "boundary" {
@@ -86,13 +90,26 @@ data "aws_iam_policy_document" "boundary" {
   statement {
     sid         = "DenyUnapprovedRegions"
     effect      = "Deny"
-    not_actions = local.global_actions
+    not_actions = concat(local.global_actions, local.bedrock_invoke_actions)
     resources   = ["*"]
 
     condition {
       test     = "StringNotEquals"
       variable = "aws:RequestedRegion"
       values   = var.allowed_regions
+    }
+  }
+
+  statement {
+    sid       = "DenyBedrockOutsideInferenceRegions"
+    effect    = "Deny"
+    actions   = local.bedrock_invoke_actions
+    resources = ["*"]
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:RequestedRegion"
+      values   = local.bedrock_regions
     }
   }
 }

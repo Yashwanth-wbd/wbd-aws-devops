@@ -8,8 +8,14 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "public_subnet_ids" {
-  description = "Public subnets (one per AZ)."
+variable "internal" {
+  description = "Internal ALB (private entry only, reached from the WBD network). false = internet-facing."
+  type        = bool
+  default     = true
+}
+
+variable "subnet_ids" {
+  description = "Subnets of the ALB, one per AZ: the private-app subnets for an internal ALB."
   type        = list(string)
 }
 
@@ -19,7 +25,7 @@ variable "security_group_id" {
 }
 
 variable "certificate_arn" {
-  description = "ACM certificate in this region for the app host name."
+  description = "ACM certificate in this region for the app host name (DNS-validated, or imported / ACM Private CA from the WBD PKI)."
   type        = string
 
   validation {
@@ -43,7 +49,7 @@ variable "oidc" {
 }
 
 variable "allow_unauthenticated" {
-  description = "Without oidc, forward to the targets with no sign-in (isolated tests only - never on an internet-facing environment)."
+  description = "Without oidc, forward to the targets with no sign-in (isolated tests only - never in a shared environment)."
   type        = bool
   default     = false
 }

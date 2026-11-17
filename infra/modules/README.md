@@ -32,16 +32,15 @@ Shared conventions for all modules:
 | [permission-boundary](permission-boundary/) | 3 | 1 | Boundary policy attached to every Terraform-created role |
 | [iam-oidc](iam-oidc/) | 3 | 1 | GitHub OIDC provider + gha-plan / apply / deploy / ecr-push / ecr-read roles; gha-model-eval / gha-model-approve with the data platform |
 | [budgets](budgets/) | 3 | 1 | Monthly budget alerts + Cost Anomaly Detection |
-| [network](network/) | 4 | 1 | VPC, subnets, NAT, endpoints, security groups, flow logs, optional TGW / Resolver |
+| [network](network/) | 4 | 1 | VPC, subnets, NAT, endpoints (optional endpoint policies), security groups, flow logs, Transit Gateway attachment (private entry from WBD) |
 | [secrets](secrets/) | 5 | 1 | Secrets Manager containers, generated secrets, SSM parameters |
 | [ecr](ecr/) | 6 | 1 | Per-environment ECR repositories, scanning, lifecycle |
 | [s3-bucket](s3-bucket/) | 6 | 1 | Hardened data bucket (optional Object Lock and replication) |
 | [log-bucket](log-bucket/) | 6 | 1 | Log-delivery bucket for ALB and S3 access logs |
 | [rds](rds/) | 6 | 1 | RDS PostgreSQL instance (Multi-AZ in staging / prod) + RDS Proxy (IAM auth) |
 | [ecs-cluster](ecs-cluster/) | 7 | 1 | ECS cluster, capacity providers, Service Connect namespace, execution role |
-| [alb](alb/) | 7 | 1 | Public ALB, `ui` / `api` target groups, HTTPS listener with Okta OIDC authentication (`authenticate-oidc`) |
+| [alb](alb/) | 7 | 1 | Internal ALB (private entry only), `ui` / `api` target groups, HTTPS listener with Okta OIDC authentication first (`authenticate-oidc`) |
 | [ecs-service](ecs-service/) | 7 | 1 | One ECS service with task definition, task role, logs, CPU autoscaling |
-| [waf-regional](waf-regional/) | 8 | 1 | Regional WAF on the ALB: managed rules, rate limit, optional geo filter |
 | [run-queue](run-queue/) | 8 | 1 | SQS optimization request queue + DLQ, dispatcher Lambda that starts runs up to the concurrency limit, alarms |
 | [step-functions](step-functions/) | 8 | 1 | Standard state machine with role, logs and failure alarm (optimization, model refresh, model monitor) |
 | [sagemaker](sagemaker/) | 8 | 1 | SageMaker job execution role; Model Registry groups per business unit (training) |
@@ -50,8 +49,11 @@ Shared conventions for all modules:
 | [log-shipping](log-shipping/) | 9 | 1 | CloudWatch Logs → Firehose → Splunk |
 | [backup](backup/) | 10 | 1 | AWS Backup vault, plan, selection, vault lock, cross-region copy |
 | [databricks-access](databricks-access/) | 13 | 1 | Unity Catalog role, Databricks PrivateLink, private DNS |
-| [bedrock-guardrails](bedrock-guardrails/) | 14 | 2 | Bedrock guardrail + pinned version, interventions alarm |
-| [llm-gateway](llm-gateway/) | 14 | 2 | Private API Gateway + proxy Lambda to the approved LLM providers, guardrail on every call |
+| [bedrock-guardrails](bedrock-guardrails/) | 14 | 2 | Bedrock guardrail + pinned version (enforced on every Bedrock call by the API role), interventions alarm |
+
+The v6 architecture removed the `waf-regional` and `llm-gateway` modules: the app is internal
+(no WAF, no Route 53) and the API calls Amazon Bedrock directly (no API Gateway). The Bedrock
+access, alarms and optional inference profiles / invocation logging are in the stacks' `genai.tf`.
 
 ## Adding a module
 

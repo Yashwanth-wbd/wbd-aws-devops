@@ -23,12 +23,12 @@ GuardDuty HIGH, suspected data exposure, leaked credentials, unknown IAM activit
 | Compromised planner account | WBD Identity suspends the Okta user and clears its sessions; the `mmm-session` cookie ends at `session_hours` at the latest |
 | Leaked / misused IAM role session | Revoke sessions on the role; check CloudTrail |
 | Suspicious engineer access | WBD Identity disables the Okta user / removes the permission-set assignment |
-| Data exposure via the app | GenAI: [genai.md](genai.md); WAF: block IP / pattern on the regional web ACL (`mmm-<env>-alb`, then PR) |
+| Data exposure via the app | GenAI: [genai.md](genai.md). The app has no public entry (internal ALB, WBD ranges only): narrow `alb_ingress_cidrs` (PR) or have WBD Network block the source range at the Transit Gateway / firewall; suspend the Okta user |
 | Public bucket / object | Re-apply Block Public Access; CloudTrail for who changed it |
 
 ## 2. Investigate (with security)
 
-- CloudTrail for the principal and time window; VPC flow logs; ALB and WAF logs (log bucket / Splunk);
+- CloudTrail for the principal and time window; VPC flow logs (source IPs from the WBD ranges); ALB access logs (log bucket / Splunk);
   ECS Exec audit; RDS PostgreSQL logs (`/aws/rds/instance/mmm-<env_short>-postgres/postgresql` or
   `terraform output monitoring.splunk_log_groups`).
 - Image provenance: release record (digest) and Trivy / Inspector for that digest.

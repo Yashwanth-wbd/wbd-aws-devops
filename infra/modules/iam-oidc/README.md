@@ -18,8 +18,10 @@ pipeline roles. Background: [docs/03-github-oidc.md](../../../docs/03-github-oid
 | Role (`enable_model_governance`) | `mmm-dev-gha-model-eval` | `ref:refs/heads/main` (hourly evaluation) | Read the Model Registry groups `<prefix>-*` and the evaluation reports; set a model package to **Rejected** only; tag it |
 | Role (`enable_model_governance`) | `mmm-dev-gha-model-approve` | `environment:dev-model-promotion` (WBD model approver) | Same, plus set **Approved**, publish the approved response curves to `models/curves/*` and the drift baseline to `models/baseline/*`, and write `models/evaluation/*/approval.json` |
 
-Subjects are always `repo:<github_org>/<github_repo>:...`, so no other repository can use
-these roles. Every role has the permission boundary and a 1-hour session limit.
+Subjects are always `repo:<github_org>/<repo>:...`. `gha-plan` and `gha-apply` trust only
+`github_repo`; the release roles (`deploy`, `ecr-push`, `ecr-read`, `model-eval`, `model-approve`)
+also trust the WBD frontend, backend and data repositories listed in `app_repositories` (v6), with the
+same environment / branch rules. No other repository can use these roles. Every role has the permission boundary and a 1-hour session limit.
 
 ### Why gha-apply has AdministratorAccess
 
@@ -53,6 +55,7 @@ of starting the state machine) - same one-off apply with the SSO profile.
 | `environment` | string | – | GitHub Environment: `dev`, `staging`, `prod` |
 | `env_short` | string | – | `dev`, `stg`, `prd` |
 | `github_org`, `github_repo` | string | – | Repository allowed to assume the roles |
+| `app_repositories` | list(string) | `[]` | WBD frontend / backend / data repositories (names only) that may assume the release roles (not plan / apply) |
 | `create_oidc_provider` | bool | `true` | `false` + `existing_oidc_provider_arn` if the account already has one |
 | `permissions_boundary_arn` | string | – | From the permission-boundary module |
 | `plan_allow_pull_requests` | bool | `true` | Set `false` in prod |

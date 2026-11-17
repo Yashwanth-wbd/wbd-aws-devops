@@ -59,9 +59,15 @@ variable "interface_endpoints" {
 }
 
 variable "additional_interface_endpoints" {
-  description = "Extra interface endpoint suffixes added to interface_endpoints (data platform adds glue; Release 2 adds execute-api and bedrock-runtime for the LLM gateway)."
+  description = "Extra interface endpoint suffixes added to interface_endpoints (data platform adds glue; Release 2 GenAI adds bedrock-runtime)."
   type        = list(string)
   default     = []
+}
+
+variable "interface_endpoint_policies" {
+  description = "Endpoint policy JSON per interface endpoint suffix (e.g. bedrock-runtime limited to the approved models). Endpoints not listed keep the default (full access) policy."
+  type        = map(string)
+  default     = {}
 }
 
 # ------------------------------------------------------------------ Security groups
@@ -78,20 +84,18 @@ variable "ui_port" {
 }
 
 variable "alb_ingress_cidrs" {
-  description = "Source ranges allowed to reach the public ALB (0.0.0.0/0 = internet, filtered by the WAF; or the WBD egress ranges)."
+  description = "WBD ranges (corporate network / VPN, through the Transit Gateway) allowed to reach the internal ALB. No public entry: 0.0.0.0/0 is rejected."
   type        = list(string)
-  default     = ["0.0.0.0/0"]
 
   validation {
     condition     = length(var.alb_ingress_cidrs) > 0 && alltrue([for c in var.alb_ingress_cidrs : can(cidrhost(c, 0))])
     error_message = "alb_ingress_cidrs must be a non-empty list of IPv4 CIDRs."
   }
-}
 
-variable "create_genai_security_group" {
-  description = "Create the LLM gateway proxy security group: no inbound, HTTPS out (Release 2)."
-  type        = bool
-  default     = false
+  validation {
+    condition     = !contains(var.alb_ingress_cidrs, "0.0.0.0/0")
+    error_message = "alb_ingress_cidrs must be the WBD ranges; 0.0.0.0/0 is not allowed (internal application, no public entry)."
+  }
 }
 
 variable "create_data_platform_security_groups" {
@@ -117,9 +121,9 @@ variable "permissions_boundary_arn" {
   type        = string
 }
 
-# ------------------------------------------------------------------ WBD hub connectivity (optional)
+# ------------------------------------------------------------------ WBD hub connectivity
 variable "enable_transit_gateway" {
-  description = "Attach the VPC to the WBD Transit Gateway."
+  description = "Attach the VPC to the WBD Transit Gateway - the path from the WBD network to the internal ALB."
   type        = bool
   default     = false
 }
@@ -134,29 +138,6 @@ variable "transit_gateway_routes" {
   description = "Destination CIDRs routed from the private-app subnets to the Transit Gateway (use 0.0.0.0/0 only when enable_nat_gateway = false)."
   type        = list(string)
   default     = []
-}
-
-variable "enable_resolver_forwarding" {
-  description = "Create a Route 53 Resolver outbound endpoint and FORWARD rules for WBD-internal domains."
-  type        = bool
-  default     = false
-}
-
-variable "resolver_forward_domains" {
-  description = "WBD-internal domains forwarded to the WBD DNS servers, e.g. [\"wbd.internal\"]."
-  type        = list(string)
-  default     = []
-}
-
-variable "resolver_target_ips" {
-  description = "WBD DNS server IPs that receive the forwarded queries."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for ip in var.resolver_target_ips : can(cidrhost("${ip}/32", 0))])
-    error_message = "resolver_target_ips must be IPv4 addresses."
-  }
 }
 
 variable "tags" {

@@ -19,7 +19,7 @@ First stop: the failed step's log and the run summary. The common errors and fix
 | | Deploy services / circuit breaker | Automatic rollback already ran. [ecs-task-stuck.md](ecs-task-stuck.md) |
 | | Optimizer task revision | `ecs/<env>/optimizer.json` invalid or the family `mmm-<env>-optimizer` missing (Terraform not applied); nothing switched yet |
 | | Release pointers / publisher | Rollback step restores SSM (optimizer task, training image) and the Lambda alias; fix image or publisher code |
-| | Smoke test | Rolled back automatically. Check WAF (403), Okta redirect on `/` (503 = sign-in off but `SMOKE_CHECK_LOGIN=true`: re-run `setup-github.ps1`), `/api/health` 200 |
+| | Smoke test | Rolled back automatically. Check the runner can reach the internal ALB (`DEPLOY_RUNNER` on the WBD network; timeout = runner outside, 403 / reset = runner range not in `alb_ingress_cidrs`), Okta redirect on `/` (503 = sign-in off but `SMOKE_CHECK_LOGIN=true`: re-run `setup-github.ps1`), `/api/health` 200 |
 | | Optimization dry run | Rolled back automatically. `not started after 600s`: run queue / dispatcher ([optimization-run-failed.md](optimization-run-failed.md) §0); otherwise the execution failed (§1–3) |
 | | Roll back (itself failed) | SEV1 in prod: manual rollback [rollback.md](rollback.md) now |
 | `terraform` | fmt / validate / tflint / Checkov | Fix in the PR |

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Post-deploy smoke test through the public ALB. Non-zero exit makes deploy.yml roll back.
+# Post-deploy smoke test through the internal ALB (run from the WBD network / VPC: deploy.yml
+# uses the DEPLOY_RUNNER self-hosted runner). Non-zero exit makes deploy.yml roll back.
 #
 #   smoke.sh <base-url> [expected-version]
 #
 # Passes when
 #   1. GET <base-url>/api/health returns 200 (and, if given, the body contains the expected
 #      version - the API reports APP_VERSION, which ecs-deploy.sh sets), and
-#   2. GET <base-url>/ without a session is redirected to the WBD Okta sign-in (the front door,
-#      WAF and Okta OIDC wiring work). SMOKE_CHECK_LOGIN=false skips this (GitHub variable from
+#   2. GET <base-url>/ without a session is redirected to the WBD Okta sign-in (the private entry
+#      point and Okta OIDC wiring work). SMOKE_CHECK_LOGIN=false skips this (GitHub variable from
 #      terraform output github_environment_variables: false while okta_sign_in_enabled = false,
 #      when the ALB answers 503).
 set -euo pipefail

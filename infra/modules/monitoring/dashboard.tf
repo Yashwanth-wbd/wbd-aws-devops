@@ -50,12 +50,6 @@ locals {
             [for f in var.lambda_function_names : ["AWS/Lambda", "Errors", "FunctionName", f, { stat = "Sum" }]],
           ) },
         ],
-        var.waf_web_acl_name == null ? [] : [
-          { title = "WAF allowed / blocked", metrics = [
-            ["AWS/WAFV2", "AllowedRequests", "WebACL", var.waf_web_acl_name, "Region", local.region, "Rule", "ALL", { stat = "Sum" }],
-            [".", "BlockedRequests", ".", ".", ".", ".", ".", ".", { stat = "Sum" }],
-          ] },
-        ],
       )
 
       api-ui = concat(
@@ -210,18 +204,23 @@ locals {
         try(local.sfn_widgets["model-refresh"], []),
       )
     },
-    var.llm_gateway_api_name == null ? {} : {
+    length(var.bedrock_model_ids) == 0 ? {} : {
       genai = concat(
         [
-          { title = "LLM gateway requests and errors", metrics = [
-            ["AWS/ApiGateway", "Count", "ApiName", var.llm_gateway_api_name, "Stage", "v1", { stat = "Sum" }],
-            [".", "4XXError", ".", ".", ".", ".", { stat = "Sum" }],
-            [".", "5XXError", ".", ".", ".", ".", { stat = "Sum" }],
-          ] },
-          { title = "LLM gateway latency (ms)", metrics = [
-            ["AWS/ApiGateway", "Latency", "ApiName", var.llm_gateway_api_name, "Stage", "v1", { stat = "p50" }],
-            ["...", { stat = "p95" }],
-          ] },
+          { title = "Bedrock invocations and errors", metrics = concat(
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "Invocations", "ModelId", m, { stat = "Sum", label = "${m} invocations" }]],
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InvocationClientErrors", "ModelId", m, { stat = "Sum", label = "${m} client errors" }]],
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InvocationServerErrors", "ModelId", m, { stat = "Sum", label = "${m} server errors" }]],
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InvocationThrottles", "ModelId", m, { stat = "Sum", label = "${m} throttles" }]],
+          ) },
+          { title = "Bedrock latency (ms)", metrics = concat(
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InvocationLatency", "ModelId", m, { stat = "p50", label = "${m} p50" }]],
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InvocationLatency", "ModelId", m, { stat = "p95", label = "${m} p95" }]],
+          ) },
+          { title = "Bedrock tokens (input / output)", metrics = concat(
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "InputTokenCount", "ModelId", m, { stat = "Sum", label = "${m} input" }]],
+            [for m in var.bedrock_model_ids : ["AWS/Bedrock", "OutputTokenCount", "ModelId", m, { stat = "Sum", label = "${m} output" }]],
+          ) },
         ],
         length(var.genai_business_units) == 0 ? [] : [
           { title = "GenAI tokens per business unit (app metric)", period = 3600, metrics = [

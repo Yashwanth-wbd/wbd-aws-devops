@@ -1,7 +1,7 @@
 # log-bucket
 
 The bucket that receives AWS service logs: ALB access logs and S3 server access logs. VPC flow
-logs, WAF logs and application logs go to CloudWatch, not here.
+logs and application logs go to CloudWatch, not here.
 
 **Status:** implemented in Step 6.
 

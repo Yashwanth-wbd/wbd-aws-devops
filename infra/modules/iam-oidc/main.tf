@@ -22,18 +22,24 @@ locals {
   model_packages       = "arn:${local.partition}:sagemaker:${local.region}:${local.account_id}:model-package/${var.name_prefix}-*/*"
   models_bucket        = "arn:${local.partition}:s3:::wbd-mmm-${var.env_short}-models-*"
 
+  # Terraform roles trust only this repository; the release roles also trust the WBD app repositories.
+  release_repos = concat([local.repo], [for r in var.app_repositories : "repo:${var.github_org}/${r}"])
+
   subjects = {
     plan = concat(
       [local.env_subject],
       var.plan_allow_pull_requests ? ["${local.repo}:pull_request"] : [],
       var.plan_allow_main_branch ? [local.main_subject] : [],
     )
-    apply         = [local.env_subject]
-    deploy        = [local.env_subject]
-    ecr_push      = concat([local.env_subject], var.ecr_push_allow_main_branch ? [local.main_subject] : [])
-    ecr_read      = [for e in var.ecr_read_trusted_environments : "${local.repo}:environment:${e}"]
-    model_eval    = [local.main_subject]
-    model_approve = ["${local.repo}:environment:${var.environment}-model-promotion"]
+    apply  = [local.env_subject]
+    deploy = [for r in local.release_repos : "${r}:environment:${var.environment}"]
+    ecr_push = flatten([for r in local.release_repos : concat(
+      ["${r}:environment:${var.environment}"],
+      var.ecr_push_allow_main_branch ? ["${r}:ref:refs/heads/main"] : [],
+    )])
+    ecr_read      = [for p in setproduct(local.release_repos, var.ecr_read_trusted_environments) : "${p[0]}:environment:${p[1]}"]
+    model_eval    = [for r in local.release_repos : "${r}:ref:refs/heads/main"]
+    model_approve = [for r in local.release_repos : "${r}:environment:${var.environment}-model-promotion"]
   }
 
   roles = {

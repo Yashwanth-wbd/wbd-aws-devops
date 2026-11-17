@@ -11,7 +11,6 @@ services that use the value.
 | RDS admin password | automatic (RDS-managed secret) | nothing to do; `terraform output rds.master_user_secret_arn` |
 | Okta ALB client secret (`mmm/<env>/okta/alb-client`) | when WBD Identity rotates it (at least yearly) | below – needs a `terraform apply` |
 | App / migration DB users (`mmm/<env>/rds/proxy`, `rds/migrate`) | every 90 days | below |
-| LLM provider keys (`mmm/<env>/llm/<provider>`) | when the issuer rotates (at least yearly) | below |
 | Databricks export service principal (`mmm/<env>/databricks/export-sp`) | when WBD rotates the service principal secret | below |
 | Splunk HEC token, third-party keys | when the issuer rotates them | below |
 | ACM certificate (ALB) | automatic (DNS validation) | alarm `cert-expiry-alb` 30 days before expiry means renewal is failing |
@@ -41,12 +40,11 @@ The ALB listener holds the secret, so it changes only when Terraform applies.
    (RDS Proxy reads the secret; apps use IAM auth to the proxy and are not affected).
 3. Test a connection through the proxy; repeat for `rds/migrate` / `mmm_migrator`.
 
-## External tokens (Splunk, third-party, LLM)
+## External tokens (Splunk, third-party)
 
 1. The issuer creates the new token (keep the old one valid until step 3).
 2. `aws secretsmanager put-secret-value --secret-id mmm/<env>/<name> --secret-string '<new>'` –
-   type it in a terminal without history, never in a file or ticket. LLM keys use
-   `{"api_key":"..."}`.
+   type it in a terminal without history, never in a file or ticket.
 3. Force new deployment of `api` (and any other reader). Firehose reads Splunk on its own.
    Then the issuer revokes the old token.
 

@@ -11,7 +11,7 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
-    # zips the seed / proxy Lambda code (lambda-function, llm-gateway)
+    # zips the seed Lambda code (lambda-function)
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.4"

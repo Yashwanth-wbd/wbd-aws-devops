@@ -28,7 +28,7 @@ too broad, the boundary blocks:
 | Role | May | May not |
 |---|---|---|
 | `mmm-<env>-ecs-task-exec` (shared execution role) | Pull from ECR, write its log groups, read **only the listed** secrets/parameters, KMS decrypt for those | Anything at runtime inside the app |
-| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), send run requests to the SQS queue `<prefix>-optimization-requests` (SQS key), watch/stop optimization executions, read approved curves under `models/curves/`, read/write the results bucket (run inputs under `runs/*/input/`), read/write exports, **write once** to approved-WORM (on approval), read SSM `/mmm/<env_short>/*`, invoke the private LLM gateway (`execute-api:Invoke`) when GenAI is enabled | Start optimization executions directly (only the dispatcher does); delete or tamper with approved-WORM objects (explicit deny); direct DB login without the proxy |
+| `mmm-<env>-task-api` | Connect to RDS Proxy as `mmm_app` (IAM auth), send run requests to the SQS queue `<prefix>-optimization-requests` (SQS key), watch/stop optimization executions, read approved curves under `models/curves/`, read/write the results bucket (run inputs under `runs/*/input/`), read/write exports, **write once** to approved-WORM (on approval), read SSM `/mmm/<env_short>/*`, invoke the approved Bedrock models with the guardrail (`bedrock:InvokeModel*`, `bedrock:ApplyGuardrail`) when GenAI is enabled | Start optimization executions directly (only the dispatcher does); delete or tamper with approved-WORM objects (explicit deny); direct DB login without the proxy; call a Bedrock model without the guardrail or outside `genai_model_ids` |
 | `mmm-<env>-task-ui` | Read SSM `genai_enabled` (UI banner only) | Any other AWS API |
 | `mmm-<env>-task-migrate` | Connect to RDS Proxy as `mmm_migrator`. Only while `enable_db_bootstrap = true`: also as `mmm_admin`, plus writing the `rds/migrate` and `rds/proxy` secrets | S3, Step Functions |
 | `mmm-<env>-task-platform-check` | S3 round trip under `results/platform-check/`, `DescribeStateMachine` on the optimization state machine, `GetQueueAttributes` on the run queue, read SageMaker image SSM parameters (dev/staging when enabled) | DB login, other S3 paths |
@@ -82,10 +82,12 @@ Defined in `infra/modules/iam-oidc/main.tf` per environment:
 
 ### GenAI (Release 2, `enable_genai = true`)
 
-There is no separate GenAI ECS task. The **API task role** invokes a private API Gateway (IAM
-SigV4) that proxies to approved external LLM providers; Bedrock guardrails run inside that path.
-Provider API keys live in Secrets Manager and are not on the task role. Details:
-[12-genai-bedrock.md](12-genai-bedrock.md).
+There is no separate GenAI ECS task and no API Gateway. The **API task role** calls Amazon Bedrock
+directly through the `bedrock-runtime` VPC endpoint: `bedrock:InvokeModel` /
+`InvokeModelWithResponseStream` (Converse / ConverseStream) only on the approved model and
+inference-profile ARNs (`genai_model_ids`; Anthropic default) and only with the pinned guardrail
+(IAM condition `bedrock:GuardrailIdentifier`), plus `bedrock:ApplyGuardrail`. No provider API keys
+exist. Details: [12-genai-bedrock.md](12-genai-bedrock.md).
 
 ### Database users (RDS Proxy, IAM auth required)
 
@@ -102,7 +104,8 @@ them. Clients never use passwords at runtime—they present an IAM auth token to
 
 ### Sign-in and request identity
 
-Planners open the app URL on the public ALB. Unauthenticated browser traffic is redirected
+Planners open the internal app URL from the WBD network (WBD DNS → Transit Gateway → internal ALB;
+there is no public entry). The ALB authenticates first: unauthenticated browser traffic is redirected
 straight to the WBD Okta authorization server (OIDC authorization code flow, MFA at Okta). After
 sign-in, the ALB sets session cookie `mmm-session`.
 

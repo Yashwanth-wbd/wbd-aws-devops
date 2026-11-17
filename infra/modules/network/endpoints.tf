@@ -19,6 +19,7 @@ resource "aws_vpc_endpoint" "interface" {
   private_dns_enabled = true
   subnet_ids          = [for s in aws_subnet.endpoint : s.id]
   security_group_ids  = [aws_security_group.this["endpoints"].id]
+  policy              = lookup(var.interface_endpoint_policies, each.key, null)
 
   tags = merge(local.tags, { Name = "${var.name_prefix}-vpce-${replace(each.key, ".", "-")}" })
 }

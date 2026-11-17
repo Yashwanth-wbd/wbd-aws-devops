@@ -1,17 +1,19 @@
 # 04 – Planner login: Okta OIDC at the ALB, and MFA
 
-Planners open the app in a browser at `https://<app_domain_name>`. There are **no local
-accounts**. WBD Okta (with MFA) is the identity source. The **Application Load Balancer** signs
-users in directly against Okta with `authenticate-oidc` (OIDC authorization code flow) and passes
-identity to the **UI** and the **API**. There is no Cognito user pool in v3. PostgreSQL row-level
+Planners open the app in a browser at `https://<app_domain_name>` **from the WBD network** (office,
+VPN, VDI): the app is internal, with no public entry. The name is in WBD DNS and points to the
+**internal Application Load Balancer**, reached through the Transit Gateway. There are **no local
+accounts**. WBD Okta (with MFA) is the identity source. The ALB authenticates every request
+against Okta **first** with `authenticate-oidc` (OIDC authorization code flow); only then does it
+route to the **UI** and the **API**, passing the identity on. There is no Cognito user pool in v3. PostgreSQL row-level
 security still isolates business units ([06-authorization-model.md](06-authorization-model.md)).
 
 ## 1. Flow
 
 ```mermaid
 sequenceDiagram
-  participant B as Browser
-  participant W as Regional WAF + ALB
+  participant B as Browser (WBD network)
+  participant W as Internal ALB (via Transit Gateway)
   participant O as WBD Okta (OIDC authorization server)
   participant UI as mmm-ui (ECS)
   participant API as mmm-api (ECS)
@@ -153,9 +155,10 @@ Unauthenticated calls to `/api/*` never reach the task: the ALB returns **401**.
 
 | Control | Where |
 |---|---|
-| TLS 1.2+ on the public listener | ALB HTTPS listener policy |
-| Ingress restriction | ALB security group: 443/80 from `alb_ingress_cidrs` |
-| WAF (IP reputation, OWASP, rate limit, optional geo allow list) | Regional WAF on the ALB (`waf-regional` module) |
+| No public entry | ALB scheme `internal` in the private-app subnets; reached only through the Transit Gateway |
+| TLS 1.2+ on the listener | ALB HTTPS listener policy; certificate from ACM (DNS-validated or WBD private CA) |
+| Ingress restriction | ALB security group: 443/80 from `alb_ingress_cidrs` (WBD ranges; `0.0.0.0/0` rejected) |
+| Okta first | `authenticate-oidc` is the first action of every rule except `/api/health`; the ALB reaches Okta through NAT |
 | HTTP → HTTPS | ALB port 80 redirect |
 | No access without sign-in | Listener answers 503 until `okta_sign_in_enabled = true` |
 | Access logs | ALB → S3 log bucket prefix `alb/` |
@@ -164,8 +167,8 @@ Unauthenticated calls to `/api/*` never reach the task: the ALB returns **401**.
 
 **Infrastructure (DevOps), after Step 8 apply:**
 
-1. `terraform output dns_records_for_wbd` — if `route53_zone_id` is null, ask WBD DNS to create the CNAME to `front_door.alb_dns_name`.
-2. Until DNS exists, use `https://<alb_dns_name>/api/health` — expect **200**.
+1. `terraform output dns_records_for_wbd` — ask WBD DNS to create the CNAME (internal name → `front_door.alb_dns_name`).
+2. From the WBD network, until DNS exists, use `https://<alb_dns_name>/api/health` — expect **200**. From outside the WBD network the ALB must not be reachable.
 3. Before sign-in is on: `curl -I https://<app-url>/` — expect **503**.
 4. After sign-in is on: `curl -I https://<app-url>/` without cookies — expect **302** to
    `https://<okta>/oauth2/<server>/v1/authorize?...` (same check as `scripts/smoke.sh`).

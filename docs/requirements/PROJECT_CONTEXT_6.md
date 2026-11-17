@@ -4,7 +4,7 @@ Companion to `PROJECT_CONTEXT_5.md`. v5 (from `WBD_MMM_Architecture_5.pptx`) is 
 (`415caef`). This file describes the **v6 target** from the final client deck
 `WBD_MMM_Architecture_6.pptx` and what has to change in the code to get there.
 
-Status (17 Nov 2026): **plan only – not implemented.** v6 keeps slide 1 (auto ML activities) and the data
+Status (17 Nov 2026): **implemented with placeholder values and validated offline** (mock plans dev / staging / prod, `validate-modules`, tflint, Checkov, actionlint, secret scan; nothing applied to AWS). Modules `waf-regional` and `llm-gateway` deleted; internal ALB; Bedrock IAM / endpoint policy / SSM / alarms; optional `app_repositories` OIDC trust for the WBD frontend, backend and data repositories; `DEPLOY_RUNNER` for the deploy job. v6 keeps slide 1 (auto ML activities) and the data
 platform as built; slide 2 changes the entry point (internal ALB, no public entry) and the GenAI path
 (Amazon Bedrock directly through the `bedrock-runtime` VPC endpoint, no API Gateway LLM gateway).
 

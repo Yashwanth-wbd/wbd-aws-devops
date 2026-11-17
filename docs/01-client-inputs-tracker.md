@@ -38,11 +38,10 @@ git grep -n -A1 "add actual value"
 | Availability Zone IDs (dev 2, staging/prod 3) | dev `use1-az1`, `use1-az2`; staging/prod add `use1-az4` | env tfvars `availability_zone_ids` | WBD Network | Open – list with `aws ec2 describe-availability-zones --query "AvailabilityZones[].[ZoneName,ZoneId]"` |
 | Staging VPC CIDR | `10.40.32.0/19` | staging tfvars | WBD Network | Open |
 | Prod VPC CIDR | `10.40.64.0/19` | prod tfvars | WBD Network | Open |
-| Transit Gateway ID + WBD CIDRs to route | `tgw-00000000000000000`, `10.0.0.0/8` (`enable_transit_gateway = false`) | env tfvars | WBD Network | Open |
+| Transit Gateway ID + WBD CIDRs to route (required: the only path to the internal ALB) | `tgw-00000000000000000`, `10.0.0.0/8` (`enable_transit_gateway = true`) | env tfvars | WBD Network | Open |
 | Central egress firewall instead of NAT? | assumed no (`enable_nat_gateway = true`) | env tfvars | WBD Network | Open |
-| Resolver forward domains + target IPs | `wbd.internal` → `10.0.0.2`, `10.0.0.3` (`enable_resolver_forwarding = false`) | env tfvars | WBD Network | Open |
 | Existing VPC to reuse (if any) | none – new VPC created | network module | WBD Network | Open |
-| ALB ingress CIDRs (who may reach HTTPS on the public ALB) | `["0.0.0.0/0"]` | env tfvars `alb_ingress_cidrs`, ALB security group | WBD Security / Network | Open – tighten to WBD egress ranges if required |
+| ALB ingress CIDRs (WBD office / VPN / VDI ranges that may reach the internal ALB) | `["10.0.0.0/8"]` (`0.0.0.0/0` rejected) | env tfvars `alb_ingress_cidrs`, ALB security group | WBD Security / Network | Open |
 
 ## GitHub and CI/CD
 
@@ -50,6 +49,7 @@ git grep -n -A1 "add actual value"
 |---|---|---|---|---|
 | GitHub organisation | `Yashwanth-wbd` | OIDC trust policies | WBD GitHub admins | Open |
 | Repository name | `wbd-aws-devops` | OIDC trust policies | WBD GitHub admins | Open |
+| WBD frontend, backend and data repositories (v6; names only, same organisation) | `app_repositories = []` | OIDC trust of the release roles (deploy, ECR push / read, model eval / approve); never plan / apply | WBD GitHub admins | Open |
 | GitHub Actions approved instead of Jenkins | assumed yes | `.github/workflows/` | WBD | Open |
 | Staging approver(s) | `ey-delivery-lead` | GitHub Environment `staging` | EY | Open |
 | Prod approver(s) + CAB contact | `wbd-release-approver` | GitHub Environment `prod` | WBD | Open |
@@ -88,16 +88,12 @@ git grep -n -A1 "add actual value"
 | Cross-region backup copy approved? | prod only, `enable_cross_region_copy = false` until approved | backup module | WBD | Open |
 | Vault lock (COMPLIANCE, irreversible) approved + retention (min 7 / max 400 days, monthly 365) | prod only, `enable_vault_lock = false` | backup module | WBD Security | Open |
 | S3 cross-region replication of results / approved-worm (RPO minutes instead of 24 h) | not built: the DR copy of these buckets is the AWS Backup cross-region copy (daily, RPO 24 h). S3 replication only if WBD needs RPO in minutes | backup module (`enable_cross_region_copy`) | WBD | Proposed (Step 12) |
-| WAF rate limit per IP | dev `2000` req/5 min | env tfvars `waf_rate_limit` | WBD Security | Open |
-| WAF geo allow list (empty = no geo block) | `geo_allow_countries = []` | env tfvars | WBD Security | Open |
-| WAF observe-only rules | `waf_count_only = []` | env tfvars | WBD Security | Open |
-
 ## Front door and Okta
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
 | App domain name per environment | dev `mmm-dev.example.wbd.com`; staging/prod WBD to provide | env tfvars `app_domain_name` | WBD DNS | Open |
-| DNS: Route 53 zone in account or CNAME from WBD | `route53_zone_id = null` → use `terraform output dns_records_for_wbd` | `frontdoor.tf` | WBD DNS | Open |
+| DNS: internal app name in WBD DNS (no Route 53) | CNAME from `terraform output dns_records_for_wbd` to the internal ALB | WBD DNS (outside AWS) | WBD DNS | Open |
 | ACM certificate in **workload region** for `app_domain_name` | `alb_certificate_arn` | `alb` module HTTPS listener | WBD DNS / PKI | Open |
 | Okta authorization server (issuer) per environment | `https://wbd.okta.com/oauth2/default` | env tfvars `okta_issuer` | WBD Identity | Open |
 | Okta OIDC Web app client ID per environment | dev `0oa00000000000000000` | env tfvars `okta_client_id` | WBD Identity | Open |
@@ -108,7 +104,7 @@ git grep -n -A1 "add actual value"
 | Okta logout: is `client_id` accepted on `/v1/logout`? (the ALB does not give the app the ID token for `id_token_hint`) | `LOGOUT_URL` with `client_id` + `post_logout_redirect_uri` | UI env `LOGOUT_URL` | WBD Identity | Open |
 | Okta group names → BU + role | see `docs/04-okta-mfa-app-login.md` | Okta group membership | WBD Identity | Open |
 | Egress to PyPI through NAT (one-time DB bootstrap) or a WBD package mirror | – | `scripts/db-bootstrap.py` | WBD Network | Open |
-| Internet-facing or internal-only app? | internet-facing public ALB + regional WAF + Okta OIDC at the ALB | `alb`, `waf-regional` | WBD Security | Open |
+| Private access path (v6: internal application, no public entry) | Internal ALB in the private-app subnets, reached from the WBD network through the Transit Gateway; Okta OIDC first at the ALB; no WAF / Route 53 | `alb`, `network` (TGW), `frontdoor.tf` | WBD Security / Network | Confirm TGW (not drawn on slide 2) |
 
 ## Data and AI
 
@@ -143,10 +139,11 @@ git grep -n -A1 "add actual value"
 
 | Input | Placeholder | Used in | Owner | Status |
 |---|---|---|---|---|
-| Approved external LLM providers | OpenAI, Anthropic, Google (`llm_providers` in tfvars) | `llm-gateway` module | WBD Responsible AI | Open |
-| Provider API keys | `{"api_key":"..."}` per provider | Secrets Manager `mmm/<env>/llm/<provider>` | WBD / vendor contracts | Open |
+| Approved Bedrock models (Anthropic default; OpenAI / Google optional for experimentation) | `genai_model_ids = ["us.anthropic.claude-sonnet-4-5-20250929-v1:0", …]` (prod: default only) | `genai.tf` (IAM, endpoint policy, SSM `genai/model_id`) | WBD Responsible AI | Open |
+| Bedrock model access + tokens / requests per minute quotas in each account | – | Bedrock console / Service Quotas | WBD Cloud Platform | Open |
+| Cross-region inference profile regions (SCP must allow) | `genai_inference_regions = ["us-east-1", "us-east-2", "us-west-2"]` | permission boundary, WBD SCP | WBD Cloud Platform | Open |
+| Bedrock model invocation logging (account-level; metadata only?) | `enable_bedrock_invocation_logging = false`, `bedrock_invocation_log_text = false` | `genai.tf` | WBD Privacy / Cloud Platform | Open |
+| Per-BU application inference profiles (cost allocation) | `enable_genai_bu_inference_profiles = false` | `genai.tf` | WBD FinOps | Open |
 | GenAI feature flag at runtime | `genai_enabled = false` | SSM `/mmm/<env>/genai_enabled` | WBD | Open |
 | Token capacity / per-BU quotas | `1000000` tokens/day per BU | SSM `/mmm/<env>/genai/token_quota/<bu>` | WBD | Open |
 | Guardrail thresholds (prompt attack, PII, grounding, relevance) | prompt attack `HIGH`, content `MEDIUM`, PII mask/block per module defaults; `genai_grounding_threshold = 0.75`, `genai_relevance_threshold = 0.75` | `bedrock-guardrails` module | WBD Responsible AI | Open |
-| Lambda reserved concurrency for LLM proxy | `20` | tfvars `genai_reserved_concurrency` | WBD | Open |
-| API Gateway account logging role | `manage_apigw_account_logging_role = true` | tfvars | WBD Cloud Platform | Open |

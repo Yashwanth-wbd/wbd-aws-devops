@@ -122,7 +122,7 @@ resource "aws_nat_gateway" "this" {
 }
 
 # ------------------------------------------------------------------ Route tables
-# public: internet through the IGW (ALB and NAT only)
+# public: internet through the IGW (NAT gateways only; nothing is reachable from the internet)
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.this.id
 
@@ -180,7 +180,7 @@ resource "aws_route_table_association" "data" {
   route_table_id = aws_route_table.data.id
 }
 
-# private-endpoint: VPC-local only (interface endpoints, resolver, TGW attachment ENIs)
+# private-endpoint: VPC-local only (interface endpoints, TGW attachment ENIs)
 resource "aws_route_table" "endpoint" {
   vpc_id = aws_vpc.this.id
 

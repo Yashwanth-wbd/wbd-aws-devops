@@ -4,8 +4,8 @@
 
 | Kind of value | Store | Examples | Why |
 |---|---|---|---|
-| Passwords, tokens, keys | **AWS Secrets Manager** (KMS key `alias/mmm-<env>-secrets`) | DB app user, Okta OIDC client secret (ALB), Splunk HEC token, third-party API keys, LLM provider keys | Encrypted, audited, rotatable, injected into ECS at start |
-| Non-secret runtime settings | **SSM Parameter Store** (`String`, or `SecureString` if sensitive) | `genai_enabled`, Okta issuer, run concurrency limit, Databricks host, GenAI quotas | Change via Terraform tfvars + apply |
+| Passwords, tokens, keys | **AWS Secrets Manager** (KMS key `alias/mmm-<env>-secrets`) | DB app user, Okta OIDC client secret (ALB), Splunk HEC token, third-party API keys (GenAI on Bedrock needs none) | Encrypted, audited, rotatable, injected into ECS at start |
+| Non-secret runtime settings | **SSM Parameter Store** (`String`, or `SecureString` if sensitive) | `genai_enabled`, Okta issuer, run concurrency limit, Databricks host, GenAI quotas, Bedrock model / guardrail | Change via Terraform tfvars + apply |
 | Non-secret pipeline settings | **GitHub Environment variables** | role ARNs, region, cluster name, subnet IDs, `APP_URL` | Not secret; scoped per environment |
 | Pipeline secrets | **GitHub Environment secrets** (rare) | `SONAR_TOKEN` if SonarQube is used | Only for third-party tools that cannot use OIDC |
 | AWS credentials for pipelines | **none stored** | – | GitHub OIDC gives temporary credentials |
@@ -27,10 +27,10 @@ All paths use prefix **`mmm/<env_short>/`** (for example `mmm/dev/api/db` in the
 | `mmm/<env>/okta/alb-client` | `{"client_secret":"..."}` of the Okta OIDC Web app (`okta_client_id`) | DevOps from WBD Identity, before `okta_sign_in_enabled = true` | Terraform (data source, only with `okta_sign_in_enabled`) → ALB listener `authenticate-oidc` |
 | `mmm/<env>/splunk/hec` | `{"hec_token":"..."}` (Firehose requires this key name) | DevOps from WBD Splunk team | Firehose (when `enable_splunk_shipping`) |
 | `mmm/<env>/thirdparty/<vendor>` | Vendor-specific JSON (e.g. API keys) | DevOps from WBD data owners | API / batch jobs as wired by the app |
-| `mmm/<env>/llm/<provider>` | `{"api_key":"..."}` (only when `enable_genai`) | DevOps from WBD / vendor | LLM gateway proxy Lambda |
 | `mmm/<env>/databricks/export-sp` | `{"client_id","client_secret"}` of the WBD export service principal (only with `enable_data_platform`) | DevOps from WBD Databricks admins | Databricks export Lambda |
 There is **no** `redis/token`, **no** `edge/origin-verify`, **no** EventBridge connection secret,
-and **no** MWAA connection secrets.
+and **no** MWAA connection secrets. There are **no LLM provider keys**: Release 2 GenAI calls
+Amazon Bedrock with the API task role (IAM).
 
 ## 3. SSM parameters (Terraform-owned values)
 
@@ -41,7 +41,11 @@ and **no** MWAA connection secrets.
 | `/mmm/<env>/optimization/max_concurrent_runs` | `5` | tfvars `max_concurrent_runs` (change it there, not in the console) | Run dispatcher Lambda (each batch) |
 | `/mmm/<env>/databricks/host` | `https://dbc-….cloud.databricks.com` | tfvars `databricks_host` | Operators / diagnostics (the export Lambda gets the same value as env `DATABRICKS_HOST`) |
 | `/mmm/<env>/databricks/export_job_ids` | `{"streaming":123,…}` | tfvars `databricks_export_job_ids` (data platform) | Export Lambda |
-| `/mmm/<env>/genai/token_quota/<bu>` | `1000000` | tfvars `genai_token_quotas` | LLM gateway (Release 2) |
+| `/mmm/<env>/genai/token_quota/<bu>` | `1000000` | tfvars `genai_token_quotas` | API (Release 2) |
+| `/mmm/<env>/genai/model_id` | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | tfvars `genai_model_ids[0]` (only with `enable_genai`) | API (also env `BEDROCK_MODEL_ID`) |
+| `/mmm/<env>/genai/optional_model_ids` | `["openai.gpt-oss-120b-1:0", …]` | tfvars `genai_model_ids` after the first (only with `enable_genai`) | API (experimentation) |
+| `/mmm/<env>/genai/guardrail` | `{"id":"…","version":"1"}` | `bedrock-guardrails` module (only with `enable_genai`) | API (also env `BEDROCK_GUARDRAIL_ID` / `_VERSION`) |
+| `/mmm/<env>/genai/inference_profile/<bu>` | application inference profile ARN | `enable_genai_bu_inference_profiles` | API (model ID per BU) |
 
 Release pointers are written by `deploy.yml` (Terraform only creates them): the optimizer task
 definition ARN in **`/mmm/<env_short>/ecs/optimizer_task_definition`** and the SageMaker training
@@ -94,12 +98,6 @@ Remove-Item hec.json
 aws secretsmanager describe-secret --secret-id mmm/dev/splunk/hec --query "LastChangedDate"
 ```
 
-LLM provider key (Release 2, after `enable_genai = true`):
-
-```powershell
-aws secretsmanager put-secret-value --secret-id mmm/dev/llm/openai --secret-string '{"api_key":"..."}'
-```
-
 Changing a non-secret flag: update `infra/environments/<env>/terraform.tfvars` (for example
 `genai_enabled = true`) through a pull request and apply. Then force a new ECS deployment,
 because tasks read parameters at start.
@@ -117,7 +115,7 @@ aws ssm get-parameter --name /mmm/dev/genai_enabled --query Parameter.Value
 | RDS admin | Automatic (RDS-managed) |
 | Okta ALB client secret | When WBD Identity rotates it: `put-secret-value` on `okta/alb-client`, then `terraform apply` (the listener gets the new value; [runbooks/rotation.md](runbooks/rotation.md)) |
 | App / migrate DB users | Manual or rotation Lambda follow-up; update Secrets Manager and redeploy |
-| Splunk / third-party / LLM keys | When the issuer rotates; update the secret and force a new deployment |
+| Splunk / third-party keys | When the issuer rotates; update the secret and force a new deployment |
 | Databricks export service principal | WBD rotates the OAuth secret; `put-secret-value` on `databricks/export-sp` (used from the next token request, at most about an hour later; no redeploy) |
 
 ## 8. Guard rails

@@ -28,6 +28,17 @@ variable "github_repo" {
   type        = string
 }
 
+variable "app_repositories" {
+  description = "WBD application repositories (frontend, backend, data; names without the organisation) whose pipelines may assume the release roles (ecr-push, ecr-read, deploy, model-eval, model-approve) with the same environment / branch rules. gha-plan and gha-apply trust only github_repo."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for r in var.app_repositories : can(regex("^[A-Za-z0-9._-]+$", r))])
+    error_message = "app_repositories entries are repository names only (no organisation, no wildcards)."
+  }
+}
+
 variable "create_oidc_provider" {
   description = "Create the GitHub OIDC provider. Set false if the account already has one and pass existing_oidc_provider_arn."
   type        = bool
