@@ -1,0 +1,335 @@
+# PROMPT v6 — Build the WBD MMM AWS Platform (Infra + CI/CD) — internal ALB, one ECS cluster, GenAI on Amazon Bedrock, AWS Glue lakehouse + lineage, Databricks source export
+
+> **Version 6** of the build prompt, written for the client architecture in
+> `WBD_MMM_Architecture_6.pptx` (2 slides: "supports auto ML activities" and "supports optimization and
+> explainable planning"). v5 (`devops_plan_5.txt`, from `WBD_MMM_Architecture_5.pptx`) is **implemented in
+> the repo** (`415caef`); this file lists what v6 changes on top of that build. Everything not changed by
+> the v6 deck is carried over from v5 as built.
+>
+> **How to use this file:** give this entire document to an AI coding agent (or follow it yourself).
+> Section A lists what changed vs v5; the steps below are the full v6 build, with **(v6)** marking
+> every step that changes the existing code. Implement the steps **in order**; each step has a
+> **Validate** gate — do not proceed until it passes.
+>
+> **Who builds what (v6):** WBD provides **three repositories only – frontend, backend and data**. The
+> **WBD infra team creates the AWS resources with its own IaC and pipelines** from `aws_resource_list_6.xlsx`.
+> The Terraform in this repo is the **reference specification** (and can be handed over if WBD chooses to run
+> it). DevOps owns the architecture, the resource list, the client inputs, the integration of the three
+> repositories' pipelines with the created resources, and the end-to-end verification.
+>
+> **Scope:** DevOps only — **do NOT write application, model or data-pipeline code** (the developers
+> own the frontend / backend repositories incl. the LangGraph explanation tool and the results/data publisher;
+> the data scientists own the SageMaker training / evaluation / drift code and the **inference & optimization
+> container**; the data engineers own the **AWS Glue job scripts** and, with WBD Databricks, the
+> **Databricks export job**). This prompt builds everything that **provisions, secures, runs and deploys** their work.
+>
+> Markers: **[ASK]** = confirm with WBD/architect before building · **[ASM]** = assumption used until confirmed.
+>
+> **Status (17 Nov 2026):** **plan only — not implemented.** The repo holds the v5 build. Implement only
+> after the user has verified this plan, `PROJECT_CONTEXT_6.md`, `aws_resource_list_6.xlsx`,
+> `wbd_mmm_ecs_final_6.docx` and `devops_6_client_question.xlsx`.
+
+---
+
+## ⛔ EXECUTION MODE — ONE STEP AT A TIME (read first, non-negotiable)
+
+Execute exactly ONE numbered step at a time. Do NOT start the next step until the user explicitly
+confirms the current step is validated.
+
+After completing a step you MUST:
+1. Create only the files/resources for **that single step**.
+2. **STOP** and output: (a) what you created, (b) the exact **validation commands**, (c) any Git/AWS inputs to set.
+3. **WAIT** for the user to run the commands and confirm ("validated" / "passed").
+4. Only then begin the next step.
+
+Never batch steps. If a validation fails, fix only the current step. If anything is ambiguous, ask.
+
+---
+
+## A. What changed vs v5 (summary)
+
+Slide-by-slide comparison of `WBD_MMM_Architecture_6.pptx` with `WBD_MMM_Architecture_5.pptx`.
+**Slide 1 (auto ML activities), the platform control pane, the security / logging bands and the
+"Environment level component" box are unchanged.** Slide 2 changes the **entry point** (internal only)
+and the **GenAI box** (Amazon Bedrock directly, no API Gateway). The change is focused – the data
+platform, the optimization engine and the database stay as built.
+
+| # | Area | v5 (built in the repo) | v6 (new client architecture) |
+|---|---|---|---|
+| 1 | Entry point (slide 2) | Route 53 → WAF → **internet-facing ALB** in the public subnets, ACM certificate | "**VPC . Internal ALB + Private App/Data Subnets**", "ALB / HTTPS"; Route 53 / WAF no longer drawn. **(v6)** ALB scheme `internal` in the private app subnets; reached only from the WBD network (offices, VPN, VDI) – **Transit Gateway assumed** (not drawn) [ASK]; internal DNS name in WBD DNS (or a Route 53 private hosted zone + inbound resolver) [ASK]; certificate from ACM (DNS-validated on a WBD domain) or the WBD private CA [ASK] |
+| 2 | WAF (slide 2) | Regional WAF on the public ALB (required) | Not on the slide. **(v6)** optional – only if WBD Security requires it on the internal ALB (`enable_waf`, default false) [ASK] |
+| 3 | Sign-in (slide 2) | Okta OIDC at the public ALB | Same Okta + IAM Identity Center box, now at the **internal ALB**. **(v6)** the ALB still runs `authenticate-oidc`; it must reach Okta's token / user-info endpoints through **NAT** (or WBD egress); redirect URL on the internal name [ASK] |
+| 4 | ECS (slide 2) | One cluster `mmm-<env>-cluster` (ui, api, optimizer, migrate, platform-check) | "**One ECS cluster on AWS Fargate . Containerized App**". Confirms the v5 build – **no change** |
+| 5 | GenAI path (slide 2) | API → private **API Gateway** (`execute-api` endpoint) → **proxy Lambda** → OpenAI / Anthropic / Google with keys in `llm/*`; Bedrock guardrail via `ApplyGuardrail` | API → "**Amazon Runtime VPC Endpoint**" → "**Amazon Bedrock**" (**Anthropic Models (Default)**, Open AI Models (Optional), Google Models (Optional)) + "**Amazon Bedrock Guardrails**". **(v6)** the LangGraph tool in the API calls **Bedrock Converse** with `guardrailConfig` through the `bedrock-runtime` endpoint using the API task role; **remove** the LLM gateway, proxy Lambda, `llm/*` secrets, `execute-api` endpoint and the `genai` SG |
+| 6 | Guardrail enforcement | Applied by the proxy Lambda | **(v6)** applied inside every model call (`guardrailConfig`) and **enforced by IAM**: condition `bedrock:GuardrailIdentifier` on the API role, so a call without the MMM guardrail is denied |
+| 7 | Model access / quota | Provider API keys; LLM gateway throttling | **(v6)** Bedrock model access per account (Anthropic first-time-use form; OpenAI / Google only if approved, Marketplace where needed) [ASK]; Bedrock tokens / requests per minute quota [ASK]; optional US cross-region inference profile (SCP must allow the profile regions) [ASK]; optional application inference profile per BU (cost by BU) |
+| 8 | GenAI observability | LLM gateway alarms (4xx / 5xx / p95), gateway + proxy log groups | **(v6)** alarms on Bedrock `InvocationClientErrors` + `InvocationServerErrors`, `InvocationThrottles`, `InvocationLatency` p95; guardrail and token-quota alarms unchanged; optional **Bedrock model invocation logging** (metadata; text only if Privacy approves) [ASK] |
+| 9 | GenAI timing | "Not part of R1" | Same – **still Release 2**; `enable_genai = false` in R1 |
+| 10 | Repositories / CI/CD | One GitHub repo with Terraform + app workflows | **(v6, project context)** WBD provides frontend, backend and data repositories; their pipelines deploy images / code with the deploy roles; Terraform plan / apply roles only if WBD runs Terraform from a pipeline [ASK] |
+
+**Unchanged from v5 (as built):** KMS keys, permission boundary, ECR, ECS cluster and the `ui` / `api` /
+`optimizer` / `migrate` / `platform-check` tasks, RDS PostgreSQL + RDS Proxy, SQS + DLQ + dispatcher,
+optimization state machine, results/data publisher (`run`, `model_results`, `reference_data`), `uploads` /
+`glue-assets` / `lakehouse` buckets, Databricks Export Trigger Lambda + Unity Catalog role, Glue bronze /
+silver (+ DQ) / gold / export-rds / export-training / export-monitor, lineage (Glue table properties +
+SageMaker ML Lineage Tracking), SageMaker training / evaluation / registry / governance / drift, Bedrock
+guardrail module, CloudTrail data events, backup, Okta + IAM Identity Center.
+
+**Removed vs v5:** internet-facing ALB in the public subnets and the public DNS record; WAF as a required
+item (kept optional); `modules/llm-gateway` (private REST API, stage, method settings, API Gateway account
+CloudWatch role, proxy Lambda + role + invoke permission, log groups, gateway alarms); secrets
+`mmm/<env>/llm/openai`, `llm/anthropic`, `llm/google`; the `execute-api` interface endpoint; the `genai`
+security group; NAT egress to the LLM providers.
+
+---
+
+## 0. Role, objective, and golden rules
+
+**You are a senior AWS DevOps engineer.** Change the built v5 WBD MMM platform to the v6 architecture.
+The application (UI + API) and the inference & optimization engine run on **one Amazon ECS cluster on
+Fargate** behind an **internal ALB** reached from the WBD network; model training, evaluation and the
+registry stay on **Amazon SageMaker**; everything is orchestrated by **AWS Step Functions**; optimization
+requests are **buffered in Amazon SQS**; data engineering runs on **AWS Glue** with **Delta Lake on S3** and
+**lineage in the Glue Data Catalog + SageMaker**, fed by an export from the WBD Databricks source catalog;
+**all writes to RDS go through the API or the results/data publisher**; planners sign in with **WBD Okta**;
+the Release 2 explanation calls **Amazon Bedrock** privately with **Bedrock Guardrails**.
+
+**Golden rules (apply to every step):**
+1. **The repo's Terraform is the reference build** of `aws_resource_list_6.xlsx`; WBD Infra creates the real resources with its own IaC. Keep the list and the code in step – every change here is reflected in the list (regenerate with `tools/build_v6.py`).
+2. **No secrets in Git, images or Terraform variables.** Runtime secrets live in Secrets Manager / SSM (v6 removes `llm/*` – Bedrock needs no API keys). Values supplied by WBD are marked `# add actual value`.
+3. **Modularize**: reusable modules in `infra/modules/`, thin stacks in `infra/environments/{dev,staging,prod}/`; edit dev, then `scripts/sync-environments.ps1`.
+4. **Build order: dev → prove it works → staging (same code) → prod (same code).**
+5. **Validate after every step.**
+6. **Naming:** `mmm-<env>-<component>` (env = `dev|stg|prd`). **Tags:** `Application, Environment, Owner, BusinessUnit, DataClassification, ManagedBy, Component`.
+7. **No public entry** (v6): nothing inbound from the internet; the ALB is internal; public subnets only host NAT.
+8. **One IAM role per integration** ("AWS IAM" on every arrow), all with the permission boundary; Bedrock access only for the API role, only for the approved model IDs, only with the MMM guardrail.
+9. **Remove what v6 drops** (LLM gateway, proxy Lambda, `llm/*`, `execute-api` endpoint, `genai` SG, internet-facing ALB) – no leftover variables, outputs, docs or runbooks.
+
+---
+
+## 1. Final target stack
+
+`IaC (WBD) / Terraform reference · CI/CD of the WBD frontend, backend and data repositories (OIDC) · ECR ·
+one ECS cluster on Fargate (UI + API + inference & optimization task) + internal ALB · Transit Gateway
+attachment (WBD network) · internal DNS (WBD DNS or Route 53 private hosted zone) · ACM or WBD private CA
+certificate · AWS WAF (optional) · WBD Okta (OIDC at the internal ALB; identity source of IAM Identity Center) ·
+RDS for PostgreSQL (+ RDS Proxy) · Amazon SQS (+ DLQ) · AWS Lambda (message dispatcher, results/data
+publisher, Databricks Export Trigger) · AWS Step Functions · AWS Glue (Spark jobs, Data Catalog + lineage,
+Data Quality, connection) · Amazon SageMaker (training, evaluation, Model Registry, ML Lineage Tracking,
+drift checks) · S3 · KMS · Secrets Manager + Parameter Store · Amazon EventBridge (+ Scheduler) · Databricks
+on AWS (source catalog, export job – WBD) · CloudWatch + CloudTrail (+ S3 data events) (+ Splunk via
+Firehose) · AWS Backup · Release 2: Amazon Bedrock (Anthropic default; OpenAI / Google optional) through the
+bedrock-runtime VPC endpoint · Amazon Bedrock Guardrails.`
+
+**Prescribed stack (slide footer, unchanged):** React + TypeScript · Python / FastAPI · scikit-learn /
+XGBoost / LangGraph · SciPy · RDS PostgreSQL + Databricks / S3 · ECS · AWS recommended.
+
+**Two flows (from the v6 slides):**
+- **Auto ML activities (slide 1, unchanged):** scheduled / manual / app-triggered refresh → EventBridge → Step Functions (wait / retry) → Lambda Export Trigger → Databricks API connector → Databricks source catalog export job → raw data in S3 (3+ years) → AWS Glue + Data Catalog (lineage): Bronze → Silver → Gold on Delta Lake (S3) → Glue exports: Gold → training data; Gold → `lakehouse/rds-export/` → Lambda results/data publisher → RDS PostgreSQL → SageMaker training → evaluation (baseline → channel lift → title adjustment) → registration → SageMaker Registry + S3 (+ lineage + drift monitoring); model predictions, lift & evaluation results → results/data publisher → RDS.
+- **Optimization and explainable planning (slide 2):** planner on the WBD network (upload inventory + objective + run & compare, or upload future titles) → **WBD internal DNS → Transit Gateway → internal ALB (HTTPS)** → Okta (authentication + RBAC; IAM Identity Center for engineers) → **one ECS cluster**: ECS UI (web + QA dashboard; user file upload to S3) ↔ ECS API (FastAPI + LangGraph tools; explanation tool by default for every run) ↔ RDS. API → SQS → dispatcher Lambda → Step Functions → ECS inference & optimization task (Model Summarizer · Optimizer · Simulation) reading the Registry + approved curves + user files → S3 outputs → results publisher → RDS. **GenAI (Not part of R1): API → Amazon Runtime VPC Endpoint → Amazon Bedrock (Anthropic default; OpenAI / Google optional) with Amazon Bedrock Guardrails.** Sized for 50–150 concurrent planners.
+
+**Control plane (unchanged):** Data lineage & observability · Code repository · Security (RBAC, SSO/MFA) · Amazon Bedrock for GenAI · Privacy & GenAI guardrails.
+**Environment level component (unchanged):** Secrets Manager · VPC routes · CloudWatch · CloudTrail (enabled across all components); IAM on every integration, KMS on every store.
+
+---
+
+## 2. Prerequisite tools (unchanged)
+
+Terraform ≥ 1.10, AWS CLI v2, Git, GitHub CLI, jq, tflint, Checkov, Trivy, actionlint, Node 22 + uv /
+Python 3.12. Docker optional. Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE`.
+
+---
+
+## 3. Access & inputs to request (ASK the client)
+
+Complete v6 list in `devops_6_client_question.xlsx`: 110 inputs by layer of `aws_resource_list_6.xlsx` +
+38 decisions to confirm. **New or changed for v6:**
+- **Network path to the internal ALB:** Transit Gateway ID, route-table association / propagation, RAM share – or the WBD alternative; the WBD CIDRs (offices, VPN, VDI) allowed on the ALB security group.
+- **Internal DNS and certificate:** internal app names; record in WBD DNS or a Route 53 private hosted zone + inbound resolver; ACM DNS-validated certificate or a WBD private CA certificate, and who renews it.
+- **Okta on the internal ALB:** NAT (or WBD egress) to `*.okta.com`; redirect URLs on the internal names.
+- **WAF:** required on the internal ALB or not (default: not required).
+- **Bedrock (Release 2):** written approval to send run data to Bedrock; default Anthropic model ID per environment; OpenAI / Google needed or not (Marketplace approval); who submits the model-access form per account; in-region vs US cross-region inference profile; invocation logging; tokens / requests per minute quota; cost per BU (application inference profiles).
+- **Repositories:** names of the frontend, backend and data repositories, their CI/CD tool, OIDC trust subjects; whether WBD runs any Terraform from a pipeline.
+- **Removed:** provider API keys (`llm/*`) and "app reachable from the internet" – answered by the v6 slide.
+
+---
+
+## 4. Branching strategy (unchanged per repository)
+
+Trunk-based: `main` protected. Merge to `main` → dev (`sha-<7>`); tag `vX.Y.Z-rcN` → staging (EY lead
+approves); tag `vX.Y.Z` → prod (WBD approver + change ticket). Applies to the frontend, backend and data
+repositories; Glue scripts follow the data repository tags.
+
+---
+
+## 5. Repository & folder structure (v6 changes)
+
+```
+infra/modules/
+├── alb/                  # CHANGE (v6) – variable internal (true) + subnet_ids (private app); no public subnets; imported / private CA certificate allowed
+├── network/              # CHANGE (v6) – TGW attachment + WBD routes required; alb SG source = WBD CIDRs; drop execute-api endpoint + genai SG;
+│                         #   optional Route 53 private hosted zone + inbound resolver endpoint
+├── waf-regional/         # unchanged – used only when enable_waf = true
+├── llm-gateway/          # DELETE (v6)
+├── bedrock-guardrails/   # unchanged (guardrail + version, KMS genai)
+├── monitoring/           # CHANGE (v6) – genai dashboard on AWS/Bedrock metrics; Bedrock alarms; no LLM log groups in subscriptions
+└── (all other modules unchanged)
+infra/environments/<env>/
+├── frontdoor.tf          # CHANGE – internal ALB in app subnets; module "waf" behind enable_waf; DNS record in a private zone or WBD DNS only
+├── genai.tf              # CHANGE – remove module llm_gateway; API role Bedrock policy (Converse / InvokeModel on approved model + profile ARNs,
+│                         #   condition bedrock:GuardrailIdentifier, ApplyGuardrail); SSM genai/model_id + genai/guardrail; optional inference
+│                         #   profiles per BU + invocation logging; Bedrock alarms; interface endpoints = ["bedrock-runtime"]
+├── main.tf               # CHANGE – remove llm/* secrets; uploads CORS = internal app URL
+├── ecs.tf                # CHANGE – API env: BEDROCK_MODEL_ID / BEDROCK_GUARDRAIL_ID / BEDROCK_GUARDRAIL_VERSION (SSM) instead of LLM_GATEWAY_URL
+├── variables.tf / tfvars # CHANGE – enable_transit_gateway = true (required); alb_ingress_cidrs = WBD ranges; enable_waf (false);
+│                         #   enable_private_hosted_zone (false); remove llm_providers, genai_reserved_concurrency, manage_apigw_account_logging_role;
+│                         #   add genai_model_ids, genai_inference_profiles_per_bu (false), enable_bedrock_invocation_logging (false)
+├── outputs.tf / tests/mock-plan.tftest.hcl  # CHANGE accordingly (new expected counts)
+docs/ + docs/runbooks/    # CHANGE – 05, 06, 12 front door; genai.md (Bedrock); okta-outage (NAT egress); architecture diagrams
+```
+
+---
+
+## 6. STEP-BY-STEP IMPLEMENTATION
+
+### Step 0 — Prereqs & access (unchanged)
+- Tools (§2), AWS CLI SSO for dev. **Validate:** `aws sts get-caller-identity`; `terraform version` ≥ 1.10.
+
+### Step 1 — Bootstrap the Terraform state backend (unchanged)
+- `infra/bootstrap/`: state bucket (versioned, KMS, TLS-only), KMS key, S3 native lock file. Only needed if WBD runs this Terraform [ASK].
+
+### Step 2 — Module changes (v6)
+- `modules/alb`: add `internal` (default `true`) and `subnet_ids`; remove the public-subnet input; keep listeners, `authenticate-oidc`, target groups, access logs.
+- `modules/network`: make the Transit Gateway attachment + routes a normal (required) input; `alb` SG ingress from `alb_ingress_cidrs` only, egress 8080 to ui / api and 443 to Okta (via NAT); drop `execute-api` from the endpoint list and the `genai` SG; optional private hosted zone + inbound resolver endpoint.
+- Delete `modules/llm-gateway`.
+- **Validate:** `terraform fmt -recursive` clean; `scripts/validate-modules.ps1` passes; `git grep -n -i "llm-gateway\|llm_gateway\|execute-api"` only in history docs.
+
+### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets (v6: small change)
+- Keys as built (`genai` now encrypts the guardrail and the optional invocation logs). Permission boundary allows `bedrock:InvokeModel`, `Converse`, `ApplyGuardrail` for the API role; drop the API Gateway / proxy Lambda allowances.
+- OIDC roles: `gha-ecr-push`, `gha-deploy`, `gha-model-eval`, `gha-model-approve` trust the frontend / backend / data repositories [ASK]; `gha-plan` / `gha-apply` only if WBD runs Terraform from a pipeline [ASK].
+- **Validate:** plan shows no key changes; role trust subjects match the three repositories.
+
+### Step 4 — Networking (v6)
+- **Transit Gateway:** `enable_transit_gateway = true` in every environment; attachment in the app subnets; routes to the WBD ranges from the app route tables; WBD propagates the VPC CIDR [ASK].
+- **Security groups:** `alb` – inbound 443 (+ 80 redirect) from `alb_ingress_cidrs` (WBD ranges) only; `api` – egress to the endpoints incl. `bedrock-runtime`; remove `genai`.
+- **Endpoints:** `bedrock-runtime` with an endpoint policy limited to the API role and the approved model / inference-profile ARNs; remove `execute-api`.
+- **NAT:** Databricks, Okta (internal ALB sign-in), package indexes – no LLM providers.
+- **DNS (optional) [ASK]:** private hosted zone for the app name + inbound resolver endpoint if WBD DNS forwards to Route 53; outbound resolver unchanged.
+- **Validate:** from a WBD client (office / VPN / VDI) the ALB name resolves to private IPs and port 443 answers; from the internet it does not resolve / answer; `aws ec2 describe-vpc-endpoints` shows `bedrock-runtime` and no `execute-api`.
+
+### Step 5 — Secrets, configuration and identity settings (v6)
+- **Secrets Manager:** **remove `mmm/<env>/llm/openai`, `llm/anthropic`, `llm/google`**. Keep `api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `databricks/export-sp`, `splunk/hec`, `thirdparty/<vendor>`.
+- **SSM (v6):** add `genai/model_id` (default Anthropic model ID or inference-profile ID, `# add actual value`) and `genai/guardrail` (guardrail ID + version); keep `genai_enabled = false`, token quotas, the rest unchanged.
+- **Okta:** redirect `https://<internal app name>/oauth2/idpresponse` per environment [ASK].
+- **Validate:** secret scan clean; `aws secretsmanager list-secrets` shows no `llm/*`; SSM `genai/*` present.
+
+### Step 6 — Data & storage (ECR, S3, RDS PostgreSQL) (v6: small change)
+- `uploads` CORS origin = the internal app URL. Everything else unchanged.
+- **Validate:** a presigned PUT from the UI on the internal name succeeds; any other origin is rejected.
+
+### Step 7 — ECS compute (UI + API) (unchanged in Release 1)
+- One cluster, services and task definitions as built. Release 2 API env is defined in Step 15.
+
+### Step 8 — Front door & login (internal ALB, certificate, DNS, Okta, optional WAF) (v6)
+- `frontdoor.tf`: internal ALB in the private app subnets, SG `alb`; HTTPS 443 with `authenticate-oidc` (Okta) → forward `/api/*` to `api-tg`, `/*` to `ui-tg`; 80 → 443.
+- Certificate: `alb_certificate_arn` = ACM DNS-validated certificate on the internal name, or an imported / ACM Private CA certificate from WBD PKI [ASK].
+- DNS: CNAME in WBD internal DNS (default) or alias in the private hosted zone (`route53_zone_id` = private zone).
+- WAF: `module "waf"` only with `enable_waf = true` (default false) [ASK].
+- **Validate:** from the WBD network the app opens, redirects to Okta and returns after sign-in (proves NAT egress to Okta); `aws elbv2 describe-load-balancers` shows `Scheme = internal`; certificate valid > 30 days.
+
+### Step 9 — Optimization engine (unchanged)
+- Queue, dispatcher, optimization state machine, optimizer task, results/data publisher (`run`, `model_results`, `reference_data`) as built.
+
+### Step 10 — Monitoring & logging (v6)
+- **Alarms:** keep everything; `cert-expiry-alb` also covers imported certificates. The GenAI alarms move to Step 15.
+- **Dashboards:** front-door widgets on the internal ALB (unchanged metrics); `genai` dashboard on `AWS/Bedrock` (invocations, errors, throttles, latency, tokens) – Release 2.
+- **Log shipping:** subscription filters without the LLM gateway log groups (18 instead of 19).
+- **Validate:** dashboards render; no alarm references a deleted resource.
+
+### Step 11 — Backup & DR (unchanged)
+
+### Step 12 — CI/CD pipelines of the three WBD repositories (v6)
+- Frontend pipeline: build + push `mmm/ui`, deploy the `ui` service (role `gha-ecr-push` / `gha-deploy`).
+- Backend pipeline: build + push `mmm/api`, run `migrate`, deploy `api`, publish the results/data publisher and dispatcher code.
+- Data pipeline: Glue scripts + DQ rules to `glue-assets`, optimizer / training images, model evaluation / approval (`gha-model-eval` / `gha-model-approve`).
+- Infra: by WBD IaC; Terraform plan / apply roles only if WBD runs this Terraform [ASK].
+- **Validate:** each pipeline assumes only its own role; a deploy from each repository reaches dev.
+
+### Step 13 — Promote the platform to staging then prod (unchanged)
+
+### Step 14 — Data & ML platform (unchanged)
+- Databricks export, Glue + lineage, SageMaker, RDS via publisher, drift – as built in v5.
+
+---
+
+## 🚦 RELEASE 1 COMPLETE — GATE before Release 2
+
+Release 1 = slide 2 optimization + slide 1 auto ML + platform, with `enable_genai = false`. GenAI stays
+"**Not part of R1**": runs complete without the explanation (the API skips the explanation tool while GenAI is off).
+
+---
+
+### Step 15 — Release 2: GenAI on Amazon Bedrock (v6)
+- **Before:** WBD approval to send run data to Bedrock [ASK]; model access enabled per account (Anthropic first-time-use form; OpenAI / Google only if approved) [ASK]; Bedrock tokens / requests per minute quota [ASK]; SCP allows Bedrock in the inference-profile regions if a cross-region profile is used [ASK].
+- **Guardrail:** `module "guardrails"` as built (prompt attack, content filters, PII, denied topics, grounding / relevance 0.75), pinned version.
+- **API task role:** `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, `bedrock:Converse`, `bedrock:ConverseStream` on the approved foundation-model / inference-profile ARNs only, with condition `bedrock:GuardrailIdentifier` = the MMM guardrail ARN:version; `bedrock:ApplyGuardrail` on the guardrail; read SSM `genai/*`.
+- **API env:** `BEDROCK_MODEL_ID`, `BEDROCK_GUARDRAIL_ID`, `BEDROCK_GUARDRAIL_VERSION` from SSM; region us-east-1; calls go through the `bedrock-runtime` endpoint (private DNS). The backend's LangGraph explanation tool sends `guardrailConfig` on every Converse call; explanation failures never fail the run.
+- **Optional:** application inference profile per BU (tags BusinessUnit) for cost by BU; Bedrock model invocation logging to `/aws/bedrock/mmm-<env>-invocations` (KMS `genai`, metadata only unless Privacy approves).
+- **Alarms:** `bedrock-invocation-errors`, `bedrock-throttles`, `bedrock-latency-p95`, `genai-guardrail-interventions`, `genai-tokens-<bu>`.
+- **Validate:** a completed run gets an explanation; a Converse call from the API role **without** `guardrailConfig` is denied (AccessDenied); a call to a non-approved model is denied; no traffic to the internet for GenAI (VPC flow logs show only the endpoint).
+
+### Step 16 — Handover & ongoing operations (v6)
+- Runbooks changed: front door (internal ALB, DNS, certificate renewal), `genai.md` (Bedrock model access, quotas, throttling, guardrail), `okta-outage` (ALB → Okta via NAT), `security-incident` (no public entry). Removed: LLM gateway sections.
+- Ongoing: unchanged (image patching, Glue upgrades, vulnerability fixes, drift checks, quarterly access + restore tests) + Bedrock model version reviews.
+
+---
+
+## 7. Environment variables — quick reference (v6)
+
+**Pipelines (per environment, non-secret):** role ARNs from layer 04, ECR repository names, cluster / service names. **No AWS keys, no app secrets.**
+**Secrets Manager:** `mmm/<env>/api/db`, `rds/proxy`, `rds/migrate`, `okta/alb-client`, `databricks/export-sp`, `splunk/hec`, `thirdparty/<vendor>` (**`llm/*` removed**).
+**SSM:** as v5 + **`genai/model_id`, `genai/guardrail` (v6)**.
+**API env (Release 2):** `BEDROCK_MODEL_ID`, `BEDROCK_GUARDRAIL_ID`, `BEDROCK_GUARDRAIL_VERSION` (**`LLM_GATEWAY_URL` removed**).
+
+---
+
+## 8. Security, authorization & OIDC (v6)
+
+- **No public entry:** internal ALB only; SG source = WBD ranges; public subnets only for NAT.
+- Keyless CI/CD for the three repositories. Engineers: **IAM Identity Center federated with Okta** + permission sets. App users: Okta OIDC at the internal ALB → `groups` → app RBAC → PostgreSQL RLS per BU.
+- Workloads: one role per integration. **Only the API role may call Bedrock**, only the approved models, only with the MMM guardrail (IAM condition) and only through the `bedrock-runtime` endpoint (endpoint policy).
+- Encryption: KMS on every store; `genai` key for the guardrail and invocation logs.
+- Audit: CloudTrail management events (Bedrock API calls included) + S3 data events on the MMM buckets.
+
+---
+
+## 9. Deployment strategy & rollback (unchanged)
+
+ECS rolling deploy with circuit breaker; Lambda aliases; Glue scripts by tag; Alembic migrations. Model ID
+change = SSM `genai/model_id` update + API restart; rollback = previous parameter version.
+
+---
+
+## 10. Release tagging — unchanged.
+
+---
+
+## 11. Per-step validation checklist (v6 additions)
+
+Everything from v5, minus the LLM gateway checks, plus: the ALB is `internal` and answers only from WBD
+ranges; Okta sign-in works from the WBD network; the internal name resolves in WBD DNS; certificate valid;
+WAF only if enabled; no `llm/*` secrets, no `execute-api` endpoint, no `genai` SG; Bedrock calls without the
+guardrail or to a non-approved model are denied; Bedrock alarms fire on a forced throttle / error; Release 1
+runs without GenAI.
+
+---
+
+## 12. Order-of-operations summary
+
+**Modules (alb internal, network TGW + SGs + endpoints, delete llm-gateway) → foundation (boundary for
+Bedrock, OIDC trust for the three repositories) → networking (TGW required, alb SG, bedrock-runtime only,
+optional private zone / inbound resolver) → secrets / SSM (remove llm/*, add genai/model_id + guardrail) →
+uploads CORS → front door (internal ALB, certificate, DNS, Okta via NAT, optional WAF) → monitoring
+(Bedrock dashboard, subscriptions) → pipelines of the three repositories → docs / runbooks / mock-plan →
+staging → prod → 🚦 RELEASE 1 (GenAI off) → Release 2 GenAI on Bedrock → handover.** One step at a time;
+validate each; keep all three environments on identical code.

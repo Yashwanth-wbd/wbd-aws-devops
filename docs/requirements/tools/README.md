@@ -37,10 +37,15 @@ uv run --no-project --with openpyxl python .\build_v4_new.py $req
 # devops_5_client_question.xlsx (complete v5 INPUTS by resource-list layer + DECISIONS, _4_new layout)
 # and wbd_mmm_ecs_final_5.docx; --questions-only rebuilds just the question workbook
 uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req [--questions-only]
+
+# Regenerate the v6 set from WBD_MMM_Architecture_6.pptx (copy of build_v5.py; every R row carries
+# 'Change vs v5' + note): aws_resource_list_6.xlsx (+ v6_changes, removed_vs_v5 from REMOVED),
+# devops_6_client_question.xlsx and wbd_mmm_ecs_final_6.docx
+uv run --no-project --with openpyxl --with python-docx python .\build_v6.py $req [--questions-only]
 ```
 
-Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx` or `devops_5_client_question.xlsx` overwrites the
-values typed into it – once WBD starts answering, edit the workbook directly instead.
+Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx`, `devops_5_client_question.xlsx` or
+`devops_6_client_question.xlsx` overwrites the values typed into it – once WBD starts answering, edit the workbook directly instead.
 
-For a new requirement (v6), copy `build_v5.py` to `build_v6.py`, change the output names to `_6`,
+For a new requirement (v7), copy `build_v6.py` to `build_v7.py`, change the output names to `_7`,
 and edit the `R` rows (change column), `FLOW`, `REMOVED`, `INPUTS`, `DECISIONS` and the docx sections.
