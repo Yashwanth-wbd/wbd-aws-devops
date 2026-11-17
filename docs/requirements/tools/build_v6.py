@@ -4,7 +4,7 @@
   aws_resource_list_5.xlsx) - name per environment, what it does in the v6 flow, settings per environment, Release,
   owner. Written from scratch for the v6 architecture (no v5 comparison - that is in the docx only).
 - devops_6_client_question.xlsx: all inputs and decisions WBD has to provide for v6, by layer of aws_resource_list_6.xlsx
-  (--questions-only rebuilds just this workbook).
+  (--questions-only rebuilds just this workbook; --xlsx-only rebuilds just aws_resource_list_6.xlsx).
 - wbd_mmm_ecs_final_6.docx: v6 design document.
 
 Usage: uv run --no-project --with openpyxl --with python-docx python build_v6.py <docs/requirements>
@@ -52,14 +52,16 @@ ALL1 = s("1")
 
 # Flow steps referenced in the 'Flow step' column; full text on the architecture_flow sheet.
 FLOW = [
-    ("S1-1", "Slide 1 - Auto ML", "Trigger", "A model refresh starts for one business unit: weekly schedule (EventBridge Scheduler), manual / app request (EventBridge event mmm.refresh) or the drift check. EventBridge starts the Step Functions state machine model-refresh."),
+    ("S1-1", "Slide 1 - Auto ML", "Trigger", "A model refresh starts for one business unit: weekly schedule (EventBridge Scheduler), manual / app request (EventBridge event mmm.refresh) or the drift check. "
+     "For the app request ('Application supports triggered refresh as well'), the API sends mmm.refresh through the events VPC endpoint (approver roles only). EventBridge starts the Step Functions state machine model-refresh."),
     ("S1-2", "Slide 1 - Auto ML", "Export Trigger Lambda (Databricks API connector)", "Step Functions invokes the 'Lambda Functions - Export Trigger' (mmm-<env>-databricks-export). It reads the Databricks service principal from Secrets Manager, gets an OAuth token and starts the export job of the business unit in the WBD Databricks source catalog (Jobs API run-now), then polls it (runs/get)."),
     ("S1-3", "Slide 1 - Auto ML", "Raw data to S3", "The Databricks export job writes 3+ years of history as Parquet to s3://landing/raw/databricks/<bu>/<date>/ through a Unity Catalog external location on a write-only IAM role. The Lambda writes _manifest.json."),
     ("S1-4", "Slide 1 - Auto ML", "AWS Glue - Bronze", "Glue job bronze ingests the raw Parquet into Bronze Delta tables (lakehouse bucket, Glue Data Catalog database bronze)."),
     ("S1-5", "Slide 1 - Auto ML", "AWS Glue - Silver", "Glue job silver cleanses and validates the data (Glue Data Quality ruleset); a failed rule stops the refresh and alerts."),
     ("S1-6", "Slide 1 - Auto ML", "AWS Glue - Gold", "Glue job gold builds the per-business-unit modeling tables (adstock, saturation) - Delta Lake storage on S3."),
     ("S1-7", "Slide 1 - Auto ML", "Glue exports", "export-training writes an immutable Parquet snapshot to the training-data bucket (Object Lock); export-rds writes the Gold reference tables as Parquet to the lakehouse bucket (rds-export/<bu>/<refresh_id>/). Glue has no database access."),
-    ("S1-8", "Slide 1 - Auto ML", "SageMaker training (in the VPC)", "SageMaker training job (multi-stage model) reads the training data and writes the model artifact to the models bucket."),
+    ("S1-8", "Slide 1 - Auto ML", "SageMaker training (in the VPC)", "SageMaker training job (multi-stage model) reads the training data and writes the model artifact to the models bucket; "
+     "parameters, metrics and artifacts of the run are logged to the SageMaker managed MLflow tracking server (experiment tracking)."),
     ("S1-9", "Slide 1 - Auto ML", "SageMaker evaluation", "SageMaker processing job evaluates the model: baseline -> channel lift -> title adjustment; writes evaluation, predictions, lift and response curves."),
     ("S1-10", "Slide 1 - Auto ML", "Model registration", "The model version is registered in the SageMaker Model Registry (group per business unit, PendingManualApproval). A named WBD approver approves it; approved curves are published to the models bucket."),
     ("S1-11", "Slide 1 - Auto ML", "Results / data written to RDS", "The 'Results/data publisher' Lambda loads the Glue Gold export (reference data) and writes the model predictions, lift and evaluation results to RDS PostgreSQL through RDS Proxy."),
@@ -82,7 +84,12 @@ FLOW = [
     ("P-3", "Platform", "CI/CD", "The pipelines of the WBD frontend, backend and data repositories log in through OIDC roles, push images to ECR, deploy ECS task revisions, "
      "Lambda code and Glue scripts, and approve models. WBD Infra creates the infrastructure with its own IaC (Terraform plan / apply roles only if WBD runs Terraform from a pipeline)."),
     ("P-4", "Platform", "Backup / DR / cost", "AWS Backup (RDS and buckets), RDS point-in-time restore, optional cross-region copy, budgets and cost anomaly alerts."),
+    ("P-5", "Platform", "Developer workspaces (data science / data engineering)",
+     "Data scientists and data engineers sign in through IAM Identity Center (DataScientist / DataEngineer permission sets) to a VPC-only SageMaker Studio domain in dev / staging: "
+     "explore the Gold tables (Athena, Glue interactive sessions), develop the multi-stage model, compare runs in the MLflow tracking server and start training jobs with the training image. "
+     "Prod runs only through the refresh pipeline."),
 ]
+FLOW_UPD = {"S1-1": "Changed: app-triggered refresh path", "S1-8": "Changed: MLflow experiment tracking", "P-5": "New: developer workspaces"}
 
 # (layer, AWS service, resource, name (use {e} for dev / stg / prd), quantity per env, flow step, what it does in the v6
 #  flow, key configuration, (dev, staging, prod) setting, depends on, scope, owner)
@@ -95,6 +102,19 @@ def add(layer, service, resource, name, qty, flow, what, config, per_env, depend
     R.append((layer, service, resource, name, qty, flow, what, config, per_env, depends, scope, owner, change))
 
 
+# Review update of 17 Nov 2026: rows added or corrected after the architecture / RFP review, highlighted in the workbook.
+UPDATE_LABEL = "Update (17 Nov 2026)"
+UPD = {}          # index in R -> what was added / changed
+REL2 = set()      # indices in R that belong to Release 2 although their scope is not GENAI (optional / quota GenAI rows)
+
+
+def mark(note, release2=False):
+    """Flags the row added last as part of the 17 Nov 2026 update."""
+    UPD[len(R) - 1] = note
+    if release2:
+        REL2.add(len(R) - 1)
+
+
 L = "01. Account baseline"
 add(L, "AWS Organizations", "AWS account per environment", "wbd-mmm-dev / wbd-mmm-stage / wbd-mmm-prod", ALL1, "P-1",
     "Separate WBD-owned account per environment; every resource below is created in each account.", "Member of the WBD organization; budget owner per account",
@@ -104,10 +124,14 @@ add(L, "AWS Organizations", "Service Control Policies", "WBD standard SCPs", ALL
     "Release 2: the regions of the Bedrock cross-region inference profile if one is used.",
     "Allow-list of the services above", s("same"), "AWS account", BASE, PLAT,
     (CHANGED, "API Gateway no longer needed (no LLM gateway); Bedrock regions for the inference profile"))
-add(L, "IAM Identity Center", "Permission sets", "ReadOnly, Developer, DevOps, Security, BreakGlass", s("5"), "P-1",
-    "SSO access for engineers: IAM Identity Center with Okta as the identity source (slide 2 'Okta ... IAM Identity Center'); no IAM users. BreakGlass use raises an alert (rule breakglass-used).",
+add(L, "IAM Identity Center", "Permission sets", "ReadOnly, Developer, DataScientist, DataEngineer, DevOps, Security, BreakGlass", s("7"), "P-1, P-5",
+    "SSO access for engineers: IAM Identity Center with Okta as the identity source (slide 2 'Okta ... IAM Identity Center'); no IAM users. BreakGlass use raises an alert (rule breakglass-used). "
+    "DataScientist = SageMaker Studio, MLflow, training / processing jobs, read training-data / models; DataEngineer = Glue jobs and interactive sessions, Athena, read / write lakehouse; "
+    "Developer = ECS / Lambda logs, ECS Exec in dev, read app buckets.",
     "Okta federated to IAM Identity Center (SAML + SCIM); prod: DevOps time-limited elevation",
-    s("DevOps + ReadOnly", "DevOps + ReadOnly", "ReadOnly; DevOps on approval"), "Okta groups", BASE, PLAT)
+    s("DevOps, Developer, DataScientist, DataEngineer, ReadOnly", "DevOps, Developer, DataScientist, DataEngineer (read-mostly), ReadOnly", "ReadOnly; DevOps on approval"),
+    "Okta groups", BASE, PLAT)
+mark("Changed: DataScientist and DataEngineer permission sets added (5 -> 7) so data science / data engineering can work in dev and staging")
 add(L, "CloudTrail", "Organization trail", "WBD org trail", ALL1, "P-2",
     "Audit of every API call; management events must reach EventBridge in the account (break-glass alert).", "Multi-region, log file validation", s("same"), "-", BASE, PLAT)
 add(L, "CloudTrail", "CloudTrail S3 data events for the MMM data buckets", "WBD org trail selector (or trail mmm-{e}-data-events)", ALL1, "P-2",
@@ -134,6 +158,7 @@ add(L, "Service Quotas", "SageMaker training / processing instances", "account q
 add(L, "Service Quotas", "Amazon Bedrock tokens / requests per minute (default Anthropic model)", "account quota", ALL1, "S2-9",
     "Release 2: one explanation per completed run (about 5,000 tokens) for up to 50 runs at a time in prod.", "Request before the Release 2 load test",
     s("default", "default", ">= 200,000 tokens / min"), "-", QUOTA, PLAT, (NEW, "Slide 2 GenAI now runs on Amazon Bedrock"))
+mark("Corrected: Release column Release 1 -> Release 2 (GenAI quota, only needed for the Release 2 load test)", release2=True)
 add(L, "Bedrock", "Bedrock model access (Anthropic default; OpenAI / Google optional)", "account setting", ALL1, "S2-9",
     "Release 2: the account may invoke the approved models - Anthropic first-time-use form; AWS Marketplace subscription for models sold through the Marketplace (OpenAI / Google if chosen).",
     "Only the approved model IDs; SCP / IAM deny for all other models", s("Anthropic", "Anthropic", "Anthropic"), "-", GENAI, PLAT,
@@ -212,10 +237,17 @@ add(L, "VPC", "Route tables + associations", "mmm-{e}-public / -app-<az> / -data
     (CHANGED, "WBD ranges via the Transit Gateway are required (internal ALB)"))
 add(L, "VPC", "VPC gateway endpoints - S3, DynamoDB", "com.amazonaws.us-east-1.s3 / .dynamodb", s("2"), "S1-3..S1-12, S2-3..S2-10",
     "Private, free access to S3 (all buckets, ECR layers) from tasks, Lambdas, Glue and SageMaker.", "Attached to app, data and endpoint route tables", s("same"), "Route tables", CORE, INFRA)
-add(L, "VPC", "VPC interface endpoints - core", "ecr.api, ecr.dkr, sts, kms, logs, monitoring, secretsmanager, ssm, ssmmessages, sqs, states, xray, sagemaker.api",
-    s("13"), "P-1", "Private access to AWS APIs from the private subnets: image pulls, secrets, logs, metrics, SQS, Step Functions, SageMaker registry (optimizer), ECS Exec.",
+add(L, "VPC", "VPC interface endpoints - core", "ecr.api, ecr.dkr, sts, kms, logs, monitoring, secretsmanager, ssm, ssmmessages, sqs, states, xray, sagemaker.api, events",
+    s("14"), "P-1, S1-1", "Private access to AWS APIs from the private subnets: image pulls, secrets, logs, metrics, SQS, Step Functions, SageMaker registry (optimizer), ECS Exec, "
+    "EventBridge (the API sends the app-triggered refresh event mmm.refresh).",
     "Private DNS on; endpoint subnets; SG endpoints", s("same"), "Endpoint subnets, SG endpoints", CORE, INFRA)
+mark("Changed: events (EventBridge) endpoint added (13 -> 14) - app-triggered model refresh from the API stays private")
 add(L, "VPC", "VPC interface endpoint - glue", "com.amazonaws.us-east-1.glue", ALL1, "S1-4..S1-7", "Glue job ENIs reach the Glue API privately.", "Private DNS on", s("same"), "SG endpoints", DP, INFRA)
+add(L, "VPC", "VPC interface endpoints - SageMaker Studio, MLflow, Athena",
+    "aws.sagemaker.us-east-1.studio, aws.sagemaker.us-east-1.experiments (MLflow), sagemaker.runtime, athena", s("4"), "S1-8..S1-10, P-5",
+    "Studio (VPC-only), the managed MLflow tracking server, the SageMaker runtime and Athena are reached privately from Studio apps, training jobs and the pipelines.",
+    "Private DNS on; endpoint subnets; SG endpoints", s("same"), "SG endpoints", DP, INFRA)
+mark("New: endpoints for the SageMaker Studio workspace, the MLflow tracking server and Athena")
 add(L, "VPC", "VPC interface endpoint - bedrock-runtime ('Amazon Runtime VPC Endpoint')", "com.amazonaws.us-east-1.bedrock-runtime", ALL1, "S2-9",
     "The API calls Amazon Bedrock (Converse / InvokeModel with the guardrail) privately - no internet path for GenAI.",
     "Private DNS on; endpoint policy: only the API task role, only the approved model / inference-profile ARNs", s("same"), "SG endpoints", GENAI, INFRA,
@@ -245,10 +277,13 @@ for sg, what, rules, flow, scope in (
     ("sagemaker", "SageMaker training / processing jobs", "Self-referencing (distributed training); out 443 to endpoints and S3", "S1-8, S1-9, S1-12", DP),
     ("glue", "Glue job ENIs", "Self-referencing all traffic (Spark driver <-> executors); out 443 to endpoints and S3", "S1-4..S1-7", DP),
     ("databricks-export", "Databricks export Lambda", "No inbound; out 443 to the Databricks workspace (NAT or PrivateLink) and endpoints", "S1-2", DP),
+    ("studio", "SageMaker Studio apps (VPC-only domain)", "Self-referencing TCP 2049 (domain EFS) and 8192-65535 (between Studio apps); out 443 to endpoints and S3", "P-5", DP),
 ):
     chg = (CHANGED, "Internal ALB: inbound only from the WBD network, no 0.0.0.0/0") if sg == "alb" else \
           (CHANGED, "Release 2 calls Bedrock through the bedrock-runtime endpoint") if sg == "api" else (SAME, "")
     add(L, "VPC", f"Security group - {sg}", "mmm-{e}-" + sg + "-sg", ALL1, flow, what + ".", rules, s("same"), "VPC", scope, INFRA, chg)
+    if sg == "studio":
+        mark("New: security group of the SageMaker Studio domain")
 
 L = "07. Container registry (ECR)"
 for repo, what, flow, scope in (
@@ -322,6 +357,10 @@ add(L, "S3", "S3 bucket - approved-worm (Object Lock)", "wbd-mmm-{e}-approved-wo
     "Approved scenarios that can never be changed (audit).", BUCKET_STD + "; Object Lock (must be enabled when the bucket is created)",
     s("GOVERNANCE 2555 d", "GOVERNANCE 2555 d", "COMPLIANCE 2555 d"), "KMS s3", CORE, INFRA)
 add(L, "S3", "S3 bucket - exports", "wbd-mmm-{e}-exports-use1", ALL1, "S2-10", "Excel exports downloaded by planners.", BUCKET_STD, s("expire 30 d"), "KMS s3", CORE, INFRA)
+add(L, "S3", "S3 bucket - athena-results", "wbd-mmm-{e}-athena-results-use1", ALL1, "P-5",
+    "Query results of the Athena workgroup (data engineers / data scientists checking the Bronze / Silver / Gold Delta tables).", BUCKET_STD + "; results expire after 30 d",
+    s("same"), "KMS s3", DP, INFRA)
+mark("New: results bucket of the Athena workgroup")
 add(L, "GuardDuty", "Malware Protection for S3 (uploads bucket)", "uploads bucket", ALL1, "S2-3", "Scans uploaded files before the optimizer reads them.", "Tag-based access", s("if required"), "uploads bucket", OPT, SEC)
 
 L = "10. Database (RDS PostgreSQL)"
@@ -356,12 +395,17 @@ for name, what, sizing, flow in (
         "ECR image, exec role, task role", CORE, INFRA_PIPE,
         (CHANGED, "Release 2 environment: BEDROCK model ID + guardrail from SSM instead of LLM_GATEWAY_URL") if name == "api" else (SAME, ""))
     add(L, "IAM", f"IAM role - task {name}", "mmm-{e}-task-" + name, ALL1, flow,
-        {"api": "API permissions: rds-db:connect via Proxy, presign read / write on uploads, read results / models, SendMessage to SQS, put metrics "
+        {"api": "API permissions: rds-db:connect via Proxy, presign read / write on uploads, read results / models (approved curves for what-if), SendMessage to SQS, "
+                "describe / stop its optimization executions, write Excel exports to the exports bucket, write-once to approved-worm (delete / retention changes denied), "
+                "events:PutEvents of mmm.refresh on the default bus (app-triggered model refresh - only approver roles, checked in the API), read SSM /mmm/<env>/*, put metrics "
                 "(+ Release 2: bedrock:InvokeModel / Converse on the approved model IDs only with the MMM guardrail (condition bedrock:GuardrailIdentifier), bedrock:ApplyGuardrail, read SSM genai/*)",
          "ui": "UI permissions: none beyond logs (static web)",
          "migrate": "Migrate permissions: rds-db:connect as mmm_migrator",
          "platform-check": "Read SSM release pointers, describe ECS / Step Functions"}[name] + ".", "Permission boundary", s("same"), "-", CORE, INFRA,
         (CHANGED, "execute-api replaced by Bedrock InvokeModel / Converse with a guardrail condition (Release 2)") if name == "api" else (SAME, ""))
+    if name == "api":
+        mark("Changed: added events:PutEvents (app-triggered refresh, slide 1 'Application supports triggered refresh'); "
+             "exports / approved-worm / execution permissions now spelled out")
     add(L, "CloudWatch Logs", f"Log group - {name}", "/ecs/mmm-{e}/" + name, ALL1, "P-2", f"Container logs of {name}.", "KMS logs", s("30 d", "90 d", "365 d"), "KMS logs", CORE, INFRA)
 add(L, "ECS", "ECS service - api", "mmm-{e}-api", ALL1, "S2-2", "API tasks behind the ALB target group api-tg.", "Private app subnets, SG api + data-clients, circuit breaker with rollback, ECS Exec",
     s("1-2 tasks", "2-4 tasks", "3-10 tasks"), "Task definition, ALB", CORE, INFRA)
@@ -466,10 +510,44 @@ add(L, "Glue", "Data lineage records (Glue + SageMaker ML Lineage Tracking)", "p
 add(L, "DataZone", "Amazon DataZone / SageMaker Catalog domain (lineage graph)", "mmm-{e}-catalog", ALL1, "S1-13",
     "Optional: visual end-to-end lineage graph and business catalog (Glue 5.0 jobs emit OpenLineage events to the domain).", "Domain + project + Glue data source; KMS s3",
     s("if required"), "Glue Data Catalog", OPT, INFRA)
+add(L, "Athena", "Athena workgroup (lakehouse queries)", "mmm-{e}-lakehouse", ALL1, "P-5",
+    "Data engineers and data scientists query the Delta tables of the Glue Data Catalog (bronze / silver / gold) to check each refresh, without starting a Glue job.",
+    "Engine v3, enforce workgroup settings, results to athena-results (SSE-KMS s3), per-query scan limit, CloudWatch metrics on",
+    s("10 GB per query", "10 GB per query", "10 GB per query; DataEngineer read-only"), "Glue Data Catalog, athena-results bucket", DP, INFRA)
+mark("New: Athena workgroup so data engineers can validate the lakehouse tables")
+add(L, "IAM", "IAM role - Glue interactive sessions (data engineers)", "mmm-{e}-glue-interactive", ALL1, "P-5",
+    "Glue interactive sessions (from SageMaker Studio or a local notebook) to develop and test the bronze / silver / gold scripts on real data before the pipeline deploys them.",
+    "Same data access as the Glue jobs role, Glue connection glue-vpc, security config, idle timeout 60 min; permission boundary",
+    s("enabled", "enabled (read-mostly)", "not created"), "Glue connection, glue role policies", DP, INFRA)
+mark("New: role for Glue interactive sessions (data engineering development)")
 
 L = "16. SageMaker modeling (slide 1)"
-add(L, "IAM", "IAM role - SageMaker training / evaluation / drift", "mmm-{e}-sagemaker-training", ALL1, "S1-8..S1-12", "Read training-data and lakehouse/monitoring, write models, register model packages, VPC ENIs, logs, metrics.", "Permission boundary", s("same"), "-", DP, INFRA)
+add(L, "IAM", "IAM role - SageMaker training / evaluation / drift", "mmm-{e}-sagemaker-training", ALL1, "S1-8..S1-12",
+    "Read training-data and lakehouse/monitoring, write models, register model packages, log parameters / metrics / artifacts to the MLflow tracking server (sagemaker-mlflow:*), VPC ENIs, logs, metrics.",
+    "Permission boundary", s("same"), "-", DP, INFRA)
+mark("Changed: may log runs to the MLflow tracking server")
 add(L, "SageMaker", "Model package groups - one per business unit", "mmm-{e}-streaming / -theatrical / -usnetworks", s("3"), "S1-10, S2-6", "Model Registry: every trained version (PendingManualApproval -> Approved); the optimizer reads the approved one.", "-", s("same"), "-", DP, INFRA)
+add(L, "SageMaker", "SageMaker managed MLflow tracking server (experiment tracking)", "mmm-{e}-mlflow", ALL1, "S1-8..S1-10, P-5",
+    "Experiment tracking required by the RFP MLOps stack ('experiment tracking, model registry ... e.g. MLflow'): parameters, metrics and artifacts of every training / evaluation run, "
+    "compared by the data scientists; models saved in MLflow format (portable). The SageMaker Model Registry stays the approval gate (MLflow registered models sync to it).",
+    "Artifact store s3://models/mlflow/ (KMS s3); automatic model registration to SageMaker Model Registry on; weekly maintenance window",
+    s("Small", "Small", "Medium"), "models bucket, MLflow role, endpoints", DP, INFRA)
+mark("New: MLflow experiment tracking (RFP section 6.1 MLOps)")
+add(L, "IAM", "IAM role - MLflow tracking server", "mmm-{e}-mlflow", ALL1, "S1-8..S1-10",
+    "Lets the tracking server read / write its artifacts under models/mlflow/ and register models in the SageMaker Model Registry.",
+    "s3 Get / Put / List on models/mlflow/*, KMS s3, sagemaker:CreateModelPackage* on the MMM groups; permission boundary", s("same"), "-", DP, INFRA)
+mark("New: service role of the MLflow tracking server")
+add(L, "SageMaker", "SageMaker Studio domain (VPC-only) + user profiles", "mmm-{e}-studio ; one profile per data scientist / data engineer", s("1 + users", "1 + users", "not created"), "P-5",
+    "Workspace for data scientists and data engineers: JupyterLab / Code Editor spaces in the private subnets to explore the Gold tables, develop the multi-stage model, "
+    "track experiments in MLflow and start training / processing jobs with the training image - before the code is merged and run by the refresh pipeline.",
+    "Network access VPC-only (app subnets, SG studio), IAM Identity Center authentication, KMS sagemaker, idle shutdown 60 min, instance types ml.t3.medium - ml.m5.2xlarge",
+    s("profiles for DS + DE", "profiles for DS + DE (read-mostly)", "not created (prod runs only through the pipeline)"), "SG studio, endpoints, Identity Center", DP, INFRA)
+mark("New: SageMaker Studio workspace for data science / data engineering (or confirm they work in WBD Databricks)")
+add(L, "IAM", "IAM role - SageMaker Studio execution", "mmm-{e}-studio-execution", ALL1, "P-5",
+    "What a Studio user can do: read training-data, lakehouse gold and models (BU keys), write models/experiments/*, use MLflow, query Athena, start Glue interactive sessions, "
+    "start training / processing jobs with the sagemaker-training role (PassRole); cannot approve model packages or write approved curves.",
+    "Permission boundary", s("same", "read-mostly", "-"), "-", DP, INFRA)
+mark("New: execution role of the Studio users")
 add(L, "CloudWatch Logs", "Log groups - SageMaker TrainingJobs, ProcessingJobs", "/aws/sagemaker/TrainingJobs ; /aws/sagemaker/ProcessingJobs", s("2"), "P-2", "Training, evaluation and drift job logs.", "KMS logs", s("30 d", "90 d", "365 d"), "KMS logs", DP, INFRA)
 add(L, "SageMaker", "Training job (per refresh)", "mmm-{e}-train-<refresh_id>", s("per refresh"), "S1-8", "Trains the multi-stage model in the VPC; writes the artifact and drift baseline.", "VPC app subnets, SG sagemaker, KMS sagemaker",
     s("ml.m5.2xlarge"), "Training image, role", RUN, DS)
@@ -507,9 +585,11 @@ add(L, "Bedrock", "Foundation models - OpenAI / Google (optional)", "OpenAI and 
     "Bedrock-served models (or AWS Marketplace subscription where the model is sold there); added to the IAM / endpoint allow-list only where enabled",
     s("experimentation (if approved)", "experimentation (if approved)", "not enabled unless WBD approves"), "Model access", OPT, PLAT,
     (NEW, "Optional models on slide 2"))
+mark("Corrected: Release column Release 1 -> Release 2 (GenAI)", release2=True)
 add(L, "Bedrock", "Application inference profile per business unit", "mmm-{e}-genai-<bu>", s("3"), "S2-9",
     "Wraps the chosen model per business unit so Bedrock cost and token use are tagged and reported per BU.", "Tags Project, Environment, BusinessUnit", s("same"), "Foundation model", OPT, INFRA,
     (NEW, "Cost and quota per BU without a gateway"))
+mark("Corrected: Release column Release 1 -> Release 2 (GenAI)", release2=True)
 add(L, "Bedrock", "Bedrock guardrail + version ('Amazon Bedrock Guardrails')", "mmm-{e}-genai (v1)", s("2"), "S2-9",
     "Applied inside every Converse call (guardrailConfig) and enforced by IAM: prompt-attack filter, content filters, PII masking / blocking, denied topics, contextual grounding and relevance checks.",
     "Grounding 0.75, relevance 0.75; KMS genai; pinned version", s("same"), "KMS genai", GENAI, INFRA,
@@ -517,6 +597,7 @@ add(L, "Bedrock", "Bedrock guardrail + version ('Amazon Bedrock Guardrails')", "
 add(L, "Bedrock", "Model invocation logging + log group + IAM role", "/aws/bedrock/mmm-{e}-invocations ; role mmm-{e}-bedrock-logging", s("3"), "P-2",
     "Audit of every model call (prompt and answer metadata); text logging only if WBD Privacy approves.", "Account / region setting; KMS genai; data protection policy", s("30 d", "90 d", "365 d"), "KMS genai", OPT, INFRA,
     (NEW, "Replaces the LLM gateway access logs"))
+mark("Corrected: Release column Release 1 -> Release 2 (GenAI)", release2=True)
 
 L = "19. Monitoring, alerting and logging"
 add(L, "SNS", "SNS topic - alerts + policy + email subscription", "mmm-{e}-alerts", s("3"), "P-2", "Receives every alarm and alert rule; emails on-call (Teams / paging if WBD adds it).", "KMS alerts",
@@ -611,7 +692,10 @@ OUTSIDE = [
     ("Data science", "Optimizer image and training image", "Pushed to ECR mmm/optimizer, mmm/sagemaker-training", "Before the first run / refresh"),
     ("Backend team", "DB migrations (tables incl. Gold reference + model results, row-level security), DB users mmm_app / mmm_migrator; publisher code for reference_data", "Run by the migrate task", "Before the API goes live"),
     ("WBD Security / Audit", "CloudTrail S3 data-event selectors on the MMM buckets in the org trail", "Bucket names from layer 09", "Before production data arrives"),
+    ("Data science / data engineering leads + WBD Identity", "Users who need a SageMaker Studio profile, and the Okta groups mapped to the DataScientist / DataEngineer permission sets "
+     "(or confirmation that development happens in WBD Databricks instead of Studio)", "Profiles per user in dev / staging", "Before data science / data engineering start in AWS"),
 ]
+OUTSIDE_UPD = {len(OUTSIDE) - 1: "New: Studio users and Okta groups for the new permission sets"}
 
 # v5 resources (built in the repo) that v6 removes.
 REMOVED = [
@@ -648,10 +732,16 @@ CODE_IMPACT = [
 ]
 
 HEAD = PatternFill("solid", fgColor="1F3864")
+UPD_FILL = PatternFill("solid", fgColor="FCE4D6")
 
 
 def release(scope):
     return "Release 2" if scope == GENAI else "Release 1"
+
+
+def row_release(i):
+    """Release of R[i] (0-based); some optional / quota rows are Release 2 although their scope is not GENAI."""
+    return "Release 2" if i in REL2 else release(R[i][10])
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 WRAP = Alignment(vertical="top", wrap_text=True)
@@ -733,23 +823,29 @@ def build_resources():
                         "each store has a customer-managed key (layer 03)."),
         ("Secrets", "Secret values are never in this file or in Git; the owner enters them in Secrets Manager. Placeholders are marked '# add actual value'."),
         ("Legend", LEGEND),
+        (UPDATE_LABEL, f"Rows highlighted in light orange were added or corrected in the review of 17 Nov 2026 ({len(UPD)} resource rows; column '{UPDATE_LABEL}' says what changed): "
+                       "MLflow experiment tracking, SageMaker Studio + Athena + Glue interactive sessions for data science / data engineering, "
+                       "DataScientist / DataEngineer permission sets, the events VPC endpoint and API permission for the app-triggered model refresh, "
+                       "the API role permissions spelled out, and the Release column corrected to Release 2 for the GenAI-only optional / quota rows. "
+                       "Highlighted rows are also on architecture_flow and outside_aws."),
     ):
         ws.append([k, v])
-        style_body(ws)
+        style_body(ws, UPD_FILL if k == UPDATE_LABEL else None)
         ws.cell(ws.max_row, 1).font = Font(bold=True)
     widths(ws, (22, 140))
 
     headers = ["#", "Release", "Layer", "AWS service", "Resource", "Name", "Qty", "Flow step", "What it does in the v6 flow",
-               "Key configuration", "Dev", "Staging", "Prod", "Depends on", "Scope", "Created by / owner"]
+               "Key configuration", "Dev", "Staging", "Prod", "Depends on", "Scope", "Created by / owner", UPDATE_LABEL]
     ws = wb.create_sheet("all_resources")
     title(ws, "All AWS resources - v6 architecture (dev / staging / prod)",
-          "<env> in names = dev / stg / prd. Qty = count in one environment (dev / staging / prod when different). " + LEGEND)
+          "<env> in names = dev / stg / prd. Qty = count in one environment (dev / staging / prod when different). " + LEGEND +
+          " Light orange rows = added / corrected on 17 Nov 2026.")
     ws.append(headers)
     style_header(ws, 4)
     for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, _) in enumerate(R, 1):
-        ws.append([i, release(scope), layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner])
-        style_body(ws)
-    widths(ws, (5, 11, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24))
+        ws.append([i, row_release(i - 1), layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner, UPD.get(i - 1, "")])
+        style_body(ws, UPD_FILL if i - 1 in UPD else None)
+    widths(ws, (5, 11, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24, 40))
     ws.freeze_panes = "F5"
     ws.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{ws.max_row}"
 
@@ -759,29 +855,29 @@ def build_resources():
               f"Real names for {label} (<env> = {short}). Setting = the {label} value. " + LEGEND)
         ws.append(["#", "Release", "Layer", "AWS service", "Resource", f"Name ({label})", "Qty", "Flow step", "What it does in the v6 flow",
                    "Key configuration", f"{label} setting", "Depends on", "Scope", "Created by / owner",
-                   "Created (Y/N)", "ARN / ID", "Notes"])
+                   "Created (Y/N)", "ARN / ID", "Notes", UPDATE_LABEL])
         style_header(ws, 4)
         idx = ("dev", "staging", "prod").index(env)
         for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, _) in enumerate(R, 1):
-            ws.append([i, release(scope), layer, svc, res, name.replace("{e}", short), qty[idx], flow, what, cfg, per_env[idx], dep, scope, owner,
-                       "", "", ""])
-            style_body(ws)
-        widths(ws, (5, 11, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 10, 30, 24))
+            ws.append([i, row_release(i - 1), layer, svc, res, name.replace("{e}", short), qty[idx], flow, what, cfg, per_env[idx], dep, scope, owner,
+                       "", "", "", UPD.get(i - 1, "")])
+            style_body(ws, UPD_FILL if i - 1 in UPD else None)
+        widths(ws, (5, 11, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 10, 30, 24, 40))
         ws.freeze_panes = "F5"
-        ws.auto_filter.ref = f"A4:Q{ws.max_row}"
+        ws.auto_filter.ref = f"A4:R{ws.max_row}"
 
     ws = wb.create_sheet("architecture_flow")
     title(ws, "v6 architecture flow - steps referenced in the resource list",
           "Slide 1 = auto ML activities (model refresh); slide 2 = optimization and explainable planning; Platform = cross-cutting bands.")
-    ws.append(["Step", "Slide", "Step name", "What happens", "Resources used (rows on all_resources)"])
+    ws.append(["Step", "Slide", "Step name", "What happens", "Resources used (rows on all_resources)", UPDATE_LABEL])
     style_header(ws, 4)
     for step, slide, name, text in FLOW:
         used = [str(i) for i, r in enumerate(R, 1) if step in flow_steps(r[5])]
-        ws.append([step, slide, name, text, ", ".join(used)])
-        style_body(ws)
-    widths(ws, (8, 22, 30, 100, 40))
+        ws.append([step, slide, name, text, ", ".join(used), FLOW_UPD.get(step, "")])
+        style_body(ws, UPD_FILL if step in FLOW_UPD else None)
+    widths(ws, (8, 22, 30, 100, 40, 30))
     ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A4:E{ws.max_row}"
+    ws.auto_filter.ref = f"A4:F{ws.max_row}"
 
     ws = wb.create_sheet("alarms_and_events")
     title(ws, "CloudWatch alarms and EventBridge alert rules (all go to SNS mmm-<env>-alerts)",
@@ -797,13 +893,13 @@ def build_resources():
 
     ws = wb.create_sheet("outside_aws")
     title(ws, "Provided by other WBD teams (needed to finish the resources above)", "Not AWS resources the infra team creates, but inputs they depend on.")
-    ws.append(["#", "Team", "What", "Detail", "Needed"])
+    ws.append(["#", "Team", "What", "Detail", "Needed", UPDATE_LABEL])
     style_header(ws, 4)
     for i, row in enumerate(OUTSIDE, 1):
-        ws.append([i, *row])
-        style_body(ws)
-    widths(ws, (5, 22, 80, 50, 32))
-    ws.auto_filter.ref = f"A4:E{ws.max_row}"
+        ws.append([i, *row, OUTSIDE_UPD.get(i - 1, "")])
+        style_body(ws, UPD_FILL if i - 1 in OUTSIDE_UPD else None)
+    widths(ws, (5, 22, 80, 50, 32, 30))
+    ws.auto_filter.ref = f"A4:F{ws.max_row}"
 
     ws = wb.create_sheet("summary")
     title(ws, "Resource count per layer", "Rows of all_resources per layer and scope. AWS objects = sum of Qty in prod "
@@ -812,14 +908,15 @@ def build_resources():
     ws.append(["Layer", "Rows", "Release 1", "Release 2", *scopes, "AWS objects (prod)"])
     style_header(ws, 4)
 
-    def line(label, rows):
-        ws.append([label, len(rows), *(sum(1 for r in rows if release(r[10]) == rel) for rel in ("Release 1", "Release 2")),
+    def line(label, idx):
+        rows = [R[i] for i in idx]
+        ws.append([label, len(rows), *(sum(1 for i in idx if row_release(i) == rel) for rel in ("Release 1", "Release 2")),
                    *(sum(1 for r in rows if r[10] == sc) for sc in scopes), objects(rows)])
         style_body(ws)
 
     for layer in dict.fromkeys(r[0] for r in R):
-        line(layer, [r for r in R if r[0] == layer])
-    line("Total", R)
+        line(layer, [i for i, r in enumerate(R) if r[0] == layer])
+    line("Total", range(len(R)))
     for c in ws[ws.max_row]:
         c.font = Font(bold=True)
     widths(ws, (40, 8, 10, 10, 16, 22, 22, 18, 18, 12, 18, 16))
@@ -1190,6 +1287,8 @@ def build_docx():
 
 if "--questions-only" in sys.argv:
     build_questions()
+elif "--xlsx-only" in sys.argv:
+    build_resources()
 else:
     build_resources()
     build_questions()

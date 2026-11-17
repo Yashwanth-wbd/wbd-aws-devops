@@ -40,8 +40,9 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req
 
 # Regenerate the v6 set from WBD_MMM_Architecture_6.pptx (copy of build_v5.py; every R row carries
 # 'Change vs v5' + note): aws_resource_list_6.xlsx (+ v6_changes, removed_vs_v5 from REMOVED),
-# devops_6_client_question.xlsx and wbd_mmm_ecs_final_6.docx
-uv run --no-project --with openpyxl --with python-docx python .\build_v6.py $req [--questions-only]
+# devops_6_client_question.xlsx and wbd_mmm_ecs_final_6.docx; --xlsx-only rebuilds just the resource list.
+# Rows flagged with mark() (review update of 17 Nov 2026) are highlighted light orange with an 'Update' column.
+uv run --no-project --with openpyxl --with python-docx python .\build_v6.py $req [--questions-only | --xlsx-only]
 ```
 
 # Plain-language v6 walkthrough for the WBD infra team (architecture, flows, network, service list; no Terraform):
