@@ -44,6 +44,10 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v5.py $req
 uv run --no-project --with openpyxl --with python-docx python .\build_v6.py $req [--questions-only]
 ```
 
+# Plain-language v6 walkthrough for the WBD infra team (architecture, flows, network, service list; no Terraform):
+# WBD_MMM_v6_Architecture_Explained.docx
+uv run --no-project --with python-docx python .\build_v6_explained.py $req
+
 Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx`, `devops_5_client_question.xlsx` or
 `devops_6_client_question.xlsx` overwrites the values typed into it – once WBD starts answering, edit the workbook directly instead.
 
