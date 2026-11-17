@@ -48,6 +48,14 @@ uv run --no-project --with openpyxl --with python-docx python .\build_v6.py $req
 # WBD_MMM_v6_Architecture_Explained.docx
 uv run --no-project --with python-docx python .\build_v6_explained.py $req
 
+# Build guide for the WBD infra team when EY has no AWS access (why each service, phased build order with
+# dependencies / checks / handback values): WBD_MMM_v6_Infra_Build_Guide.docx
+uv run --no-project --with python-docx python .\build_v6_infra_guide.py $req
+
+# Box-by-box explanation of the two v6 slides (what / why per component) + review of gaps in the drawn flow:
+# WBD_MMM_v6_Architecture_Slides_Explained.docx
+uv run --no-project --with python-docx python .\build_v6_slides_explained.py $req
+
 Regenerating `devops_4_client_question.xlsx`, `devops_client_question_4_new.xlsx`, `devops_5_client_question.xlsx` or
 `devops_6_client_question.xlsx` overwrites the values typed into it – once WBD starts answering, edit the workbook directly instead.
 
