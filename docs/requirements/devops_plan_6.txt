@@ -56,10 +56,10 @@ platform, the optimization engine and the database stay as built.
 
 | # | Area | v5 (built in the repo) | v6 (new client architecture) |
 |---|---|---|---|
-| 1 | Entry point (slide 2) | Route 53 → WAF → **internet-facing ALB** in the public subnets, ACM certificate | "**VPC . Internal ALB + Private App/Data Subnets**", "ALB / HTTPS"; Route 53 / WAF no longer drawn. **(v6)** ALB scheme `internal` in the private app subnets; reached only from the WBD network (offices, VPN, VDI) – **Transit Gateway assumed** (not drawn) [ASK]; internal DNS name in WBD DNS (or a Route 53 private hosted zone + inbound resolver) [ASK]; certificate from ACM (DNS-validated on a WBD domain) or the WBD private CA [ASK] |
-| 2 | WAF (slide 2) | Regional WAF on the public ALB (required) | Not on the slide. **(v6)** optional – only if WBD Security requires it on the internal ALB (`enable_waf`, default false) [ASK] |
-| 3 | Sign-in (slide 2) | Okta OIDC at the public ALB | Same Okta + IAM Identity Center box, now at the **internal ALB**. **(v6)** the ALB still runs `authenticate-oidc`; it must reach Okta's token / user-info endpoints through **NAT** (or WBD egress); redirect URL on the internal name [ASK] |
-| 4 | ECS (slide 2) | One cluster `mmm-<env>-cluster` (ui, api, optimizer, migrate, platform-check) | "**One ECS cluster on AWS Fargate . Containerized App**". Confirms the v5 build – **no change** |
+| 1 | Entry point (slide 2) | Route 53 → WAF → **internet-facing ALB** in the public subnets, ACM certificate | "**VPC . Internal ALB + Private App/Data Subnets**", "ALB / HTTPS"; Route 53 / WAF no longer drawn. **(v6)** ALB scheme `internal` in the private app subnets; reached only from the WBD network (offices, VPN, VDI) – **Transit Gateway assumed** (not drawn) [ASK]; internal DNS name in **WBD internal DNS** (no Route 53) [ASK]; certificate from ACM (DNS-validated on a WBD domain) or the WBD private CA [ASK] |
+| 2 | DNS/WAF + Route 53 (slide 2) | Regional WAF on the public ALB; Route 53 record (`route53_zone_id`); optional Route 53 Resolver | **(v6) Removed** – internal application, no public entry: delete `module "waf"` / `modules/waf-regional`, the `aws_route53_record` and the resolver option |
+| 3 | Authentication flow (slide 2) | Okta OIDC at the public ALB | **User authenticates through Okta first, then the request is routed by the internal ALB.** **(v6)** listener first action `authenticate-oidc`; no request reaches the UI / API before sign-in; the ALB reaches Okta's token / user-info endpoints through **NAT** (or WBD egress); redirect URL on the internal name; Okta dashboard tile per environment [ASK] |
+| 4 | ECS (slide 2) | One cluster `mmm-<env>-cluster` (ui, api, optimizer, migrate, platform-check) | "**One ECS cluster on AWS Fargate . Containerized App**". Model Summarizer, Optimizer and Simulation run in one inference & optimization container (one Fargate task per run) in the same cluster – **no separate clusters**; three task definitions in the same cluster only if the data scientists need separate images [ASK]. Confirms the v5 build – **no change** |
 | 5 | GenAI path (slide 2) | API → private **API Gateway** (`execute-api` endpoint) → **proxy Lambda** → OpenAI / Anthropic / Google with keys in `llm/*`; Bedrock guardrail via `ApplyGuardrail` | API → "**Amazon Runtime VPC Endpoint**" → "**Amazon Bedrock**" (**Anthropic Models (Default)**, Open AI Models (Optional), Google Models (Optional)) + "**Amazon Bedrock Guardrails**". **(v6)** the LangGraph tool in the API calls **Bedrock Converse** with `guardrailConfig` through the `bedrock-runtime` endpoint using the API task role; **remove** the LLM gateway, proxy Lambda, `llm/*` secrets, `execute-api` endpoint and the `genai` SG |
 | 6 | Guardrail enforcement | Applied by the proxy Lambda | **(v6)** applied inside every model call (`guardrailConfig`) and **enforced by IAM**: condition `bedrock:GuardrailIdentifier` on the API role, so a call without the MMM guardrail is denied |
 | 7 | Model access / quota | Provider API keys; LLM gateway throttling | **(v6)** Bedrock model access per account (Anthropic first-time-use form; OpenAI / Google only if approved, Marketplace where needed) [ASK]; Bedrock tokens / requests per minute quota [ASK]; optional US cross-region inference profile (SCP must allow the profile regions) [ASK]; optional application inference profile per BU (cost by BU) |
@@ -75,8 +75,8 @@ silver (+ DQ) / gold / export-rds / export-training / export-monitor, lineage (G
 SageMaker ML Lineage Tracking), SageMaker training / evaluation / registry / governance / drift, Bedrock
 guardrail module, CloudTrail data events, backup, Okta + IAM Identity Center.
 
-**Removed vs v5:** internet-facing ALB in the public subnets and the public DNS record; WAF as a required
-item (kept optional); `modules/llm-gateway` (private REST API, stage, method settings, API Gateway account
+**Removed vs v5:** internet-facing ALB in the public subnets; the Route 53 record and the Route 53 Resolver
+option; AWS WAF (web ACL, association, logging, `modules/waf-regional`); `modules/llm-gateway` (private REST API, stage, method settings, API Gateway account
 CloudWatch role, proxy Lambda + role + invoke permission, log groups, gateway alarms); secrets
 `mmm/<env>/llm/openai`, `llm/anthropic`, `llm/google`; the `execute-api` interface endpoint; the `genai`
 security group; NAT egress to the LLM providers.
@@ -111,8 +111,8 @@ the Release 2 explanation calls **Amazon Bedrock** privately with **Bedrock Guar
 
 `IaC (WBD) / Terraform reference · CI/CD of the WBD frontend, backend and data repositories (OIDC) · ECR ·
 one ECS cluster on Fargate (UI + API + inference & optimization task) + internal ALB · Transit Gateway
-attachment (WBD network) · internal DNS (WBD DNS or Route 53 private hosted zone) · ACM or WBD private CA
-certificate · AWS WAF (optional) · WBD Okta (OIDC at the internal ALB; identity source of IAM Identity Center) ·
+attachment (WBD network) · internal DNS name (WBD DNS, outside AWS) · ACM or WBD private CA
+certificate · WBD Okta (authentication first, OIDC at the internal ALB; identity source of IAM Identity Center) ·
 RDS for PostgreSQL (+ RDS Proxy) · Amazon SQS (+ DLQ) · AWS Lambda (message dispatcher, results/data
 publisher, Databricks Export Trigger) · AWS Step Functions · AWS Glue (Spark jobs, Data Catalog + lineage,
 Data Quality, connection) · Amazon SageMaker (training, evaluation, Model Registry, ML Lineage Tracking,
@@ -142,12 +142,12 @@ Python 3.12. Docker optional. Corporate proxy: set `NODE_EXTRA_CA_CERTS` / `REQU
 
 ## 3. Access & inputs to request (ASK the client)
 
-Complete v6 list in `devops_6_client_question.xlsx`: 110 inputs by layer of `aws_resource_list_6.xlsx` +
-38 decisions to confirm. **New or changed for v6:**
+Complete v6 list in `devops_6_client_question.xlsx`: 109 inputs by layer of `aws_resource_list_6.xlsx` +
+36 decisions to confirm. **New or changed for v6:**
 - **Network path to the internal ALB:** Transit Gateway ID, route-table association / propagation, RAM share – or the WBD alternative; the WBD CIDRs (offices, VPN, VDI) allowed on the ALB security group.
-- **Internal DNS and certificate:** internal app names; record in WBD DNS or a Route 53 private hosted zone + inbound resolver; ACM DNS-validated certificate or a WBD private CA certificate, and who renews it.
-- **Okta on the internal ALB:** NAT (or WBD egress) to `*.okta.com`; redirect URLs on the internal names.
-- **WAF:** required on the internal ALB or not (default: not required).
+- **Internal DNS and certificate:** internal app names as records in WBD internal DNS (no Route 53); ACM DNS-validated certificate or a WBD private CA certificate, and who renews it.
+- **Okta first:** NAT (or WBD egress) to `*.okta.com`; redirect URLs on the internal names; Okta dashboard tile per environment.
+- **ECS inference & optimization:** confirm one cluster with the three functions in one task per run (or three task definitions in the same cluster).
 - **Bedrock (Release 2):** written approval to send run data to Bedrock; default Anthropic model ID per environment; OpenAI / Google needed or not (Marketplace approval); who submits the model-access form per account; in-region vs US cross-region inference profile; invocation logging; tokens / requests per minute quota; cost per BU (application inference profiles).
 - **Repositories:** names of the frontend, backend and data repositories, their CI/CD tool, OIDC trust subjects; whether WBD runs any Terraform from a pipeline.
 - **Removed:** provider API keys (`llm/*`) and "app reachable from the internet" – answered by the v6 slide.
@@ -168,21 +168,21 @@ repositories; Glue scripts follow the data repository tags.
 infra/modules/
 ├── alb/                  # CHANGE (v6) – variable internal (true) + subnet_ids (private app); no public subnets; imported / private CA certificate allowed
 ├── network/              # CHANGE (v6) – TGW attachment + WBD routes required; alb SG source = WBD CIDRs; drop execute-api endpoint + genai SG;
-│                         #   optional Route 53 private hosted zone + inbound resolver endpoint
-├── waf-regional/         # unchanged – used only when enable_waf = true
+│                         #   remove the Route 53 Resolver option
+├── waf-regional/         # DELETE (v6)
 ├── llm-gateway/          # DELETE (v6)
 ├── bedrock-guardrails/   # unchanged (guardrail + version, KMS genai)
 ├── monitoring/           # CHANGE (v6) – genai dashboard on AWS/Bedrock metrics; Bedrock alarms; no LLM log groups in subscriptions
 └── (all other modules unchanged)
 infra/environments/<env>/
-├── frontdoor.tf          # CHANGE – internal ALB in app subnets; module "waf" behind enable_waf; DNS record in a private zone or WBD DNS only
+├── frontdoor.tf          # CHANGE – internal ALB in app subnets; remove module "waf" and aws_route53_record (DNS in WBD internal DNS)
 ├── genai.tf              # CHANGE – remove module llm_gateway; API role Bedrock policy (Converse / InvokeModel on approved model + profile ARNs,
 │                         #   condition bedrock:GuardrailIdentifier, ApplyGuardrail); SSM genai/model_id + genai/guardrail; optional inference
 │                         #   profiles per BU + invocation logging; Bedrock alarms; interface endpoints = ["bedrock-runtime"]
 ├── main.tf               # CHANGE – remove llm/* secrets; uploads CORS = internal app URL
 ├── ecs.tf                # CHANGE – API env: BEDROCK_MODEL_ID / BEDROCK_GUARDRAIL_ID / BEDROCK_GUARDRAIL_VERSION (SSM) instead of LLM_GATEWAY_URL
-├── variables.tf / tfvars # CHANGE – enable_transit_gateway = true (required); alb_ingress_cidrs = WBD ranges; enable_waf (false);
-│                         #   enable_private_hosted_zone (false); remove llm_providers, genai_reserved_concurrency, manage_apigw_account_logging_role;
+├── variables.tf / tfvars # CHANGE – enable_transit_gateway = true (required); alb_ingress_cidrs = WBD ranges;
+│                         #   remove waf_*, route53_zone_id, enable_resolver_forwarding / resolver_*, llm_providers, genai_reserved_concurrency, manage_apigw_account_logging_role;
 │                         #   add genai_model_ids, genai_inference_profiles_per_bu (false), enable_bedrock_invocation_logging (false)
 ├── outputs.tf / tests/mock-plan.tftest.hcl  # CHANGE accordingly (new expected counts)
 docs/ + docs/runbooks/    # CHANGE – 05, 06, 12 front door; genai.md (Bedrock); okta-outage (NAT egress); architecture diagrams
@@ -200,8 +200,8 @@ docs/ + docs/runbooks/    # CHANGE – 05, 06, 12 front door; genai.md (Bedrock)
 
 ### Step 2 — Module changes (v6)
 - `modules/alb`: add `internal` (default `true`) and `subnet_ids`; remove the public-subnet input; keep listeners, `authenticate-oidc`, target groups, access logs.
-- `modules/network`: make the Transit Gateway attachment + routes a normal (required) input; `alb` SG ingress from `alb_ingress_cidrs` only, egress 8080 to ui / api and 443 to Okta (via NAT); drop `execute-api` from the endpoint list and the `genai` SG; optional private hosted zone + inbound resolver endpoint.
-- Delete `modules/llm-gateway`.
+- `modules/network`: make the Transit Gateway attachment + routes a normal (required) input; `alb` SG ingress from `alb_ingress_cidrs` only, egress 8080 to ui / api and 443 to Okta (via NAT); drop `execute-api` from the endpoint list and the `genai` SG; remove the Route 53 Resolver option.
+- Delete `modules/llm-gateway` and `modules/waf-regional`.
 - **Validate:** `terraform fmt -recursive` clean; `scripts/validate-modules.ps1` passes; `git grep -n -i "llm-gateway\|llm_gateway\|execute-api"` only in history docs.
 
 ### Step 3 — Foundation: KMS, permission boundary, OIDC, budgets (v6: small change)
@@ -214,7 +214,7 @@ docs/ + docs/runbooks/    # CHANGE – 05, 06, 12 front door; genai.md (Bedrock)
 - **Security groups:** `alb` – inbound 443 (+ 80 redirect) from `alb_ingress_cidrs` (WBD ranges) only; `api` – egress to the endpoints incl. `bedrock-runtime`; remove `genai`.
 - **Endpoints:** `bedrock-runtime` with an endpoint policy limited to the API role and the approved model / inference-profile ARNs; remove `execute-api`.
 - **NAT:** Databricks, Okta (internal ALB sign-in), package indexes – no LLM providers.
-- **DNS (optional) [ASK]:** private hosted zone for the app name + inbound resolver endpoint if WBD DNS forwards to Route 53; outbound resolver unchanged.
+- **DNS:** no Route 53 – the internal app name is a record in WBD internal DNS (WBD DNS team); remove the Route 53 Resolver option.
 - **Validate:** from a WBD client (office / VPN / VDI) the ALB name resolves to private IPs and port 443 answers; from the internet it does not resolve / answer; `aws ec2 describe-vpc-endpoints` shows `bedrock-runtime` and no `execute-api`.
 
 ### Step 5 — Secrets, configuration and identity settings (v6)
@@ -230,11 +230,12 @@ docs/ + docs/runbooks/    # CHANGE – 05, 06, 12 front door; genai.md (Bedrock)
 ### Step 7 — ECS compute (UI + API) (unchanged in Release 1)
 - One cluster, services and task definitions as built. Release 2 API env is defined in Step 15.
 
-### Step 8 — Front door & login (internal ALB, certificate, DNS, Okta, optional WAF) (v6)
+### Step 8 — Private entry & login (Okta first, internal ALB, certificate, internal DNS) (v6)
 - `frontdoor.tf`: internal ALB in the private app subnets, SG `alb`; HTTPS 443 with `authenticate-oidc` (Okta) → forward `/api/*` to `api-tg`, `/*` to `ui-tg`; 80 → 443.
 - Certificate: `alb_certificate_arn` = ACM DNS-validated certificate on the internal name, or an imported / ACM Private CA certificate from WBD PKI [ASK].
-- DNS: CNAME in WBD internal DNS (default) or alias in the private hosted zone (`route53_zone_id` = private zone).
-- WAF: `module "waf"` only with `enable_waf = true` (default false) [ASK].
+- Authentication flow: the user authenticates with Okta first (listener first action `authenticate-oidc`, or the Okta dashboard tile); only authenticated requests are forwarded to the targets.
+- DNS: CNAME in WBD internal DNS (WBD DNS team) – remove `aws_route53_record` and `route53_zone_id`.
+- WAF: removed – delete `module "waf"` and its variables.
 - **Validate:** from the WBD network the app opens, redirects to Okta and returns after sign-in (proves NAT egress to Okta); `aws elbv2 describe-load-balancers` shows `Scheme = internal`; certificate valid > 30 days.
 
 ### Step 9 — Optimization engine (unchanged)
@@ -318,7 +319,7 @@ change = SSM `genai/model_id` update + API restart; rollback = previous paramete
 
 Everything from v5, minus the LLM gateway checks, plus: the ALB is `internal` and answers only from WBD
 ranges; Okta sign-in works from the WBD network; the internal name resolves in WBD DNS; certificate valid;
-WAF only if enabled; no `llm/*` secrets, no `execute-api` endpoint, no `genai` SG; Bedrock calls without the
+no WAF and no Route 53 resources; no `llm/*` secrets, no `execute-api` endpoint, no `genai` SG; Bedrock calls without the
 guardrail or to a non-approved model are denied; Bedrock alarms fire on a forced throttle / error; Release 1
 runs without GenAI.
 
@@ -328,8 +329,8 @@ runs without GenAI.
 
 **Modules (alb internal, network TGW + SGs + endpoints, delete llm-gateway) → foundation (boundary for
 Bedrock, OIDC trust for the three repositories) → networking (TGW required, alb SG, bedrock-runtime only,
-optional private zone / inbound resolver) → secrets / SSM (remove llm/*, add genai/model_id + guardrail) →
-uploads CORS → front door (internal ALB, certificate, DNS, Okta via NAT, optional WAF) → monitoring
+no Route 53 resolver) → secrets / SSM (remove llm/*, add genai/model_id + guardrail) →
+uploads CORS → private entry (Okta first, internal ALB, certificate, WBD DNS; WAF and Route 53 removed) → monitoring
 (Bedrock dashboard, subscriptions) → pipelines of the three repositories → docs / runbooks / mock-plan →
 staging → prod → 🚦 RELEASE 1 (GenAI off) → Release 2 GenAI on Bedrock → handover.** One step at a time;
 validate each; keep all three environments on identical code.

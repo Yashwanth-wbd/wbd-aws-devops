@@ -2,7 +2,7 @@
 
 - aws_resource_list_6.xlsx: complete AWS resource list for the WBD infrastructure team (same layout as
   aws_resource_list_5.xlsx) - name per environment, what it does in the v6 flow, settings per environment, Release,
-  owner - plus 'Change vs v5' (the v5 build is in the repo) and the sheets v6_changes / removed_vs_v5.
+  owner. Written from scratch for the v6 architecture (no v5 comparison - that is in the docx only).
 - devops_6_client_question.xlsx: all inputs and decisions WBD has to provide for v6, by layer of aws_resource_list_6.xlsx
   (--questions-only rebuilds just this workbook).
 - wbd_mmm_ecs_final_6.docx: v6 design document.
@@ -65,15 +65,17 @@ FLOW = [
     ("S1-11", "Slide 1 - Auto ML", "Results / data written to RDS", "The 'Results/data publisher' Lambda loads the Glue Gold export (reference data) and writes the model predictions, lift and evaluation results to RDS PostgreSQL through RDS Proxy."),
     ("S1-12", "Slide 1 - Auto ML", "Model drift monitoring", "Daily schedule per business unit starts model-monitor: Databricks export + Glue layers + export-monitor -> SageMaker drift job -> ModelDrift metric and alarm (optional automatic refresh)."),
     ("S1-13", "Slide 1 - Auto ML", "Lineage", "'AWS Glue + Data Catalog (Lineage)' and 'Registry + S3 ... + lineage': every refresh records where the data came from (Databricks export run, Glue job runs, Delta table versions, training-data snapshot) and which model version was trained from it (SageMaker ML Lineage Tracking)."),
-    ("S2-1", "Slide 2 - Optimization", "Sign-in (internal ALB)", "Planner opens the app from the WBD network (office, VPN, VDI): WBD internal DNS -> Transit Gateway -> internal Application Load Balancer in the private subnets (HTTPS, certificate) -> Okta sign-in at the ALB (authentication, groups for RBAC). There is no public entry."),
-    ("S2-2", "Slide 2 - Optimization", "UI and API on one ECS cluster", "One ECS cluster on AWS Fargate runs the service ui (React + TypeScript, QA dashboard), the service api (Python FastAPI + LangGraph tools) and the optimizer tasks in private subnets; the API reads / writes plans, runs and allocations in RDS PostgreSQL through RDS Proxy."),
+    ("S2-1", "Slide 2 - Optimization", "Private entry: Okta first, then the internal ALB", "Planner on the WBD network (office, VPN, VDI) opens the internal app URL (name in WBD internal DNS, path through the Transit Gateway). "
+     "The user authenticates with Okta first (SSO / MFA, groups for RBAC): the internal ALB redirects every request without a valid Okta session to Okta, and only authenticated requests are routed to the UI / API. "
+     "There is no public entry, no Route 53, no WAF and no API Gateway."),
+    ("S2-2", "Slide 2 - Optimization", "UI and API on one ECS cluster", "One ECS cluster on AWS Fargate runs the service ui (React + TypeScript, QA dashboard), the service api (Python FastAPI + LangGraph tools) and the inference & optimization tasks in private subnets; the API reads / writes plans, runs and allocations in RDS PostgreSQL through RDS Proxy."),
     ("S2-3", "Slide 2 - Optimization", "Upload inventory / future titles", "The API returns a presigned URL; the browser uploads the input file straight to the S3 uploads bucket (user input files)."),
     ("S2-4", "Slide 2 - Optimization", "Queue the run", "The API stores the run as QUEUED and sends a message to the SQS queue optimization-requests (dead-letter queue after 10 failures)."),
     ("S2-5", "Slide 2 - Optimization", "Message dispatcher", "The dispatcher Lambda reads the queue and starts a Step Functions optimization execution while fewer than max_concurrent_runs are running."),
-    ("S2-6", "Slide 2 - Optimization", "ECS inference & optimization", "Step Functions runs one ECS Fargate optimizer task per run (Model Summarizer -> Optimizer -> Simulation). It reads the input file, the approved model (Model Registry) and the approved response curves (S3)."),
+    ("S2-6", "Slide 2 - Optimization", "ECS inference & optimization", "Step Functions runs one ECS Fargate inference & optimization task per run in the same ECS cluster; the three functions Model Summarizer -> Optimizer -> Simulation run in sequence inside that one container (no separate clusters or services). It reads the input file, the approved model (Model Registry) and the approved response curves (S3)."),
     ("S2-7", "Slide 2 - Optimization", "S3 outputs", "The optimizer writes the full run evidence to the results bucket (runs/<run_id>/output)."),
     ("S2-8", "Slide 2 - Optimization", "Results publisher", "Step Functions invokes the results publisher Lambda, which writes plans, runs and allocations to RDS PostgreSQL. The UI shows the result."),
-    ("S2-9", "Slide 2 - Optimization", "Explanation (GenAI) - not part of R1", "Release 2 (slide 2 marks the box 'Not part of R1'): the API's LangGraph explanation tool calls Amazon Bedrock (Converse API) through the Bedrock runtime VPC endpoint, with Amazon Bedrock Guardrails applied to every prompt and answer. Models: Anthropic (default), OpenAI and Google (optional) - all served by Bedrock, no external provider keys. In Release 1 the run completes without the explanation."),
+    ("S2-9", "Slide 2 - Optimization", "Explanation (GenAI) - not part of R1", "Release 2 (slide 2 marks the box 'Not part of R1'): the API's LangGraph explanation tool calls Amazon Bedrock (Converse API) through the Bedrock runtime VPC endpoint, with Amazon Bedrock Guardrails applied to every prompt and answer. Models: Anthropic (default); OpenAI and Google kept as optional alternatives for experimentation - all served by Bedrock, no external provider keys. In Release 1 the run completes without the explanation."),
     ("S2-10", "Slide 2 - Optimization", "Approve / export", "Approved scenarios are stored immutably in the approved-worm bucket (Object Lock); Excel exports go to the exports bucket (30-day expiry)."),
     ("P-1", "Platform", "Security + Network", "Accounts, IAM roles, KMS keys, Secrets Manager / Parameter Store, security groups, VPC routes (Transit Gateway to the WBD network for the internal ALB), VPC endpoints - used by every step above."),
     ("P-2", "Platform", "Logging / Operations", "Environment-level components 'enabled across all components': CloudWatch logs, metrics, alarms, dashboards, EventBridge alert rules, SNS alerts, CloudTrail (management + S3 data events), optional shipping to Splunk."),
@@ -198,7 +200,7 @@ add(L, "VPC", "Subnets - private app", "mmm-{e}-app-<az>", s("2", "3", "3"), "S1
     "Internal ALB, ECS tasks (ui, api, optimizer, migrate), Lambdas (publisher, dispatcher, Databricks export), Glue job ENIs, SageMaker job ENIs.", "1 per AZ; no public IPs", s("2 AZ", "3 AZ", "3 AZ"), "VPC", CORE, INFRA,
     (CHANGED, "Hosts the internal ALB; no LLM proxy Lambda"))
 add(L, "VPC", "Subnets - private data", "mmm-{e}-data-<az>", s("2", "3", "3"), "S2-2", "RDS PostgreSQL and RDS Proxy; no internet route.", "1 per AZ", s("2 AZ", "3 AZ", "3 AZ"), "VPC", CORE, INFRA)
-add(L, "VPC", "Subnets - private endpoint", "mmm-{e}-endpoint-<az>", s("2", "3", "3"), "P-1", "Interface VPC endpoints (and the Route 53 resolver endpoint if used).", "1 per AZ", s("2 AZ", "3 AZ", "3 AZ"), "VPC", CORE, INFRA)
+add(L, "VPC", "Subnets - private endpoint", "mmm-{e}-endpoint-<az>", s("2", "3", "3"), "P-1", "Interface VPC endpoints.", "1 per AZ", s("2 AZ", "3 AZ", "3 AZ"), "VPC", CORE, INFRA)
 add(L, "VPC", "Internet gateway", "mmm-{e}-igw", ALL1, "S1-2, S2-1", "Outbound internet for the NAT gateways only (no inbound traffic).", "-", s("same"), "VPC", CORE, INFRA,
     (CHANGED, "Only for NAT - no internet-facing ALB"))
 add(L, "VPC", "NAT gateways + Elastic IPs", "mmm-{e}-nat-<az>", s("1", "3", "3"), "S1-2, S2-1",
@@ -225,15 +227,7 @@ add(L, "EC2", "Transit Gateway attachment", "mmm-{e}-tgw", ALL1, "S2-1, P-1",
     "Connects the VPC to the WBD network: planners (office, VPN, VDI) reach the internal ALB through it; also Splunk / on-prem if needed.",
     "App subnets; routes to the WBD ranges (e.g. 10.0.0.0/8); WBD TGW route table propagates the VPC CIDR", s("same"), "WBD Transit Gateway", CORE, INFRA,
     (CHANGED, "Required now - the internal ALB is only reachable from the WBD network (not drawn on slide 2; TGW assumed, WBD may name another path)"))
-add(L, "Route 53", "Private hosted zone for the app name (if WBD DNS does not host the record)", "mmm-dev / mmm-stg / mmm .<wbd internal domain>", ALL1, "S2-1",
-    "Internal DNS name of the app -> internal ALB; associated with the VPC and resolvable from the WBD network.", "Alias to the internal ALB", s("if required"), "Internal ALB, resolver inbound", OPT, DNS,
-    (NEW, "Internal ALB needs an internal DNS name"))
-add(L, "Route 53 Resolver", "Inbound resolver endpoint + SG", "mmm-{e}-inbound ; mmm-{e}-resolver-sg", s("2"), "S2-1",
-    "Lets the WBD DNS servers resolve the private hosted zone of the app (only with the private hosted zone).", "DNS 53 tcp/udp from the WBD resolvers; endpoint subnets",
-    s("if required"), "Transit Gateway", OPT, INFRA, (NEW, "Internal ALB name resolvable from the WBD network"))
-add(L, "Route 53 Resolver", "Outbound resolver endpoint + forwarding rule + SG", "mmm-{e}-outbound ; mmm-{e}-fwd-wbd-internal ; mmm-{e}-resolver-sg", s("3"), "P-1",
-    "Resolves WBD internal names (wbd.internal) through WBD DNS servers.", "DNS 53 tcp/udp to WBD resolvers", s("if required"), "Transit Gateway", OPT, INFRA)
-add(L, "VPC", "Databricks PrivateLink endpoint + private hosted zone + record", "Databricks workspace endpoint ; zone <workspace>.cloud.databricks.com", s("3"), "S1-2",
+add(L, "VPC", "Databricks PrivateLink endpoint + private DNS for the workspace", "Databricks workspace endpoint ; zone <workspace>.cloud.databricks.com", s("3"), "S1-2",
     "Export Lambda reaches the Databricks workspace API privately instead of through NAT.", "Service name from Databricks", s("if required"), "Databricks account", OPT, INFRA)
 
 L = "06. Security groups"
@@ -381,26 +375,20 @@ add(L, "ACM", "Certificate for the internal app name", "mmm-dev / mmm-stg / mmm 
     "TLS certificate of the internal app name on the internal ALB.", "ACM public certificate (DNS validated on a WBD domain) or a WBD private CA certificate (ACM Private CA / imported), us-east-1",
     s("mmm-dev.<domain>", "mmm-stg.<domain>", "mmm.<domain>"), "WBD DNS / PKI", CORE, DNS, (CHANGED, "Internal name; certificate may come from the WBD private CA"))
 add(L, "Elastic Load Balancing", "Application Load Balancer (internal)", "mmm-{e}-alb", ALL1, "S2-1",
-    "Single HTTPS entry for planners on the WBD network: /api/* -> API, /* -> UI; signs users in with Okta first.",
+    "Private entry point for planners on the WBD network (no public entry): requests reach the UI / API only after Okta authentication; /api/* -> API, /* -> UI.",
     "Scheme internal, private app subnets, SG alb, access logs to logs bucket, drop invalid headers, deletion protection (prod)",
     s("same"), "App subnets, Transit Gateway, certificate, logs bucket", CORE, INFRA,
     (CHANGED, "Slide 2 'VPC . Internal ALB + Private App/Data Subnets' - was internet-facing in public subnets"))
 add(L, "Elastic Load Balancing", "Listeners - HTTPS 443 + HTTP 80 (redirect)", "mmm-{e}-alb :443 / :80", s("2"), "S2-1",
-    "443: authenticate-oidc (Okta) then forward; 80: redirect to 443. The internal ALB reaches the Okta token / user-info endpoints through NAT (or WBD egress).",
+    "443: first action authenticate-oidc (Okta) - a user without an Okta session is redirected to Okta and comes back signed in; only then forward to the target group. 80: redirect to 443. "
+    "The internal ALB reaches the Okta token / user-info endpoints through NAT (or WBD egress).",
     "TLS policy ELBSecurityPolicy-TLS13-1-2-2021-06", s("same"), "ALB, certificate, Okta app, NAT", CORE, INFRA)
 add(L, "Elastic Load Balancing", "Listener rules - /api/*, /api/health", "mmm-{e}-alb rules", s("2"), "S2-1", "API path to api-tg (401 when not signed in); health path without sign-in.", "-", s("same"), "Listener", CORE, INFRA)
 add(L, "Elastic Load Balancing", "Target groups - api, ui", "mmm-{e}-api-tg ; mmm-{e}-ui-tg", s("2"), "S2-2", "IP targets for the ECS services.", "Port 8080, health /api/health and /healthz, deregistration 30 s",
     s("same"), "VPC", CORE, INFRA)
-add(L, "WAF", "WAF web ACL (regional) + association", "mmm-{e}-alb", s("2"), "S2-1", "Optional on the internal ALB: blocks common attacks (insider / compromised device) before the ALB.",
-    "AWS managed rules (common, known bad inputs, SQLi), rate limit per IP", s("if required"), "ALB", OPT, INFRA,
-    (CHANGED, "Slide 2 no longer shows WAF (no public entry) - optional, only if WBD requires it"))
-add(L, "WAF", "WAF logging + log group", "aws-waf-logs-mmm-{e}", s("2"), "P-2", "WAF request logs (only with the WAF).", "KMS logs", s("if required"), "WAF", OPT, INFRA,
-    (CHANGED, "Only with the optional WAF"))
-add(L, "DNS", "Internal DNS record for the app", "mmm-dev / mmm-stg / mmm .<wbd internal domain>", ALL1, "S2-1", "Internal app name -> internal ALB.",
-    "CNAME in WBD internal DNS, or alias in the Route 53 private hosted zone (layer 05)", s("same"), "Internal ALB", CORE, DNS,
-    (CHANGED, "Internal name in WBD DNS instead of a public record (slide 2 no longer shows Route 53)"))
 add(L, "Okta", "Okta OIDC web app per environment", "WBD MMM {e}", ALL1, "S2-1",
-    "Authentication and RBAC: groups claim mmm-bu-* / mmm-role-* in the ID token; redirect https://<internal app name>/oauth2/idpresponse.", "MFA per WBD policy; session 12 h", s("same"), "App domain", CORE, IDN,
+    "The user authenticates here first (SSO / MFA); app tile on the Okta dashboard opens the internal app URL. Authentication and RBAC: groups claim mmm-bu-* / mmm-role-* in the ID token; "
+    "redirect https://<internal app name>/oauth2/idpresponse.", "MFA per WBD policy; session 12 h", s("same"), "Internal app name (WBD DNS)", CORE, IDN,
     (CHANGED, "Redirect URL on the internal app name"))
 
 L = "13. Optimization engine (slide 2)"
@@ -515,8 +503,9 @@ add(L, "Bedrock", "Foundation model - Anthropic (default)", "Anthropic Claude mo
     "On-demand (serverless); model access enabled (layer 01); no provider API key", s("same"), "Model access, bedrock-runtime endpoint", GENAI, PLAT,
     (NEW, "Slide 2 'Amazon Bedrock' replaces API Gateway + external providers"))
 add(L, "Bedrock", "Foundation models - OpenAI / Google (optional)", "OpenAI and Google model IDs on Bedrock (# add actual value)", s("if approved"), "S2-9",
-    "'Open AI Models (Optional)' and 'Google Models (Optional)': only if WBD approves a second model; the same Converse call and guardrail.",
-    "Bedrock-served models (or AWS Marketplace subscription where the model is sold there); added to the IAM / endpoint allow-list", s("if required"), "Model access", OPT, PLAT,
+    "'Open AI Models (Optional)' and 'Google Models (Optional)': alternatives for experimentation (compare explanation quality / cost with the Anthropic default); the same Converse call and guardrail.",
+    "Bedrock-served models (or AWS Marketplace subscription where the model is sold there); added to the IAM / endpoint allow-list only where enabled",
+    s("experimentation (if approved)", "experimentation (if approved)", "not enabled unless WBD approves"), "Model access", OPT, PLAT,
     (NEW, "Optional models on slide 2"))
 add(L, "Bedrock", "Application inference profile per business unit", "mmm-{e}-genai-<bu>", s("3"), "S2-9",
     "Wraps the chosen model per business unit so Bedrock cost and token use are tagged and reported per BU.", "Tags Project, Environment, BusinessUnit", s("same"), "Foundation model", OPT, INFRA,
@@ -542,7 +531,7 @@ add(L, "CloudWatch", "CloudWatch dashboards", "mmm-{e}-platform / -api-ui / -opt
 add(L, "CloudWatch Logs", "Logs data protection policy (account)", "mmm-{e}-data-protection", ALL1, "P-2", "Masks personal data (emails, names) if it appears in logs.", "Account policy", s("same"), "-", CORE, INFRA)
 add(L, "Kinesis Data Firehose", "Firehose to Splunk + IAM roles + log group / stream", "mmm-{e}-splunk ; mmm-{e}-firehose-splunk ; mmm-{e}-logs-to-firehose", s("5"), "P-2",
     "Ships all log groups to WBD Splunk; failed records to the logs bucket (splunk-failed/).", "HEC endpoint + token secret splunk/hec", s("if Splunk is required"), "Secret splunk/hec", OPT, INFRA)
-add(L, "CloudWatch Logs", "Subscription filters -> Firehose", "mmm-{e}-splunk (one per log group)", s("18"), "P-2", "api, ui, migrate, optimizer, publisher, dispatcher, export, Glue, SageMaker, Step Functions, RDS, VPC flow, ECS Exec, Bedrock invocations (+ WAF if used).", "-", s("same"), "Firehose", OPT, INFRA,
+add(L, "CloudWatch Logs", "Subscription filters -> Firehose", "mmm-{e}-splunk (one per log group)", s("18"), "P-2", "api, ui, migrate, optimizer, publisher, dispatcher, export, Glue, SageMaker, Step Functions, RDS, VPC flow, ECS Exec, Bedrock invocations.", "-", s("same"), "Firehose", OPT, INFRA,
     (CHANGED, "LLM gateway log groups removed"))
 add(L, "CloudWatch", "Container Insights (enhanced)", "cluster setting", ALL1, "P-2", "Health and usage of ECS services and optimizer tasks.", "On", s("same"), "ECS cluster", CORE, INFRA)
 add(L, "CloudWatch", "Application Signals", "account setting", ALL1, "P-2", "API latency, errors and traces.", "-", s("optional"), "-", OPT, INFRA)
@@ -607,12 +596,12 @@ ALARMS = [
 
 # Things outside AWS the infra team needs before / while creating the resources.
 OUTSIDE = [
-    ("WBD DNS / PKI", "Internal app names in WBD DNS (or delegation to the Route 53 private hosted zone) + the certificate: ACM DNS-validation records or a WBD private CA certificate",
+    ("WBD DNS / PKI", "Internal app name per environment as a record in WBD internal DNS (CNAME to the internal ALB DNS name - no Route 53) + the certificate: ACM DNS-validation records or a WBD private CA certificate",
      "mmm-dev / mmm-stg / mmm .<wbd internal domain>", "Before the internal ALB HTTPS listener"),
     ("WBD Identity", "Okta OIDC app per environment, groups mmm-bu-* / mmm-role-*, client secret into mmm/<env>/okta/alb-client", "Redirect https://<internal app name>/oauth2/idpresponse", "Before sign-in is switched on"),
     ("WBD Databricks admins", "Export job per BU, service principal + OAuth secret, Unity Catalog storage credential + external location, IP access list (NAT IPs)", "Job ids -> /mmm/<env>/databricks/export_job_ids", "Before the first refresh"),
     ("WBD Network", "VPC CIDR, AZ ids, Transit Gateway id + route-table association / propagation, the WBD CIDRs (offices, VPN, VDI) that may reach the internal ALB, "
-     "resolver forwarding; firewall egress for Databricks and Okta only (no LLM providers)", "10.40.0.0/19 etc.", "Before networking - the app is reachable only through the TGW"),
+     "firewall egress for Databricks and Okta only (no LLM providers)", "10.40.0.0/19 etc.", "Before networking - the app is reachable only through the TGW"),
     ("WBD Cloud Platform", "Quota increases (Fargate vCPU, Glue, SageMaker, Bedrock tokens / requests per minute); SCP allows the listed services and the Bedrock inference-profile regions; "
      "Bedrock model access (Anthropic first-time-use form; OpenAI / Google only if approved, Marketplace subscription where needed)", "See layers 01 and 18", "Before load test / first refresh / Release 2"),
     ("WBD Splunk", "HEC endpoint + token, index, source type", "Secret mmm/<env>/splunk/hec", "Only if Splunk shipping is required"),
@@ -627,8 +616,9 @@ OUTSIDE = [
 # v5 resources (built in the repo) that v6 removes.
 REMOVED = [
     ("12. Front door", "Internet-facing ALB in the public subnets (scheme internet-facing)", "Slide 2: internal ALB in the private app subnets, reached from the WBD network through the Transit Gateway"),
-    ("12. Front door", "Public DNS record (Route 53 alias in a public zone) for the app", "Internal name in WBD DNS or a Route 53 private hosted zone"),
-    ("12. Front door", "WAF web ACL + logging as a required item", "Kept only as optional (no public entry on slide 2)"),
+    ("12. Front door", "Route 53 record for the app (public zone, variable route53_zone_id)", "Internal application: name in WBD internal DNS, no Route 53"),
+    ("12. Front door", "WAF web ACL + association + logging (modules/waf-regional)", "Internal application, no public entry - WAF removed"),
+    ("05. Networking", "Route 53 Resolver outbound endpoint + forwarding rule (optional in v5)", "No Route 53 in v6"),
     ("18. GenAI", "Private REST API - LLM gateway (resource, method, integration, deployment, stage v1, method settings)", "Slide 2: the API calls Amazon Bedrock directly (Converse with guardrailConfig)"),
     ("18. GenAI", "API Gateway account setting + CloudWatch role", "No API Gateway"),
     ("18. GenAI", "Lambda LLM proxy + invoke permission + IAM role", "No proxy - Bedrock applies the guardrail and no provider key is needed"),
@@ -643,8 +633,8 @@ REMOVED = [
 # (place in the v5 code, what changes, why - slide reference)
 CODE_IMPACT = [
     ("modules/alb + frontdoor.tf", "Scheme internal, private app subnets instead of public_subnet_ids; certificate may be imported / private CA; listener unchanged (authenticate-oidc)", "Slide 2 'Internal ALB'"),
-    ("modules/network", "Transit Gateway attachment + WBD routes required; alb SG source = WBD CIDRs; drop the execute-api endpoint and the genai SG; NAT keeps Databricks / Okta only; optional private hosted zone + inbound resolver", "Slide 2 'Internal ALB' (needs a WBD network path) and 'Amazon Runtime VPC Endpoint'"),
-    ("frontdoor.tf (WAF, DNS)", "WAF behind a new enable_waf flag (default off); Route 53 record in a private hosted zone or WBD DNS only", "No public entry"),
+    ("modules/network", "Transit Gateway attachment + WBD routes required; alb SG source = WBD CIDRs; drop the execute-api endpoint and the genai SG; NAT keeps Databricks / Okta only; remove the Route 53 resolver option", "Slide 2 'Internal ALB' (needs a WBD network path) and 'Amazon Runtime VPC Endpoint'"),
+    ("frontdoor.tf (WAF, DNS)", "Remove module waf (and modules/waf-regional) and the aws_route53_record; DNS record in WBD internal DNS (outside AWS)", "Internal application - no DNS/WAF + Route 53"),
     ("genai.tf", "Remove module llm_gateway; keep module guardrails; API task role gets bedrock:InvokeModel / Converse on the approved model / inference-profile ARNs with condition bedrock:GuardrailIdentifier + bedrock:ApplyGuardrail; "
      "SSM genai/model_id + genai/guardrail; optional application inference profiles per BU and invocation logging; Bedrock alarms", "Slide 2 'Amazon Bedrock' + 'Guardrails'"),
     ("modules/llm-gateway", "Delete the module (API Gateway, proxy Lambda, roles, log groups, alarms)", "No LLM gateway"),
@@ -705,7 +695,7 @@ def joined(values):
 
 
 LEGEND = ("Filter on 'Release' (Release 1 = go-live incl. the slide 1 model refresh; Release 2 = GenAI explanation on Amazon Bedrock, 'Not part of R1' "
-          "on slide 2), on 'Scope' and on 'Change vs v5' (New / Changed / Same compared with the v5 build in the repo).")
+          "on slide 2) and on 'Scope' (Required / Optional / account baseline / quota / run time).")
 
 
 def build_resources():
@@ -714,7 +704,7 @@ def build_resources():
     ws.title = "README"
     title(ws, "WBD MMM v6 - complete AWS resource list for the WBD infrastructure team",
           "Source: WBD_MMM_Architecture_6.pptx (slide 1 auto ML activities, slide 2 optimization and explainable planning - internal ALB, one ECS cluster, Amazon Bedrock). "
-          "Names follow the v5 build in the repo; 'Change vs v5' shows what v6 changes.")
+          "Complete list from scratch for this architecture only. Not in this architecture and therefore not listed: Route 53, AWS WAF, public / internet-facing load balancer, Amazon API Gateway, external LLM provider keys.")
     for k, v in (
         ("Purpose", "The WBD infrastructure team creates the AWS resources of the MMM platform from this list, in the order of the layers."),
         ("Environments", "Three WBD-owned AWS accounts: dev, staging, prod. Region us-east-1 (DR us-west-2, only if approved)."),
@@ -724,13 +714,15 @@ def build_resources():
         ("Business units", BUS + " (resources marked 'per BU' exist once per business unit)."),
         ("Sheets", "all_resources = complete list with dev / staging / prod values; dev, staging, prod = the same list with the real names of that environment; "
                    "architecture_flow = the v6 flow steps referenced in column 'Flow step'; alarms_and_events = every alarm and alert rule; "
-                   "outside_aws = what other WBD teams provide; v6_changes = rows that differ from v5; removed_vs_v5 = v5 resources v6 drops; "
-                   "summary = count per layer."),
-        ("Entry point", "No public entry: planners reach the internal ALB from the WBD network (offices, VPN, VDI) through the Transit Gateway; "
-                        "the internal app name is in WBD DNS; the ALB signs users in with Okta (reached through NAT)."),
+                   "outside_aws = what other WBD teams provide; summary = count per layer."),
+        ("Entry point", "Internal application, no public entry: planners on the WBD network (offices, VPN, VDI) open the internal app name (WBD internal DNS) "
+                        "and reach the internal ALB in the private app subnets through the Transit Gateway. They authenticate with Okta first; "
+                        "only authenticated requests are routed by the ALB to the UI / API (the ALB reaches Okta through NAT)."),
+        ("ECS", "One ECS cluster on Fargate per environment: services ui and api, and the inference & optimization task (Model Summarizer, Optimizer, Simulation "
+                "in one container, one task per run) - no separate clusters."),
         ("Release column", "Release 1 = everything needed for go-live (slide 2 optimization + slide 1 auto ML + platform); "
                            "Release 2 = GenAI explanation (Amazon Bedrock through the bedrock-runtime VPC endpoint, Bedrock Guardrails, Anthropic default, "
-                           "OpenAI / Google optional) - slide 2 'Not part of R1'."),
+                           "OpenAI / Google optional for experimentation) - slide 2 'Not part of R1'."),
         ("Repositories", "WBD provides three repositories (frontend, backend, data). The WBD infra team creates the resources of this list with its own IaC and pipelines; "
                          "the pipelines of the three repositories deploy new images / code with the roles of layer 04."),
         ("Scope column", f"'{CORE}' = needed for go-live; '{DP}' = slide 1 auto ML (can be created after the core); '{GENAI}'; '{OPT}'; "
@@ -748,16 +740,16 @@ def build_resources():
     widths(ws, (22, 140))
 
     headers = ["#", "Release", "Layer", "AWS service", "Resource", "Name", "Qty", "Flow step", "What it does in the v6 flow",
-               "Key configuration", "Dev", "Staging", "Prod", "Depends on", "Scope", "Created by / owner", "Change vs v5", "v6 change note"]
+               "Key configuration", "Dev", "Staging", "Prod", "Depends on", "Scope", "Created by / owner"]
     ws = wb.create_sheet("all_resources")
     title(ws, "All AWS resources - v6 architecture (dev / staging / prod)",
           "<env> in names = dev / stg / prd. Qty = count in one environment (dev / staging / prod when different). " + LEGEND)
     ws.append(headers)
     style_header(ws, 4)
-    for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, chg) in enumerate(R, 1):
-        ws.append([i, release(scope), layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner, *chg])
+    for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, _) in enumerate(R, 1):
+        ws.append([i, release(scope), layer, svc, res, generic(name), joined(qty), flow, what, cfg, *per_env, dep, scope, owner])
         style_body(ws)
-    widths(ws, (5, 11, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24, 12, 44))
+    widths(ws, (5, 11, 22, 16, 34, 38, 9, 12, 60, 46, 20, 20, 22, 22, 24, 24))
     ws.freeze_panes = "F5"
     ws.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{ws.max_row}"
 
@@ -766,17 +758,17 @@ def build_resources():
         title(ws, f"{label} - AWS resources to create (v6 architecture)",
               f"Real names for {label} (<env> = {short}). Setting = the {label} value. " + LEGEND)
         ws.append(["#", "Release", "Layer", "AWS service", "Resource", f"Name ({label})", "Qty", "Flow step", "What it does in the v6 flow",
-                   "Key configuration", f"{label} setting", "Depends on", "Scope", "Created by / owner", "Change vs v5",
+                   "Key configuration", f"{label} setting", "Depends on", "Scope", "Created by / owner",
                    "Created (Y/N)", "ARN / ID", "Notes"])
         style_header(ws, 4)
         idx = ("dev", "staging", "prod").index(env)
-        for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, chg) in enumerate(R, 1):
+        for i, (layer, svc, res, name, qty, flow, what, cfg, per_env, dep, scope, owner, _) in enumerate(R, 1):
             ws.append([i, release(scope), layer, svc, res, name.replace("{e}", short), qty[idx], flow, what, cfg, per_env[idx], dep, scope, owner,
-                       chg[0], "", "", ""])
+                       "", "", ""])
             style_body(ws)
-        widths(ws, (5, 11, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 12, 10, 30, 24))
+        widths(ws, (5, 11, 22, 16, 34, 40, 9, 12, 60, 46, 24, 22, 24, 24, 10, 30, 24))
         ws.freeze_panes = "F5"
-        ws.auto_filter.ref = f"A4:R{ws.max_row}"
+        ws.auto_filter.ref = f"A4:Q{ws.max_row}"
 
     ws = wb.create_sheet("architecture_flow")
     title(ws, "v6 architecture flow - steps referenced in the resource list",
@@ -813,37 +805,15 @@ def build_resources():
     widths(ws, (5, 22, 80, 50, 32))
     ws.auto_filter.ref = f"A4:E{ws.max_row}"
 
-    ws = wb.create_sheet("v6_changes")
-    title(ws, "Rows that differ from the v5 build (WBD_MMM_Architecture_5.pptx -> _6.pptx)", "Row numbers match all_resources.")
-    ws.append(["#", "Release", "Layer", "Resource", "Name", "Change vs v5", "What changes"])
-    style_header(ws, 4)
-    for i, r in enumerate(R, 1):
-        if r[12][0] != SAME or r[12][1]:
-            ws.append([i, release(r[10]), r[0], r[2], generic(r[3]), *r[12]])
-            style_body(ws)
-    widths(ws, (5, 11, 24, 44, 40, 12, 80))
-    ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A4:G{ws.max_row}"
-
-    ws = wb.create_sheet("removed_vs_v5")
-    title(ws, "v5 resources (built in the repo) that v6 removes", "To be deleted when v6 is implemented.")
-    ws.append(["#", "Layer", "Removed", "Why"])
-    style_header(ws, 4)
-    for i, row in enumerate(REMOVED, 1):
-        ws.append([i, *row])
-        style_body(ws)
-    widths(ws, (5, 26, 60, 80))
-
     ws = wb.create_sheet("summary")
     title(ws, "Resource count per layer", "Rows of all_resources per layer and scope. AWS objects = sum of Qty in prod "
           "(without account baseline, quotas and run-time objects; settings such as lifecycle or bucket policy are part of their resource).")
     scopes = (CORE, DP, GENAI, OPT, BASE, QUOTA, RUN)
-    ws.append(["Layer", "Rows", "Release 1", "Release 2", "New in v6", "Changed by v6", *scopes, "AWS objects (prod)"])
+    ws.append(["Layer", "Rows", "Release 1", "Release 2", *scopes, "AWS objects (prod)"])
     style_header(ws, 4)
 
     def line(label, rows):
         ws.append([label, len(rows), *(sum(1 for r in rows if release(r[10]) == rel) for rel in ("Release 1", "Release 2")),
-                   sum(1 for r in rows if r[12][0] == NEW), sum(1 for r in rows if r[12][0] == CHANGED),
                    *(sum(1 for r in rows if r[10] == sc) for sc in scopes), objects(rows)])
         style_body(ws)
 
@@ -852,9 +822,7 @@ def build_resources():
     line("Total", R)
     for c in ws[ws.max_row]:
         c.font = Font(bold=True)
-    ws.append(["Removed vs v5", len(REMOVED)])
-    style_body(ws)
-    widths(ws, (40, 8, 10, 10, 10, 12, 16, 22, 22, 18, 18, 12, 18, 16))
+    widths(ws, (40, 8, 10, 10, 16, 22, 22, 18, 18, 12, 18, 16))
 
     wb.save(OUT / "aws_resource_list_6.xlsx")
 
@@ -922,8 +890,7 @@ INPUTS = [
     ("7. Networking", "NAT Elastic IPs must be allow-listed anywhere (Databricks workspace IP access list, Okta, vendors)", "Yes - Databricks IP access list", "05 NAT gateways, 14", "Network / Databricks"),
     ("7. Networking", "Network path from the WBD network to the internal ALB (required): Transit Gateway ID, TGW route table to associate / propagate, RAM share to the MMM accounts - or the WBD alternative (Cloud WAN, peering)", "tgw-... shared by WBD Network", "05 Transit Gateway attachment, route tables", "Network"),
     ("7. Networking", "WBD CIDR ranges (offices, VPN, VDI) that may reach the internal ALB, and the return routes from the VPC", "CIDR list per environment", "05 route tables, 06 SG alb", "Network"),
-    ("7. Networking", "Internal DNS: WBD DNS hosts the app record (CNAME to the internal ALB), or a Route 53 private hosted zone + inbound resolver that WBD DNS forwards to", "CNAME in WBD internal DNS; no private zone", "05 Route 53 private hosted zone / inbound resolver (optional), 12 DNS record", "DNS / Network"),
-    ("7. Networking", "DNS forwarding from the VPC to WBD internal domains: domains and resolver IPs", "Not required", "05 Outbound resolver endpoint (optional)", "Network"),
+    ("7. Networking", "Internal DNS: the WBD DNS team creates the internal app name per environment in WBD internal DNS (CNAME to the internal ALB DNS name) - no Route 53", "CNAME in WBD internal DNS", "12 internal ALB; outside_aws WBD DNS / PKI", "DNS / Network"),
     ("7. Networking", "VPC flow-log retention and destination (CloudWatch or central log archive)", "CloudWatch, 30 / 90 / 365 days", "05 VPC flow logs", "Security"),
     # 8. Security groups and reachability (layer 06)
     ("8. Security groups", "Internal ALB security group source: all WBD ranges reaching the TGW or only selected ranges (planner offices / VPN / VDI)", "Only the WBD CIDRs of question 7; 443 + 80 (redirect)", "06 Security group - alb", "Security / Network"),
@@ -957,7 +924,7 @@ INPUTS = [
     ("14. Front door and sign-in", "The internal ALB calls the Okta token / user-info endpoints: confirm egress through NAT (or the WBD proxy cannot be used - the ALB needs direct HTTPS)", "NAT allowed to *.okta.com", "12 listeners, 05 NAT", "Network / Identity"),
     ("14. Front door and sign-in", "Okta group names for business unit and role (groups claim in the ID token, used for RBAC)", "mmm-bu-streaming, mmm-role-planner, mmm-role-approver", "12, API RBAC", "Identity"),
     ("14. Front door and sign-in", "Session length; MFA / step-up for approvals", "12 hours; MFA per WBD policy", "12 Okta OIDC app", "Identity"),
-    ("14. Front door and sign-in", "WAF on the internal ALB required (not on slide 2)? If yes: rate limit and managed rule sets", "Not required (no public entry); if required 2000 requests / 5 min per IP + AWS managed rules", "12 WAF web ACL (optional)", "Security"),
+    ("14. Front door and sign-in", "How planners start the app: Okta dashboard tile (Okta first, then the app URL) and / or a bookmark of the internal app URL (redirected to Okta first)", "Okta tile per environment + internal URL; both authenticate with Okta before the ALB routes the request", "12 Okta OIDC app, listeners", "Identity / Product"),
     # 15. Optimization engine (layer 13)
     ("15. Optimization engine", "Optimizer task size and maximum run time", "4 vCPU / 16 GB / 50 GiB (prod 8 vCPU / 32 GB); 60 minutes", "13 ECS task definition - optimizer", "Data science"),
     ("15. Optimization engine", "Runs allowed at the same time per environment and maximum queue wait", "5 / 20 / 50 runs; 30 minutes", "08 max_concurrent_runs, 13", "Business / EY"),
@@ -992,7 +959,7 @@ INPUTS = [
     ("20. GenAI (Release 2 - not part of R1)", "Written approval to send MMM run data to Amazon Bedrock models (data stays in the WBD AWS account / region; no external provider API)", "Approval document before Release 2", "18 GenAI layer", "Responsible AI / Legal"),
     ("20. GenAI (Release 2 - not part of R1)", "Release 1 behaviour of 'invoke explanation tool by default for every run' while GenAI is not part of R1", "Skipped in R1 - the run result shows no explanation", "08 genai_enabled, API", "Product / EY"),
     ("20. GenAI (Release 2 - not part of R1)", "Default model: which Anthropic Claude model and version (model ID) per environment", "Latest approved Claude Sonnet model on Bedrock", "08 genai/model_id, 18 foundation model", "Responsible AI / Data science"),
-    ("20. GenAI (Release 2 - not part of R1)", "Optional OpenAI / Google models on slide 2: needed at all, which models, and approval of any AWS Marketplace subscription", "Not at Release 2 start - Anthropic only", "18 optional models, 01 model access", "Responsible AI / Procurement"),
+    ("20. GenAI (Release 2 - not part of R1)", "Optional OpenAI / Google models on slide 2 (alternatives for experimentation): which models, in which environments, and approval of any AWS Marketplace subscription", "Anthropic in all environments; OpenAI / Google only in dev / staging for experimentation, if approved", "18 optional models, 01 model access", "Responsible AI / Procurement"),
     ("20. GenAI (Release 2 - not part of R1)", "Bedrock model access per account: who submits the Anthropic first-time-use form and enables the models", "WBD Cloud Platform per account", "01 Bedrock model access", "Cloud Platform"),
     ("20. GenAI (Release 2 - not part of R1)", "In-region model only, or a US cross-region inference profile (requests may run in us-east-1 / us-east-2 / us-west-2)", "US cross-region inference profile (needed by newer Claude models)", "18 foundation model, 01 SCP", "Security / Cloud Platform"),
     ("20. GenAI (Release 2 - not part of R1)", "Bedrock model invocation logging (prompts / answers) required, and may the text be stored", "Metadata only; text logging off unless Privacy approves", "18 model invocation logging (optional)", "Security / Privacy"),
@@ -1019,13 +986,13 @@ INPUTS = [
 
 # (question, proposed default)
 DECISIONS = [
-    ("How do planners reach the app now that slide 2 shows an internal ALB and no public entry?", "Internal ALB in the private app subnets; reachable only from the WBD network (offices, VPN, VDI) through the Transit Gateway; no internet-facing ALB, no public DNS"),
-    ("WAF and Shield on the internal ALB?", "No WAF at go-live (not on slide 2, no public entry); add the WAF web ACL only if WBD Security requires it; no Shield Advanced"),
+    ("Private access: how do planners reach the app (internal application, no public entry)?", "Internal ALB in the private app subnets; reachable only from the WBD network (offices, VPN, VDI) through the Transit Gateway; no internet-facing load balancer, no Route 53, no WAF"),
     ("Internal DNS name and certificate?", "CNAME in WBD internal DNS to the internal ALB; ACM DNS-validated certificate if the name is under a public WBD domain, otherwise a WBD private CA certificate"),
-    ("Okta sign-in on an internal ALB?", "Keep authenticate-oidc on the ALB listener; the ALB reaches Okta through NAT (browser redirects work from the WBD network)"),
-    ("One ECS cluster (slide 2)?", "One ECS cluster per environment for ui, api, optimizer and the support tasks (as built in v5)"),
-    ("How does the API call the LLM now that slide 2 shows Amazon Bedrock with no API Gateway?", "Directly: the LangGraph explanation tool in the API calls Bedrock Converse through the bedrock-runtime VPC endpoint with the task role; no LLM gateway, no proxy Lambda, no provider API keys"),
-    ("Which models ('Anthropic Models (Default)', OpenAI / Google optional)?", "Anthropic Claude on Bedrock as default (model ID in SSM genai/model_id); OpenAI / Google only after WBD approval, through the same Converse call"),
+    ("Authentication flow: user authenticates through Okta first, then the request is routed to the ALB targets?", "Yes - the internal ALB listener's first action is Okta OIDC authentication; a request without a valid Okta session is redirected to Okta and no request reaches the UI / API before sign-in; the ALB reaches Okta through NAT"),
+    ("ECS inference & optimization: do Model Summarizer, Optimizer and Simulation need separate ECS clusters, or three services in one cluster?", "Neither separate clusters nor long-running services: one ECS cluster per environment; the three functions run in sequence inside one inference & optimization container, one Fargate task per run started by Step Functions. "
+     "If the data scientists need separate images, three task definitions in the same cluster, chained by the optimization state machine"),
+    ("LLM access: Amazon Bedrock only (no Amazon API Gateway)?", "Yes - the LangGraph explanation tool in the API calls Bedrock Converse through the bedrock-runtime VPC endpoint with the task role; no API Gateway, no proxy Lambda, no provider API keys"),
+    ("Which models ('Anthropic Models (Default)', OpenAI / Google optional)?", "Anthropic Claude on Bedrock as default (model ID in SSM genai/model_id); OpenAI / Google kept as optional alternatives for experimentation (dev / staging, after WBD approval), through the same Converse call and guardrail"),
     ("How is the guardrail enforced without the proxy?", "guardrailConfig on every Converse call + IAM condition bedrock:GuardrailIdentifier on the task role, so a call without the MMM guardrail is denied"),
     ("Cross-region inference profile?", "US cross-region profile where the model needs it (SCP must allow the profile regions); in-region model otherwise"),
     ("Token cost and quota per business unit without a gateway?", "API enforces the daily quota (SSM genai/token_quota/<bu>) and publishes GenAITokens; optional application inference profile per BU for Bedrock cost by BU"),
@@ -1045,7 +1012,6 @@ DECISIONS = [
     ("Lake Formation on the Glue catalog?", "Not used - IAM roles, bucket policies and per-BU KMS keys"),
     ("Silver data-quality failure?", "Stops the refresh and alerts"),
     ("Order of the last refresh steps?", "Publish reference data, train, evaluate, register the model version, record lineage, then write the model results to RDS (rows carry the model package ARN)"),
-    ("Optimizer on ECS: one task per run or a worker service?", "One Fargate task per run started by Step Functions (isolation, simple cancel)"),
     ("Concurrency and fairness between business units?", "5 / 20 / 50 runs at a time, bounded by the Fargate quota; first come first served; per-user limits in the app"),
     ("Forecast runs ('upload future titles')?", "Same queue, state machine and optimizer image; run_type forecast"),
     ("User file upload to S3 (slide 2): through the API or straight from the browser?", "Straight from the browser with a presigned URL from the API, scoped to the user's BU prefix; CORS limited to the app domain"),
@@ -1141,9 +1107,9 @@ def build_docx():
       "the app is internal only, and the LLM is called directly on Amazon Bedrock instead of through an API Gateway LLM gateway.")
     table(["#", "Slide", "v5 (built)", "v6", "DevOps impact"], [
         ("1", "2", "Route 53 -> WAF -> internet-facing ALB in the public subnets; ACM certificate", "'VPC . Internal ALB + Private App/Data Subnets'; 'ALB / HTTPS'; no Route 53 / WAF on the slide",
-         "ALB scheme internal in the app subnets; reached from the WBD network (Transit Gateway assumed) [ASK]; internal DNS name + ACM or WBD private CA certificate [ASK]; WAF optional [ASK]"),
-        ("2", "2", "Okta sign-in at the public ALB", "Same Okta + IAM Identity Center box, now at the internal ALB", "ALB still runs authenticate-oidc; it needs NAT egress to Okta; redirect URL on the internal name [ASK]"),
-        ("3", "2", "ECS UI + API services and the optimizer on ECS Fargate", "'One ECS cluster on AWS Fargate . Containerized App'", "None - one cluster per environment is already built"),
+         "ALB scheme internal in the app subnets; reached from the WBD network (Transit Gateway assumed) [ASK]; internal DNS name in WBD DNS + ACM or WBD private CA certificate [ASK]; Route 53 and WAF removed"),
+        ("2", "2", "Okta sign-in at the public ALB", "Same Okta + IAM Identity Center box; user authenticates with Okta first, then the request is routed by the internal ALB", "Listener first action authenticate-oidc; ALB needs NAT egress to Okta; redirect URL on the internal name [ASK]"),
+        ("3", "2", "ECS UI + API services and the optimizer on ECS Fargate", "'One ECS cluster on AWS Fargate . Containerized App'", "None - one cluster per environment is already built; Model Summarizer / Optimizer / Simulation stay in one inference & optimization task per run [ASK]"),
         ("4", "2", "GenAI: API -> private API Gateway (execute-api endpoint) -> proxy Lambda -> OpenAI / Anthropic / Google with keys; Bedrock Guardrails via ApplyGuardrail",
          "API -> 'Amazon Runtime VPC Endpoint' -> 'Amazon Bedrock' (Anthropic Models (Default), Open AI / Google Models (Optional)) + 'Amazon Bedrock Guardrails'",
          "Remove the LLM gateway, proxy Lambda, llm/* secrets, execute-api endpoint, genai SG; API role calls Bedrock Converse with guardrailConfig; SSM genai/model_id + genai/guardrail; Bedrock model access + quota [ASK]"),
@@ -1184,6 +1150,8 @@ def build_docx():
     d.add_heading("5. Impact on the v5 code")
     table(["Area", "Change", "Why"], CODE_IMPACT)
     p("Removed: " + "; ".join(f"{r[1]}" for r in REMOVED) + ".")
+    p("The client workbooks (aws_resource_list_6.xlsx, devops_6_client_question.xlsx) list only the v6 architecture from scratch; "
+      "this comparison with the v5 build is for the DevOps team only.")
     p("Unchanged: KMS, ECR, ECS cluster and ui / api / optimizer services, SQS + dispatcher, optimization state machine, results/data publisher, "
       "Databricks export Lambda, Glue bronze / silver / gold / export-rds / export-training / export-monitor, lineage, SageMaker training / "
       "registry / drift, Bedrock guardrail module, RDS, backup, CloudTrail data events.")
@@ -1192,7 +1160,7 @@ def build_docx():
     table(["Stage", "v6 change"], [
         ("0-2 Access, questions, design", "Send devops_6_client_question.xlsx; confirm the network path to the internal ALB, internal DNS / certificate, Bedrock models and approval"),
         ("3-5 Foundation, network, secrets", "Transit Gateway attachment + WBD routes required; alb SG from WBD CIDRs; no execute-api endpoint, no genai SG; no llm/* secrets; SSM genai/model_id + genai/guardrail"),
-        ("8 Front door", "Internal ALB in the app subnets; certificate from ACM or the WBD private CA; DNS record in WBD DNS; WAF only if required; Okta via NAT"),
+        ("8 Front door", "Internal ALB in the app subnets; certificate from ACM or the WBD private CA; DNS record in WBD DNS; remove WAF and the Route 53 record; Okta first via NAT"),
         ("13 Monitoring", "Bedrock alarms instead of the LLM gateway alarms; genai dashboard on AWS/Bedrock metrics"),
         ("16 Release 2 GenAI", "Bedrock model access + quota per account; API role with Converse + guardrail condition; optional inference profiles per BU and invocation logging"),
         ("17 Handover", "Runbooks: front door (internal ALB, DNS, certificate), genai (Bedrock), okta-outage (NAT egress)"),

@@ -31,9 +31,9 @@ verification. The Terraform in this repo is the reference specification of the l
 |---|---|
 | `WBD_MMM_Architecture_6.pptx` | **Client v6 (final) architecture** – slide 1 "supports auto ML activities", slide 2 "supports optimization and explainable planning" (read with `tools/extract_pptx.py`) |
 | `devops_plan_6.txt` | v6 step-by-step build prompt (Steps 0–16); section A = change summary vs v5; **(v6)** marks every step that changes the built code |
-| `aws_resource_list_6.xlsx` | Complete v6 resource list (220 rows, 20 layers) in the v5 layout: `README`, `all_resources` with dev / staging / prod values, sheets `dev` / `staging` / `prod` with real names, `architecture_flow`, `alarms_and_events`, `outside_aws`, `summary`; filter columns **Release**, **Scope** and **Change vs v5** (New 10 / Changed 26 / Same); sheets `v6_changes` and `removed_vs_v5` (12) |
+| `aws_resource_list_6.xlsx` | **Client-facing** complete v6 resource list written from scratch for the v6 architecture only (214 rows, 20 layers; no v5 comparison, no Route 53, WAF, API Gateway or public load balancer): `README`, `all_resources` with dev / staging / prod values, sheets `dev` / `staging` / `prod` with real names, `architecture_flow`, `alarms_and_events`, `outside_aws`, `summary`; filter columns **Release** and **Scope** |
 | `wbd_mmm_ecs_final_6.docx` | v6 design document (what changed vs v5, target platform, flows, environments, impact on the v5 code, stages, risks, resource summary, questions with the proposed default) |
-| `devops_6_client_question.xlsx` | Complete v6 client questions in the v5 layout: `client_inputs` (110, in 23 sections by layer of `aws_resource_list_6.xlsx`; yellow dev / staging / prod value columns) + `decisions_to_confirm` (38, proposed default until WBD answers) |
+| `devops_6_client_question.xlsx` | **Client-facing** complete v6 client questions: `client_inputs` (109, in 23 sections by layer of `aws_resource_list_6.xlsx`; yellow dev / staging / prod value columns) + `decisions_to_confirm` (36, proposed default until WBD answers) |
 | `tools/build_v6.py` | Generates the three v6 xlsx / docx files (`uv run --no-project --with openpyxl --with python-docx python tools\build_v6.py .`) |
 | `*_5.*`, `WBD_MMM_Architecture_5.pptx` | v5 inputs (what the current code implements) |
 
@@ -68,10 +68,12 @@ logging bands.
 
 | v5 (built) | v6 | Type |
 |---|---|---|
-| Internet-facing ALB in the public subnets; Route 53 public record; ACM certificate | Internal ALB in the private app subnets; internal name in WBD DNS (or Route 53 private hosted zone + inbound resolver); ACM or WBD private CA certificate | Changed |
+| Internet-facing ALB in the public subnets; ACM certificate | Internal ALB in the private app subnets (private entry only); internal name in WBD internal DNS; ACM or WBD private CA certificate | Changed |
+| Route 53 record; optional Route 53 Resolver | — (internal application) | Removed |
+| WAF web ACL + logging | — (internal application, no public entry) | Removed |
 | Transit Gateway attachment optional | Required – the only path for planners to the app (assumed; WBD may name another path) | Changed |
-| WAF web ACL + logging required | Optional – only if WBD Security requires it | Changed |
-| Okta at the public ALB | Okta at the internal ALB; ALB → Okta through NAT | Changed |
+| Okta at the public ALB | User authenticates with Okta first, then the internal ALB routes the request; ALB → Okta through NAT | Changed |
+| Optimizer task (Model Summarizer → Optimizer → Simulation) | Same – three functions in one task per run in the one ECS cluster (no separate clusters) | Confirm with WBD |
 | NAT egress: Databricks, Okta, packages, LLM providers | Databricks, Okta, packages – no LLM providers | Changed |
 | ECS cluster | "One ECS cluster" | Confirmed |
 | API → private API Gateway (`execute-api` endpoint) → proxy Lambda → OpenAI / Anthropic / Google (keys in `llm/*`) | API → `bedrock-runtime` endpoint → Amazon Bedrock Converse (Anthropic default; OpenAI / Google optional) | Changed |
@@ -89,14 +91,15 @@ logging bands.
 | Path | v6 action |
 |---|---|
 | `modules/alb` | Variable `internal` (true) + `subnet_ids` (private app); no public subnets; imported / private CA certificate allowed |
-| `modules/network` | TGW attachment + WBD routes required; `alb` SG from `alb_ingress_cidrs` (WBD ranges); drop `execute-api` endpoint and `genai` SG; optional private hosted zone + inbound resolver endpoint |
+| `modules/network` | TGW attachment + WBD routes required; `alb` SG from `alb_ingress_cidrs` (WBD ranges); drop `execute-api` endpoint and `genai` SG; remove the Route 53 Resolver option |
+| `modules/waf-regional` | Delete |
 | `modules/llm-gateway` | Delete |
 | `modules/monitoring` | `genai` dashboard on `AWS/Bedrock`; subscription filters without LLM log groups |
-| `environments/*/frontdoor.tf` | Internal ALB in app subnets; `module "waf"` behind `enable_waf` (false); DNS record in a private zone or WBD DNS only |
+| `environments/*/frontdoor.tf` | Internal ALB in app subnets; remove `module "waf"` and `aws_route53_record` (DNS record in WBD internal DNS) |
 | `environments/*/genai.tf` | Remove `module "llm_gateway"`; API role Bedrock policy (Converse / InvokeModel on approved model + profile ARNs, condition `bedrock:GuardrailIdentifier`, `ApplyGuardrail`); SSM `genai/model_id`, `genai/guardrail`; optional inference profiles + invocation logging; Bedrock alarms; `genai_interface_endpoints = ["bedrock-runtime"]` |
 | `environments/*/main.tf` | Remove `llm/*` secrets; `uploads` CORS = internal app URL |
 | `environments/*/ecs.tf` | API env `BEDROCK_MODEL_ID` / `BEDROCK_GUARDRAIL_ID` / `BEDROCK_GUARDRAIL_VERSION` instead of `LLM_GATEWAY_URL` |
-| `environments/*/variables.tf`, `terraform.tfvars` | `enable_transit_gateway = true`; `alb_ingress_cidrs` = WBD ranges; add `enable_waf`, `enable_private_hosted_zone`, `genai_model_ids`, `enable_bedrock_invocation_logging`; remove `llm_providers`, `genai_reserved_concurrency`, `manage_apigw_account_logging_role` |
+| `environments/*/variables.tf`, `terraform.tfvars` | `enable_transit_gateway = true`; `alb_ingress_cidrs` = WBD ranges; add `genai_model_ids`, `enable_bedrock_invocation_logging`; remove `waf_*`, `route53_zone_id`, `enable_resolver_forwarding` / `resolver_*`, `llm_providers`, `genai_reserved_concurrency`, `manage_apigw_account_logging_role` |
 | `environments/*/outputs.tf`, `tests/mock-plan.tftest.hcl` | New expected counts |
 | `docs/` + runbooks | 05, 06, 12 front door; `genai.md` (Bedrock); `okta-outage` (NAT egress); `security-incident` (no public entry); diagrams |
 | Unchanged | bootstrap, kms, permission-boundary (plus Bedrock actions), iam-oidc (trust subjects of the three repos), ecr, ecs-cluster, ecs-service, rds, run-queue, step-functions, lambda-function, databricks-export, databricks-access, glue, sagemaker, backup, bedrock-guardrails, log-bucket, log-shipping, budgets, s3-bucket |
@@ -105,7 +108,7 @@ logging bands.
 
 ## 5. Proposed implementation order (after the user verifies this plan)
 
-1. Front door: `modules/alb` internal, `modules/network` (TGW required, `alb` SG, optional private zone / inbound resolver), `frontdoor.tf` (WAF optional, DNS), `uploads` CORS (Steps 2, 4, 6, 8).
+1. Private entry: `modules/alb` internal, `modules/network` (TGW required, `alb` SG, no resolver), `frontdoor.tf` (remove WAF and the Route 53 record), `uploads` CORS (Steps 2, 4, 6, 8).
 2. GenAI on Bedrock: delete `modules/llm-gateway`, remove `llm/*`, `execute-api`, `genai` SG; Bedrock IAM + SSM + API env + alarms (Steps 2, 4, 5, 15).
 3. Monitoring and dashboards (Step 10); OIDC trust for the three repositories (Steps 3, 12).
 4. Docs, runbooks, mock-plan expectations, `Project_memory.md`; regenerate the `_6` files with the build status.
@@ -121,10 +124,10 @@ Each step: `terraform fmt/validate`, `validate-modules.ps1`, `sync-environments.
 |---|---|---|
 | 1 | **How do planners reach the internal ALB?** | WBD network (offices, VPN, VDI) → Transit Gateway → app subnets; ALB SG allows only the WBD CIDRs |
 | 2 | Internal DNS name and certificate? | CNAME in WBD internal DNS; ACM DNS-validated certificate if under a public WBD domain, else WBD private CA |
-| 3 | WAF on the internal ALB? | Not at go-live; optional if WBD Security requires it |
-| 4 | Okta sign-in from an internal ALB? | `authenticate-oidc` stays; ALB reaches Okta through NAT |
+| 3 | ECS inference & optimization – separate clusters or three services? | One cluster; Model Summarizer → Optimizer → Simulation in one task per run (three task definitions in the same cluster only if separate images are needed) |
+| 4 | Authentication flow: Okta first, then the ALB? | Yes – listener first action `authenticate-oidc`; ALB reaches Okta through NAT |
 | 5 | **LLM access on Bedrock** | API calls Bedrock Converse through the `bedrock-runtime` endpoint; no gateway, no proxy, no API keys |
-| 6 | Models? | Anthropic Claude (default) on Bedrock; OpenAI / Google only after approval |
+| 6 | Models? | Anthropic Claude (default) on Bedrock; OpenAI / Google optional alternatives for experimentation (dev / staging, after approval) |
 | 7 | Guardrail enforcement | `guardrailConfig` on every call + IAM condition `bedrock:GuardrailIdentifier` |
 | 8 | Cross-region inference profile? | US profile where the model needs it; SCP allows the profile regions |
 | 9 | Bedrock invocation logging? | Metadata only; text logging only if Privacy approves |
@@ -142,4 +145,9 @@ provider API keys `llm/*` (no – Bedrock); one or several ECS clusters (one).
 1. 17 Nov 2026: final client deck `WBD_MMM_Architecture_6.pptx` added to `docs/requirements/` and compared
    with `WBD_MMM_Architecture_5.pptx` (slide text + images); v6 documents created (`devops_plan_6.txt`, this
    file, `aws_resource_list_6.xlsx`, `wbd_mmm_ecs_final_6.docx`, `devops_6_client_question.xlsx`, generator
-   `tools/build_v6.py`). No platform code changed; not committed.
+   `tools/build_v6.py`). No platform code changed. Pushed as `9e880f4`.
+2. 17 Nov 2026: client workbooks made v6-only from scratch, per the v6 change list (DNS/WAF + Route 53 removed, private
+   access only, Okta first then the ALB, one ECS cluster for the three inference & optimization functions, no API Gateway,
+   Bedrock with Anthropic default and OpenAI / Google optional for experimentation): WAF, Route 53 hosted zone / resolver
+   rows removed; DNS record moved to `outside_aws` (WBD DNS); "Change vs v5" columns and the `v6_changes` /
+   `removed_vs_v5` sheets removed (the v5 comparison stays in the docx, plan and this file).
