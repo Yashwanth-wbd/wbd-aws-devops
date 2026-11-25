@@ -4,7 +4,9 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 17 Nov 2026 – requirement 6 (v6 architecture: `WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`) **implemented and validated offline** (see 1.0v6). Before that: requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
+Last updated: 25 Nov 2026 – **infra phase on v7** (`WBD_MMM_Architecture_7.pptx`): WBD infra is building the
+dev account with its own IaC; we give them the resource list and verify read-only with the AWS CLI. Current
+state, decisions and open items are in **section 13** (read it first). Before that, 17 Nov 2026 – requirement 6 (v6 architecture: `WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`) **implemented and validated offline** (see 1.0v6). Before that: requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
 `devops_plan_5.txt`, `PROJECT_CONTEXT_5.md`) **implemented, validated offline and pushed to `main`**
 (v5 code commit "Implement requirement 5"; v5 docs `e722304` / `828733a`; v4 code `e2cac7b`).
 Check the latest with `git log --oneline -5`.
@@ -654,3 +656,122 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 30–33 | 13 Nov 2026 | v5 architecture `WBD_MMM_Architecture_5.pptx`: `_5` docs, complete v5 client questions, then implement the code | `_5` docs pushed (`e722304`, `828733a`); v5 implemented (section 1.0v5): Gold → RDS via the publisher (`rds-export/`, no `mmm_etl` / `rds/etl`), PublishReferenceData + SageMaker ML Lineage states, publisher sizing variables, optional CloudTrail data-events trail, dashboard rows; docs, runbooks, READMEs, `data/README.md`; offline checks clean |
 | 34 | 13 Nov 2026 | Update `Project_memory.md` and push | This file updated (sections 1, 4.3, 5, 11, 12); v5 implementation pushed to `main` |
 | 35 | 13 Nov 2026 | Verify the `_5` workbooks against the code and fix the differences | Staging / prod `cloudtrail_data_events_include_reads = true`; `data/README.md` lineage properties + `mmm_upstream_tables`, `mmm_delta_version`; `devops_plan_5.txt` publisher default 120 s / 512 MB; `build_v5.py`: alarm `lineage-record-failed-<bu>` (data platform alarms 9), training job `mmm-{e}-train-<refresh_id>`, lineage property names; `aws_resource_list_5.xlsx` + docx regenerated (client questions unchanged) |
+| 36–38 | 14–17 Nov 2026 | v6 architecture `WBD_MMM_Architecture_6.pptx`: implement, explain for infra, build guide | v6 implemented (`4319645`), architecture-explained doc (`a7f1f12`), infra build guide + slide-by-slide doc (`1f85c79`) |
+| 39 | 17 Nov 2026 | Review the v6 resource list; highlight changes | `aws_resource_list_6.xlsx` "Update (17 Nov 2026)" column + orange highlight, Release 2 labels (`44aff1a`) |
+| 40 | 18–19 Nov 2026 | RFP read, is v6 the best fit, SageMaker/S3 counts, flow explained for a newcomer, who needs SageMaker | Answers in chat only. New standing rules: **no GitHub Actions** (CodePipeline + CodeBuild), **two accounts** (dev, prod; staging in dev), infra builds everything |
+| 41 | 19 Nov 2026 | Dev resource list in waves; remove Glue; Databricks pending | Ordered dev list for infra; Glue / Athena removed after the move to Databricks |
+| 42 | 19–20 Nov 2026 | New slide 1 (Databricks Lakeflow + Delta Lake instead of Glue); SageMaker Studio features; repo structure; Databricks questions | See section 13 |
+| 43 | 20 Nov 2026 | AWS CLI login from the VDI | `aws login` returned 400 and CloudShell was blocked; access requested from infra |
+| 44 | 23 Nov 2026 | v7 (`WBD_MMM_Architecture_7.pptx`): final full resource list; SageMaker checks; CLI login works | Section 13.3 list; `aws login --profile mmm-dev` works; first read-only audit (section 13.4) |
+| 45 | 24 Nov 2026 | Re-audit; Studio space errors (DefaultSpaceSettings, StartSession) | Audit unchanged vs 23 Nov; infra fixed DefaultSpaceSettings; StartSession requested |
+| 46 | 25 Nov 2026 | Store this chat in `Project_memory.md` and push | Section 13 added; pushed |
+
+---
+
+## 13. Infra phase on v7 (19–25 Nov 2026) – current state
+
+### 13.1 Standing rules (in addition to section 3)
+
+* **We don't create AWS resources.** WBD infra builds everything with its own IaC. Our job: architecture, flow,
+  resource list, verify what infra built, CI/CD design (buildspecs, Dockerfiles), onboarding the teams.
+* **AWS CLI = read-only only** (list / describe / get). Never create, change or delete anything.
+  Login: `aws login --profile mmm-dev --region us-east-1` (uses the Okta console session from AppCenter →
+  AWS WBD IO; click the session in the browser). The session expires daily – log in again. CLI path:
+  `C:\Users\yn\tools\awscli\Amazon\AWSCLIV2` (open a new terminal if `aws` is not found). CloudShell is
+  blocked for the developer role (not needed now).
+* **CI/CD: AWS CodePipeline + CodeBuild only** (no GitHub Actions for delivery). **Two accounts:** dev and
+  prod; staging runs in the dev account.
+* Accepted substitutions (don't flag): ECS not EKS, Step Functions not MWAA, SageMaker registry, no WAF.
+* No code or docs unless asked; push only when asked.
+
+### 13.2 Architecture v7 in short
+
+* **Slide 1 (models, Release 1):** EventBridge → Step Functions → **Databricks Lakeflow jobs** (ingestion →
+  Bronze → Silver → Gold, Delta Lake on S3, data quality in the jobs) → feature export → **training Parquet
+  in S3 (immutable, Object Lock)** → **SageMaker** training → evaluation (baseline → channel lift → title
+  adjustment) → registration in the **Model Registry (one group per BU)** → human approval → approved
+  models and **response curves in S3** → predictions written back to Gold and to RDS. **Glue and Athena are
+  removed.** Slide 1 is still marked DRAFT; the Databricks details are pending a call with the WBD
+  Databricks team.
+* **Slide 2 (application):** Okta → internal ALB → ECS UI + API (FastAPI, LangGraph explanation tool) →
+  uploads to S3 → SQS → dispatcher Lambda → Step Functions → ECS inference & optimization task (model
+  summarizer, optimizer, simulation) using the approved curves → results publisher Lambda → RDS PostgreSQL
+  (plans, runs, allocations) + S3 run evidence → UI. 50–150 planners at once. **Bedrock = Release 2.**
+* **MLflow** = experiment tracking only (not deployment). There are no SageMaker endpoints; the optimizer
+  runs on ECS.
+* **Teams:** data engineers → Databricks (`aicoe-mmm-dataintegration-dbx`); data scientists → SageMaker
+  (modelling repo); frontend (`aicoe-mmm-platform-frontend`); backend (`aicoe-mmm-platform-backend`);
+  DevOps → buildspecs, Dockerfiles, pipelines, verification. The handoff between data engineers and data
+  scientists is the training-data bucket (agree the Parquet schema and its version).
+* **Repos:** recommended a 4th repo `aicoe-mmm-platform-modelling` (training/, optimizer/, common/,
+  configs/, tests/, buildspec-train.yml, buildspec-optimizer.yml; CPU images, no CUDA; optimizer = ECS
+  task, not a SageMaker endpoint). Fallback: a `modelling/` folder in the backend repo with CODEOWNERS
+  and path-filtered pipelines.
+* **Instances:** CPU only. Notebooks ml.t3.medium by default, ml.m5.xlarge / 2xlarge for modelling,
+  ml.r5 if memory runs out; training ml.m5.2xlarge, processing ml.m5.xlarge. "Serverless" isn't
+  available for Studio notebooks or jobs here (MLflow App is serverless).
+
+### 13.3 Resource list sent to infra (dev)
+
+* **Wave 1 (now):** KMS; IAM / Identity Center (DataEngineer, DataScientist, DevOps and developer access;
+  roles for SageMaker, Studio, Step Functions, Scheduler); S3 training-data (Object Lock), models, logs;
+  SSM `/mmm/dev/images/sagemaker-training`; SageMaker (Studio VPC-only, user profiles, MLflow App,
+  3 registry groups `mmm-dev-usnetworks` / `-streaming` / `-theatrical`, execution role, idle shutdown
+  60 min); ECR `mmm/sagemaker-training`, `mmm/optimizer`; Step Functions refresh + drift; EventBridge +
+  Scheduler (schedules off at first, on-demand rule, model-approved rule); SNS alerts; CloudWatch logs,
+  alarms and training dashboard; CodePipeline + CodeBuild for the modelling repo (GitHub
+  `wcet-enterprise-tech`); security groups; VPC endpoints; quotas.
+* **Wave 2 (after the Databricks call):** lakehouse / landing buckets, Unity Catalog role, Databricks
+  service principal secret + host / job ID parameters, Databricks job trigger Lambda, Databricks steps
+  in model refresh, Databricks / data quality alarms, network to Databricks.
+* **Wave 3 (application):** RDS + Proxy, ECS cluster + services + tasks, internal ALB + ACM + DNS + Okta app,
+  SQS + DLQ, dispatcher and publisher Lambdas, optimization workflow, uploads / results buckets, ECR ui /
+  api, app pipelines, alarms, dashboards, Backup, security groups, Fargate / Lambda quotas.
+* Then networking, the account baseline (CloudTrail, GuardDuty, Security Hub, Config, flow logs, Budgets)
+  and Release 2 (Bedrock).
+
+### 13.4 What infra has built (read-only audit, 24 Nov 2026)
+
+Account `aws-aicoe-mmmplatform-dev` (us-east-1), VPC `vpc-00bec150f210445c5`, resource prefix
+`mmmplatform-use1-vpc1-`.
+
+| Item | Status |
+|---|---|
+| SageMaker domain `d-nsrrlr98oqfb` | InService, VPC only, SSO sign-in, 11 user profiles, default space settings fixed by infra on 24 Nov |
+| MLflow App `mmmplatform-use1-vpc1-dev-mmm-platform` | Created (MLflow 3.16), artifacts bucket `…-dev-mlflow-artifacts` |
+| Model Registry | 3 groups, Completed, 0 versions (expected) |
+| SageMaker roles | `…-dev-sagemaker-developer-role` (default execution role), `…-dev-sagemaker-shared-role`; both have AmazonSageMakerFullAccess + a Bedrock policy (ask to narrow) |
+| S3 | training-data, models, logs, mlflow-artifacts (+ landing, lakehouse, uploads, results, approved-worm, exports, glue-assets); KMS + versioning on data buckets; **no Object Lock on training-data** |
+| KMS | One data key `…-dev-key-alias` for the buckets (no per-BU keys); domain uses default encryption |
+| Instance types | t3.medium, m5.large / xlarge / 2xlarge visible; GPUs hidden; r5.xlarge / r5.2xlarge / m5.4xlarge hidden |
+| Quotas | Training ml.m5.2xlarge 30; processing ml.m5.xlarge 16 |
+| Network | S3 gateway endpoint only; NAT gateways give AWS + internet access (pip works); SGs `…-dev-sagemaker-rules`, `…-nonprod-vpc-endpoints` |
+| CodePipeline | `github_connection` exists but **PENDING** (GitHub org admin must approve) |
+| Missing | SSM parameter, ECR repos, Step Functions, Scheduler / MMM rules, SNS topic, MMM alarms / dashboards, CodePipeline / CodeBuild projects, Step Functions / Scheduler roles |
+
+### 13.5 Open items (chase with infra / WBD)
+
+1. Enable Object Lock on `…-dev-training-data` (GOVERNANCE in dev).
+2. Idle shutdown 60 min for JupyterLab / Code Editor.
+3. `sagemaker:StartSession` on `space/d-nsrrlr98oqfb/*` for the SageMaker roles (remote access from
+   Cursor / VS Code), plus confirmation that remote IDE access is allowed.
+4. Create the missing Wave 1 items (section 13.4 "Missing").
+5. GitHub org admin approves the AWS Connector app (`github_connection`).
+6. Narrow the SageMaker role permissions; KMS per-BU decision; remove `glue-assets`; VPC endpoints
+   vs NAT; confirm the Okta groups assigned to the domain.
+7. Create the modelling repo `aicoe-mmm-platform-modelling` (or use the backend `modelling/` fallback).
+8. Databricks call: workspace / account, Unity Catalog storage credential + external locations, source
+   tables, service principal for Step Functions, network to the workspace API, deployment (Asset
+   Bundles), contact and timeline.
+9. Clarify: who writes the training Parquet (Databricks job); whether the R1 LangGraph explanation needs an
+   AI model (Bedrock is Release 2); sign-off on slide 1 (DRAFT).
+
+### 13.6 Next steps (DevOps)
+
+1. Re-run the read-only audit when infra reports progress (same commands as 24 Nov).
+2. Test Studio end to end with a data scientist: space → `pip install` → S3 → MLflow run → small training
+   job → registered version.
+3. Studio → GitHub for users (personal token or SSH, org SSO authorization) – write a short how-to.
+4. Training image Dockerfile + `buildspec-train.yml` with the data scientists once ECR and CodeBuild exist.
+5. Update `aws_resource_list` (xlsx) to v7 if asked (CodePipeline, two accounts, Glue / Athena removed,
+   Databricks Lakeflow).
