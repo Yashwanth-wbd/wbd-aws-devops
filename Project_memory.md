@@ -4,7 +4,8 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 27 Nov 2026 – **architecture is now v8** (`WBD_MMM_Architecture_8.pptx`, only slide 1 changed:
+Last updated: 27 Nov 2026 (late) – the **dev service list for infra** is `docs/requirements/updated_service list.docx`
+(questionnaire updated to v8 + section 13 with 24 services and a blockers list; see **14.7**). Before that, 27 Nov 2026 – **architecture is now v8** (`WBD_MMM_Architecture_8.pptx`, only slide 1 changed:
 SageMaker reads Databricks Gold Iceberg tables directly; no Parquet export, no refresh Step Functions /
 EventBridge). The updated slide 1 list for infra (Databricks excluded), the 26 Nov audit and the gaps are in
 **section 14** (read it first; section 13 is the v7 background). AWS CLI now via **gimme-aws-creds**, profile
@@ -671,6 +672,7 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 46 | 25 Nov 2026 | Store this chat in `Project_memory.md` and push | Section 13 added; pushed |
 | 47 | 26 Nov 2026 | Python on PATH; AWS CLI via gimme-aws-creds; Unified Studio check; v8 slide 1 review; read-only audit; updated list for infra | Python 3.12 moved ahead of the Store alias in user PATH; Unified Studio **not enabled** (no DataZone domains); section 14 |
 | 48 | 27 Nov 2026 | Does v8 fit the project / gaps; confirm the list is slide 1 only; save to memory | Section 14.5 gaps; list confirmed ready to share (slide 1 only, Databricks excluded) |
+| 49 | 27 Nov 2026 | Slide 2 advice; explain slide 1 resources; build and validate the full Dev service list document | `docs/requirements/updated_service list.docx` (from `Questionnaire MMM AWS Infra.docx`); new read-only findings and blockers in 14.7 |
 
 ---
 
@@ -879,3 +881,42 @@ Account `aws-aicoe-mmmplatform-dev` (us-east-1), VPC `vpc-00bec150f210445c5`, re
    Bedrock = R2) – same method: read-only audit → create / change / remove.
 3. Databricks list once the ADD arrives (expected after Thanksgiving).
 4. Re-audit after infra changes (gimme login first).
+
+### 14.7 Full Dev service list document (27 Nov 2026) – supersedes 14.4
+
+* **File:** `docs/requirements/updated_service list.docx`, built from the user's `Questionnaire MMM AWS Infra.docx`
+  (Downloads). Sections 1–12 answered with the real Dev values; **section 13** = service list, Dev only, both slides,
+  Databricks / Iceberg excluded. Each line tagged Existing / Change / Create / Remove / Confirm / Optional.
+  Built with python-docx (installed with `pip install --user python-docx`) from a temp script; the user fills
+  `<wbd-domain>` and the SNS contacts before sending.
+* **Section 13 outline:** 13.0 blockers; 13.1 foundation (1 KMS, 2 IAM / Identity Center, 3 VPC, 4 security groups,
+  5 S3, 6 Secrets Manager, 7 Parameter Store); 13.2 modelling (8 SageMaker, 9 ECR, 10 results publisher Lambda);
+  13.3 application (11 ECS, 12 ALB / ACM / DNS, 13 Okta, 14 RDS (+ Proxy, developer DB access), 15 SQS, 16 run
+  dispatcher Lambda + optimization Step Functions); 13.4 operations (17 SNS, 18 CloudWatch / X-Ray, 19 CodePipeline /
+  CodeBuild, 20 WBD central security, 21 Budgets / tags, 22 quotas, 23 Backup (optional), 24 Bedrock (only if the
+  LangGraph explanation tool is Release 1)); 13.5 on hold / removed / Release 2.
+* **New read-only findings (27 Nov):**
+  * **`sagemaker:CreateTrainingJob` explicitly denied** for both SageMaker roles (deny from outside the account,
+    likely an org SCP; no matched statement). Processing jobs, pipelines, model packages allowed; endpoints denied
+    (fine – no endpoints).
+  * `bedrock:InvokeModel` explicitly denied (SCP) although the backend task role and developer role have Bedrock.
+  * CodeBuild backend / frontend: **privileged mode off** (Docker builds fail). Pipelines track branch **dev**;
+    both failed 25 Nov – **no `buildspec.yml` in the repos** (DevOps / app teams to add, plus `imagedefinitions.json`).
+  * ECR repos all empty → ECS services 0 / 2 running (`CannotPullContainerError`). ECS Exec enabled on backend;
+    circuit breaker off; Container Insights off; autoscaling 2–4.
+  * ALBs: HTTP 80 only, target groups `/health` and `/api/health`, SGs allow 80 / 443 from 10.0.0.0/8; no ACM
+    certificate; no Route 53 zones.
+  * Network: VPC `10.52.0.0/16` + `10.61.252.0/24`; app-private /20, db-private /27, public /27 in 1a / 1b; WBD
+    connectivity through **virtual private gateway `vgw-0e3a7b105e4d6d3c1`** (not Transit Gateway); flow logs on.
+  * Backend task role: broad template (secrets, SSM, SQS, Bedrock, `sagemaker:*`, DynamoDB, Textract, SES …) but
+    **no S3 and no Step Functions** – change to least privilege.
+  * Developer role `aws-aicoe-mmmplatform-dev-developer` = ReadOnlyAccess + Bedrock / Textract / Comprehend; cannot
+    start pipelines, ECS Exec, read secrets, send to SQS.
+  * KMS data key policy names only CloudWatch Logs, log delivery and Auto Scaling – add CloudWatch / Budgets (SNS),
+    SQS, RDS and the new roles.
+  * No RDS, SQS, MMM Lambda, Step Functions, Backup plan, Budgets; GuardDuty detector exists; Fargate vCPU 4000,
+    Lambda concurrency 1000; log retention 90 days.
+* **Decisions in the document:** logs bucket stays SSE-S3 (ALB access logs don't support SSE-KMS) + versioning;
+  dev-training-data used now for interim sample datasets (Databricks handoff / Object Lock on hold); RDS Proxy
+  recommended; developer DB access via SSM bastion or VPN range (infra chooses); confirm one vs two ECS clusters /
+  ALBs, Okta at the ALB vs in the app, file upload via API vs presigned URL, certificate source.
