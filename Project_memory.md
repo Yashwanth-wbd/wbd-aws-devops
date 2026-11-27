@@ -4,9 +4,13 @@
 closes; everything needed to continue (what is built, decisions, how we work, chat history, lessons
 learned, next steps) is in this file.
 
-Last updated: 25 Nov 2026 – **infra phase on v7** (`WBD_MMM_Architecture_7.pptx`): WBD infra is building the
+Last updated: 27 Nov 2026 – **architecture is now v8** (`WBD_MMM_Architecture_8.pptx`, only slide 1 changed:
+SageMaker reads Databricks Gold Iceberg tables directly; no Parquet export, no refresh Step Functions /
+EventBridge). The updated slide 1 list for infra (Databricks excluded), the 26 Nov audit and the gaps are in
+**section 14** (read it first; section 13 is the v7 background). AWS CLI now via **gimme-aws-creds**, profile
+`844560740667`. Before that, 25 Nov 2026 – **infra phase on v7** (`WBD_MMM_Architecture_7.pptx`): WBD infra is building the
 dev account with its own IaC; we give them the resource list and verify read-only with the AWS CLI. Current
-state, decisions and open items are in **section 13** (read it first). Before that, 17 Nov 2026 – requirement 6 (v6 architecture: `WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`) **implemented and validated offline** (see 1.0v6). Before that: requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
+state, decisions and open items are in **section 13**. Before that, 17 Nov 2026 – requirement 6 (v6 architecture: `WBD_MMM_Architecture_6.pptx`, `devops_plan_6.txt`, `PROJECT_CONTEXT_6.md`) **implemented and validated offline** (see 1.0v6). Before that: requirement 5 (v5 architecture: `WBD_MMM_Architecture_5.pptx`,
 `devops_plan_5.txt`, `PROJECT_CONTEXT_5.md`) **implemented, validated offline and pushed to `main`**
 (v5 code commit "Implement requirement 5"; v5 docs `e722304` / `828733a`; v4 code `e2cac7b`).
 Check the latest with `git log --oneline -5`.
@@ -665,6 +669,8 @@ Note: team reviewers need an **organisation** repo; a personal repo can only use
 | 44 | 23 Nov 2026 | v7 (`WBD_MMM_Architecture_7.pptx`): final full resource list; SageMaker checks; CLI login works | Section 13.3 list; `aws login --profile mmm-dev` works; first read-only audit (section 13.4) |
 | 45 | 24 Nov 2026 | Re-audit; Studio space errors (DefaultSpaceSettings, StartSession) | Audit unchanged vs 23 Nov; infra fixed DefaultSpaceSettings; StartSession requested |
 | 46 | 25 Nov 2026 | Store this chat in `Project_memory.md` and push | Section 13 added; pushed |
+| 47 | 26 Nov 2026 | Python on PATH; AWS CLI via gimme-aws-creds; Unified Studio check; v8 slide 1 review; read-only audit; updated list for infra | Python 3.12 moved ahead of the Store alias in user PATH; Unified Studio **not enabled** (no DataZone domains); section 14 |
+| 48 | 27 Nov 2026 | Does v8 fit the project / gaps; confirm the list is slide 1 only; save to memory | Section 14.5 gaps; list confirmed ready to share (slide 1 only, Databricks excluded) |
 
 ---
 
@@ -775,3 +781,101 @@ Account `aws-aicoe-mmmplatform-dev` (us-east-1), VPC `vpc-00bec150f210445c5`, re
 4. Training image Dockerfile + `buildspec-train.yml` with the data scientists once ECR and CodeBuild exist.
 5. Update `aws_resource_list` (xlsx) to v7 if asked (CodePipeline, two accounts, Glue / Athena removed,
    Databricks Lakeflow).
+
+---
+
+## 14. Architecture v8 (26–27 Nov 2026) – current state
+
+### 14.1 Access and tools
+
+* **AWS CLI:** `aws login` is replaced by **gimme-aws-creds** (run by the user in their terminal). Profile
+  `844560740667`, role `aws-aicoe-mmmplatform-dev-developer`. The session lasts about **1 hour**; on
+  `ExpiredToken` ask the user to run gimme again. Still **read-only only**.
+* **Python:** `C:\Users\yn\tools\python` (3.12.10, pip 26.3) moved to the front of the user PATH (ahead of
+  the WindowsApps Store alias). Terminals opened before the change need a Cursor restart or a PATH refresh.
+* **SageMaker Unified Studio:** not enabled (`aws datazone list-domains` is empty). We use standard
+  SageMaker Studio, domain `d-nsrrlr98oqfb`.
+
+### 14.2 What v8 changed (slide 1 only; slide 2 unchanged)
+
+* Databricks: consume approved gold tables from the source catalog → Bronze → Silver → Gold (per-BU
+  modelling tables) in a new catalog. **Gold is written as Iceberg (UniForm)**, stored in S3 and exposed
+  through the **Iceberg REST catalog** (Unity Catalog).
+* **SageMaker reads Gold directly (no copy):** multi-stage training (adstock, saturation) → evaluation
+  (baseline → channel lift → title adjustment) → registration. SageMaker in the VPC (VPC ENI).
+* Outputs: **results publisher Lambda → RDS PostgreSQL** (plans, runs, allocations, predictions, lift and
+  evaluation results); **SageMaker Registry + S3** (approved models, response curves, drift monitoring).
+* Control plane / bottom strip: lineage and observability, code repo, RBAC SSO/MFA, Bedrock, guardrails;
+  IAM, IAM Identity Center, KMS, Secrets Manager, SGs, VPC routes; CloudWatch, CloudTrail, Terraform, CI/CD.
+* **Removed vs v7:** training Parquet export and the training-data handoff (Object Lock), refresh Step
+  Functions and EventBridge on slide 1, predictions written back to Gold. Step Functions remains only on
+  slide 2 (app async runs). EventBridge appears on neither slide.
+* **Iceberg** = open table format (files + metadata in S3) readable by many engines. Owned by the
+  Databricks side; AWS infra only provides the bucket, IAM / KMS access, the catalog secret and the network
+  path. Slide 1 is a low-resolution Zoom screenshot – ask for the original.
+
+### 14.3 Read-only audit (26 Nov 2026)
+
+| Item | Status |
+|---|---|
+| KMS | `…-dev-key-alias` (data), encipher, tfstate; SageMaker role can decrypt; **domain KmsKeyId null** |
+| S3 | approved-worm, **artifacts (new, 25 Nov)**, exports, glue-assets, lakehouse (empty), landing, mlflow-artifacts, models, results, training-data, uploads (all KMS data key + versioning); logs bucket **no KMS key, versioning off**; **no Object Lock anywhere** |
+| SageMaker role S3 access (IAM simulation) | mlflow-artifacts allowed; **models, training-data, lakehouse denied**; `secretsmanager:GetSecretValue` denied; **`sagemaker:StartSession` now allowed** |
+| SageMaker domain | InService, VPC only, 11 profiles, 4 spaces; **idle shutdown not set; DefaultSpaceSettings null** |
+| MLflow / Registry | MLflow App Created (3.16); 3 groups, 0 versions |
+| ECR | renamed `dev/mmmplatform-sagemaker-training`, `dev/mmmplatform-optimizer`, `-backend`, `-frontend` (scan on push, AES256) |
+| CI/CD | backend + frontend CodePipeline and CodeBuild exist; **`github_connection` AVAILABLE**; no modelling pipeline |
+| Secrets Manager | `/mmmplatform-use1-vpc1/dev/mmmplatform-db-creds`, app / monitor secrets, Slack webhooks, bastion keys |
+| Missing | SSM parameter, Step Functions, Scheduler, MMM EventBridge rules, MMM SNS topic, MMM Lambda, RDS, MMM alarms, dashboards |
+| Network | S3 gateway endpoint only; 2 NAT gateways; SageMaker SG egress open |
+| CloudTrail | WBD central org trails (read + write) |
+| Quotas | training ml.m5.2xlarge 30, processing ml.m5.xlarge 16 |
+
+### 14.4 Updated slide 1 list for infra (Databricks excluded; confirmed ready to share 27 Nov)
+
+* **Done:** KMS data key; S3 models, logs, mlflow-artifacts, artifacts; SageMaker domain, profiles,
+  MLflow, 3 registry groups, CPU-only types; ECR training + optimizer; backend / frontend pipelines and
+  GitHub connection (slide 2, listed because they exist); quotas; CloudTrail; Secrets Manager.
+* **Pending (create / change):**
+  1. IAM: SageMaker developer + shared roles read/write on `…-dev-models`.
+  2. SageMaker: idle shutdown 60 min; DefaultSpaceSettings with the execution role.
+  3. KMS: set the domain KMS key to `alias/mmmplatform-use1-vpc1-dev-key-alias`.
+  4. SSM `/mmm/dev/images/sagemaker-training`.
+  5. CodePipeline + CodeBuild (+ role) for the modelling repo → training and optimizer images to ECR.
+  6. Results publisher Lambda + role + SG (RDS 5432), in the VPC (shared with slide 2; RDS in the slide 2 list).
+  7. CloudWatch: Lambda log group; alarms for training job failed, results publish failed, model drift
+     (metric to be confirmed); one MMM dashboard.
+  8. SNS: one MMM alerts topic (alarm target) + email contacts (user to fill).
+  9. S3: remove glue-assets; confirm logs bucket KMS / versioning; confirm approved-worm Object Lock.
+* **Removed from the Wave 1 list:** refresh / drift Step Functions, EventBridge + Scheduler, refresh-failed /
+  overdue alarms, per-BU KMS keys, Step Functions / Scheduler roles (can return if AWS-side
+  orchestration is chosen).
+* **Optional:** interface VPC endpoints (NAT works).
+* **On hold (Databricks):** SageMaker access to lakehouse / Gold Iceberg; Databricks catalog credential
+  secret; network to Databricks; training-data bucket + Object Lock; retraining trigger; DataEngineer AWS
+  access.
+* Add a header line when sharing: "Based on Architecture v8, slide 1. Databricks items and slide 2 services
+  follow separately."
+
+### 14.5 Gaps in v8 (raise with the architect)
+
+1. No retraining trigger shown although "auto / triggered refresh" is promised (Databricks job, SageMaker
+   Pipelines or Step Functions?).
+2. Reproducibility: Gold keeps changing – each training run must log the **Iceberg snapshot ID** (e.g. in
+   MLflow) to replace v7's immutable Parquet.
+3. Drift monitoring: where it runs, how often, who is alerted.
+4. Model approval and promotion: who approves, how the optimizer picks up the approved model / curves,
+   dev → prod across the two accounts.
+5. SageMaker → Databricks: catalog credentials, NAT vs PrivateLink, lakehouse KMS / bucket access,
+   same or different AWS account (Databricks ADD).
+6. Predictions no longer written back to Gold – confirm nobody in Databricks / BI needs them.
+7. Smaller: MLflow not drawn; publisher Lambda trigger not shown; RDS shown in "Outside VPC" box;
+   lineage owner unclear; slide 1 is a low-resolution screenshot.
+
+### 14.6 Next steps
+
+1. User shares the 14.4 list with infra (fill SNS contacts).
+2. Slide 2 list next (RDS, ECS, SQS, dispatcher Lambda, app Step Functions, ALB, Okta / Identity Center,
+   Bedrock = R2) – same method: read-only audit → create / change / remove.
+3. Databricks list once the ADD arrives (expected after Thanksgiving).
+4. Re-audit after infra changes (gimme login first).
